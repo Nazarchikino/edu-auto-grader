@@ -1,6 +1,8 @@
 {
+  "4": "main.tsx",
   "7": "client.ts",
+  "14": "env.py",
   "15": "course.py",
   "20": "tailwind.config.js",
-  "22": "get_db"
+  "22": "run_seed"
 }

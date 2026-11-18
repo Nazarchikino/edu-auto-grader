@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "TASKS.md": {
-    "mtime": 1795031308.4751728,
-    "seen": 1795031311.3131397,
-    "ast_hash": "8f5c35422c8001943486b55fe82691d4",
+    "mtime": 1795032177.1474245,
+    "seen": 1795032187.9174857,
+    "ast_hash": "f54bb9c88570719476a7a2f6b41e4737",
     "semantic_hash": ""
   },
   "frontend/index.html": {
@@ -207,6 +207,24 @@
     "mtime": 1795031222.4367352,
     "seen": 1795031311.313084,
     "ast_hash": "6906e7ef2f98a722170b962b7a116d4a",
+    "semantic_hash": ""
+  },
+  "backend/alembic/env.py": {
+    "mtime": 1795032100.4919615,
+    "seen": 1795032187.9174209,
+    "ast_hash": "98204fdac69321bed08c9ab05833215d",
+    "semantic_hash": ""
+  },
+  "backend/alembic/versions/0001_initial_schema.py": {
+    "mtime": 1795032102.2732058,
+    "seen": 1795032187.917426,
+    "ast_hash": "cc4ab49b3e84d79f8fd0925fc558ccc5",
+    "semantic_hash": ""
+  },
+  "backend/app/seed.py": {
+    "mtime": 1795032104.9925325,
+    "seen": 1795032187.9174564,
+    "ast_hash": "262cade7452260af683df3eb7e5c7839",
     "semantic_hash": ""
   },
   "frontend/package-lock.json": {
