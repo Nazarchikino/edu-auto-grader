@@ -36,10 +36,10 @@
     "semantic_hash": "cd2ce7524990d3832c0c7c1782ab2cc5"
   },
   "backend/app/graders/__init__.py": {
-    "mtime": 1795026703.3664749,
-    "seen": 1795028797.238953,
-    "ast_hash": "b0bb26fab957fee5f9a91c16a611e02b",
-    "semantic_hash": "b0bb26fab957fee5f9a91c16a611e02b"
+    "mtime": 1795035682.9118485,
+    "seen": 1795035773.662795,
+    "ast_hash": "a81d4fcc5a9146d807a5294f21465943",
+    "semantic_hash": ""
   },
   "backend/app/main.py": {
     "mtime": 1795034380.427271,
@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "TASKS.md": {
-    "mtime": 1795035260.7180264,
-    "seen": 1795035264.6447797,
-    "ast_hash": "61405a8396fc74bcfe21427170f07cad",
+    "mtime": 1795035768.941141,
+    "seen": 1795035773.6628504,
+    "ast_hash": "932a4ef0b8a51486f07561b42792dcc3",
     "semantic_hash": ""
   },
   "frontend/index.html": {
@@ -303,6 +303,24 @@
     "mtime": 1795035233.9532976,
     "seen": 1795035264.6447487,
     "ast_hash": "5494da2bd8d5c7ddb4c0cda29df33f8e",
+    "semantic_hash": ""
+  },
+  "backend/app/graders/base.py": {
+    "mtime": 1795035715.1650949,
+    "seen": 1795035773.6627972,
+    "ast_hash": "2ca7cbe31f592b38e733e772069fc6f2",
+    "semantic_hash": ""
+  },
+  "backend/app/graders/factory.py": {
+    "mtime": 1795035632.2335813,
+    "seen": 1795035773.6627986,
+    "ast_hash": "667452a76285fc366b3da9d0a775d6f6",
+    "semantic_hash": ""
+  },
+  "backend/app/graders/metadata.py": {
+    "mtime": 1795035720.7804623,
+    "seen": 1795035773.6628,
+    "ast_hash": "7c828c6c688f1a07118d9491d0ade43d",
     "semantic_hash": ""
   },
   "frontend/package-lock.json": {

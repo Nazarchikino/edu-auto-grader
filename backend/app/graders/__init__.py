@@ -1,4 +1,5 @@
 from app.graders.base import BaseGrader
+from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
 from app.graders.metadata import (
     CORE_XML_ARCHIVE_PATH,
@@ -19,6 +20,7 @@ from app.graders.metadata import (
 __all__ = [
     "BaseGrader",
     "CORE_XML_ARCHIVE_PATH",
+    "DocxGrader",
     "GraderFactory",
     "OPENXML_EXTENSIONS",
     "SubmissionRecordProtocol",

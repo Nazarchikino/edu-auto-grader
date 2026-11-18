@@ -6,7 +6,6 @@
   "9": "vite-env.d.ts",
   "10": "tailwind.config.js",
   "12": "v1/__init__.py",
-  "13": "core/__init__.py",
   "18": "services/__init__.py",
   "19": "tests/__init__.py",
   "21": "edu-auto-grader-backend"
