@@ -54,10 +54,10 @@
     "semantic_hash": ""
   },
   "backend/app/schemas/__init__.py": {
-    "mtime": 1795026702.2193758,
-    "seen": 1795028797.2389567,
-    "ast_hash": "337eb39c74620edb09ecea1f30c2fb92",
-    "semantic_hash": "337eb39c74620edb09ecea1f30c2fb92"
+    "mtime": 1795032526.5479965,
+    "seen": 1795032654.147729,
+    "ast_hash": "2b904c60cfb113cc2bc64b20b6840e07",
+    "semantic_hash": ""
   },
   "backend/app/services/__init__.py": {
     "mtime": 1795026704.8189304,
@@ -225,6 +225,30 @@
     "mtime": 1795032104.9925325,
     "seen": 1795032187.9174564,
     "ast_hash": "262cade7452260af683df3eb7e5c7839",
+    "semantic_hash": ""
+  },
+  "backend/app/schemas/auth.py": {
+    "mtime": 1795032519.8360007,
+    "seen": 1795032654.1477313,
+    "ast_hash": "f4339320dd81d2c321fbc1e890ada8c1",
+    "semantic_hash": ""
+  },
+  "backend/app/schemas/course.py": {
+    "mtime": 1795032521.5296211,
+    "seen": 1795032654.1477327,
+    "ast_hash": "d9f3eb766f5662303a1e6b4a12642722",
+    "semantic_hash": ""
+  },
+  "backend/app/schemas/grading.py": {
+    "mtime": 1795032516.8400085,
+    "seen": 1795032654.147734,
+    "ast_hash": "0161cda75d165e249470e57782fc4ae2",
+    "semantic_hash": ""
+  },
+  "backend/app/schemas/submission.py": {
+    "mtime": 1795032523.7842705,
+    "seen": 1795032654.1477354,
+    "ast_hash": "bbec4de52fe681e58bc00a6b6efcd52d",
     "semantic_hash": ""
   },
   "frontend/package-lock.json": {
