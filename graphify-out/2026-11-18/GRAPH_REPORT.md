@@ -1,17 +1,17 @@
 # Graph Report - edu-auto-grader  (2026-11-18)
 
 ## Corpus Check
-- 40 files · ~11,291 words
+- 44 files · ~12,123 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 7 file(s) not represented in the graph (top: (none) 4, .ini 1, .mako 1)
 
 ## Summary
-- 432 nodes · 744 edges · 30 communities (17 shown, 13 thin omitted)
-- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 41 edges (avg confidence: 0.95)
+- 482 nodes · 887 edges · 29 communities (18 shown, 11 thin omitted)
+- Extraction: 95% EXTRACTED · 5% INFERRED · 0% AMBIGUOUS · INFERRED: 41 edges (avg confidence: 0.95)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `6df36732`
+- Built from commit: `5192415c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -21,11 +21,12 @@
 - compilerOptions
 - main.py
 - main.tsx
-- DomainError
+- v1/auth.py
 - schemas/__init__.py
 - client.ts
 - scripts
 - vite-env.d.ts
+- security.py
 - env.py
 - course.py
 - auth.py
@@ -37,19 +38,18 @@
 - vite
 - course.ts
 - grading.ts
-- get_db
 
 ## God Nodes (most connected - your core abstractions)
-1. `compilerOptions` - 19 edges
-2. `PracticalFormat` - 18 edges
-3. `Base` - 15 edges
-4. `CourseSlug` - 14 edges
-5. `User` - 14 edges
-6. `build_seed_bundle()` - 14 edges
-7. `Course` - 12 edges
-8. `UserRole` - 12 edges
-9. `seed_database()` - 11 edges
-10. `Module` - 10 edges
+1. `User` - 20 edges
+2. `compilerOptions` - 19 edges
+3. `PracticalFormat` - 18 edges
+4. `DomainError` - 17 edges
+5. `Base` - 15 edges
+6. `CourseSlug` - 14 edges
+7. `UserRole` - 14 edges
+8. `build_seed_bundle()` - 14 edges
+9. `get_current_user()` - 12 edges
+10. `Course` - 12 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `CourseCreate` --uses--> `CourseSlug`  [INFERRED]
@@ -58,15 +58,15 @@
   backend/app/schemas/course.py → backend/app/models/course.py
 - `SubmissionRead` --uses--> `CourseSlug`  [INFERRED]
   backend/app/schemas/submission.py → backend/app/models/course.py
-- `_build_access_course()` --uses--> `PracticalFormat`  [INFERRED]
-  backend/app/seed.py → backend/app/models/course.py
-- `_build_excel_course()` --uses--> `PracticalFormat`  [INFERRED]
-  backend/app/seed.py → backend/app/models/course.py
+- `TokenPayload` --uses--> `UserRole`  [INFERRED]
+  backend/app/schemas/auth.py → backend/app/models/user.py
+- `UserBase` --uses--> `UserRole`  [INFERRED]
+  backend/app/schemas/auth.py → backend/app/models/user.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (30 total, 13 thin omitted)
+## Communities (29 total, 11 thin omitted)
 
 ### Community 0 - "package.json"
 Cohesion: 0.17
@@ -84,9 +84,9 @@ Nodes (20): compilerOptions, allowImportingTsExtensions, isolatedModules, jsx, l
 Cohesion: 0.32
 Nodes (5): react@^18.3.1, App(), queryClient, rootElement, react
 
-### Community 5 - "DomainError"
-Cohesion: 0.12
-Nodes (6): DomainError, GradingError, InvalidFileFormatError, PlagiarismDetectedError, QuizNotPassedError, create_application()
+### Community 5 - "v1/auth.py"
+Cohesion: 0.05
+Nodes (15): get_current_user(), require_role(), role_checker(), login(), read_current_user(), refresh_tokens(), serialize_user(), get_db() (+7 more)
 
 ### Community 6 - "schemas/__init__.py"
 Cohesion: 0.05
@@ -100,6 +100,10 @@ Nodes (3): axios@^1.7.7, apiClient, axios
 Cohesion: 0.33
 Nodes (6): scripts, build, dev, lint, preview, typecheck
 
+### Community 11 - "security.py"
+Cohesion: 0.17
+Nodes (7): create_access_token(), create_refresh_token(), create_token_pair(), _encode_jwt_token(), hash_password(), verify_password(), TokenResponse
+
 ### Community 14 - "env.py"
 Cohesion: 0.09
 Nodes (6): do_run_migrations(), run_async_migrations(), run_migrations_offline(), run_migrations_online(), get_settings(), Settings
@@ -110,7 +114,7 @@ Nodes (25): Base, Course, CourseSlug, _enum_values(), Module, Practical, QuizQue
 
 ### Community 16 - "auth.py"
 Cohesion: 0.11
-Nodes (12): AcademicGroupBase, AcademicGroupCreate, AcademicGroupRead, ErrorResponse, LoginRequest, RefreshTokenRequest, TokenPayload, TokenResponse (+4 more)
+Nodes (11): AcademicGroupBase, AcademicGroupCreate, AcademicGroupRead, ErrorResponse, LoginRequest, RefreshTokenRequest, TokenPayload, UserBase (+3 more)
 
 ### Community 23 - "devDependencies"
 Cohesion: 0.13
@@ -138,23 +142,23 @@ Nodes (10): SubmissionRead, CourseSlug, CriterionResult, ExtractedMetadata, GRAD
 
 ## Knowledge Gaps
 - **1 isolated node(s):** `edu-auto-grader-backend`
-  These have ≤1 connection - possible missing edges. (Counts symbols only; 215 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **13 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges. (Counts symbols only; 239 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **11 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `PracticalFormat` connect `schemas/__init__.py` to `course.py`?**
-  _High betweenness centrality (0.027) - this node is a cross-community bridge._
-- **Are the 11 inferred relationships involving `PracticalFormat` (e.g. with `ModuleSummaryRead` and `PracticalCreate`) actually correct?**
-  _`PracticalFormat` has 11 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `User` connect `course.py` to `v1/auth.py`?**
+  _High betweenness centrality (0.029) - this node is a cross-community bridge._
+- **Are the 6 inferred relationships involving `User` (e.g. with `_build_access_course()` and `_build_excel_course()`) actually correct?**
+  _`User` has 6 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `edu-auto-grader-backend` to the rest of the system?**
   _1 weakly-connected nodes found - possible missing edges._
 - **Should `postgres` be split into smaller, more focused modules?**
   _Cohesion score 0.09523809523809523 - nodes in this community are weakly interconnected._
-- **Why does `UserRole` connect `course.py` to `auth.py`?**
-  _High betweenness centrality (0.020) - this node is a cross-community bridge._
+- **Why does `DomainError` connect `v1/auth.py` to `security.py`, `course.py`?**
+  _High betweenness centrality (0.027) - this node is a cross-community bridge._
+- **Are the 11 inferred relationships involving `PracticalFormat` (e.g. with `ModuleSummaryRead` and `PracticalCreate`) actually correct?**
+  _`PracticalFormat` has 11 INFERRED edges - model-reasoned connections that need verification._
 - **Should `compilerOptions` be split into smaller, more focused modules?**
   _Cohesion score 0.09523809523809523 - nodes in this community are weakly interconnected._
-- **Should `DomainError` be split into smaller, more focused modules?**
-  _Cohesion score 0.11666666666666667 - nodes in this community are weakly interconnected._
