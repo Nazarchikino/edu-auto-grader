@@ -15,6 +15,8 @@ import { Navbar } from "./components/layout/Navbar";
 import { RoleGuard } from "./components/layout/RoleGuard";
 import { Sidebar } from "./components/layout/Sidebar";
 import { LoginPage } from "./pages/LoginPage";
+import { CoursesPage } from "./pages/student/CoursesPage";
+import { ModuleViewPage } from "./pages/student/ModuleViewPage";
 
 function ProtectedAppLayout(): ReactElement {
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
@@ -86,25 +88,10 @@ export function App(): ReactElement {
               <Route index element={<RoleHomeRedirect />} />
 
               <Route element={<RoleGuard allowedRoles={["student"]} />}>
-                <Route
-                  path="/student/courses"
-                  element={
-                    <WorkspaceSectionPlaceholder
-                      title="Навчальні курси (Word, Excel, Access, HTML)"
-                      subtitle="Перелік доступних дисциплін, модулів, лекцій та індивідуальний прогрес студента."
-                      taskBadge="Кабінет студента"
-                    />
-                  }
-                />
+                <Route path="/student/courses" element={<CoursesPage />} />
                 <Route
                   path="/student/modules/:moduleId"
-                  element={
-                    <WorkspaceSectionPlaceholder
-                      title="Навчальний модуль та практична робота"
-                      subtitle="Структурована лекція, тест-допуск (>= 70%) та індивідуальний варіант практичної роботи."
-                      taskBadge="Модуль курсу"
-                    />
-                  }
+                  element={<ModuleViewPage />}
                 />
                 <Route
                   path="/student/gradebook"
