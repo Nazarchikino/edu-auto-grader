@@ -1,7 +1,6 @@
 {
   "1": "postgres",
   "2": "compilerOptions",
-  "8": "scripts",
   "9": "vite-env.d.ts",
   "10": "tailwind.config.js",
   "12": "v1/__init__.py",

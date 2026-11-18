@@ -27,3 +27,8 @@ graphify-out/manifest.json
 
 graphify-out/.*
 graphify-out/20*/
+
+# Graphify transient cache
+graphify-out/cache/
+graphify-out/.graphify_build_state.json
+graphify-out/manifest.json
