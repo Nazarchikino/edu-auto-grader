@@ -36,9 +36,9 @@
     "semantic_hash": "cd2ce7524990d3832c0c7c1782ab2cc5"
   },
   "backend/app/graders/__init__.py": {
-    "mtime": 1795035682.9118485,
-    "seen": 1795035773.662795,
-    "ast_hash": "a81d4fcc5a9146d807a5294f21465943",
+    "mtime": 1795036368.6119726,
+    "seen": 1795036469.8443208,
+    "ast_hash": "c54acf95738e20c6b62b94fc9e1638bf",
     "semantic_hash": ""
   },
   "backend/app/main.py": {
@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "TASKS.md": {
-    "mtime": 1795035768.941141,
-    "seen": 1795035773.6628504,
-    "ast_hash": "932a4ef0b8a51486f07561b42792dcc3",
+    "mtime": 1795036461.200983,
+    "seen": 1795036469.8443768,
+    "ast_hash": "9e29b36fccc0f2b28bad7aa3c9d27ee2",
     "semantic_hash": ""
   },
   "frontend/index.html": {
@@ -321,6 +321,12 @@
     "mtime": 1795035720.7804623,
     "seen": 1795035773.6628,
     "ast_hash": "7c828c6c688f1a07118d9491d0ade43d",
+    "semantic_hash": ""
+  },
+  "backend/app/graders/docx_grader.py": {
+    "mtime": 1795036417.5675895,
+    "seen": 1795036469.8443244,
+    "ast_hash": "f430e02f6b10833a23ce1a4f0712d53a",
     "semantic_hash": ""
   },
   "frontend/package-lock.json": {

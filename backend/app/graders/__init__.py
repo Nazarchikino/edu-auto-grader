@@ -16,6 +16,7 @@ from app.graders.metadata import (
     normalize_code_for_hashing,
     parse_core_xml_bytes,
 )
+from app.graders.xlsx_grader import XlsxGrader
 
 __all__ = [
     "BaseGrader",
@@ -24,6 +25,7 @@ __all__ = [
     "GraderFactory",
     "OPENXML_EXTENSIONS",
     "SubmissionRecordProtocol",
+    "XlsxGrader",
     "check_submission_plagiarism",
     "compute_bytes_sha256",
     "compute_code_sha256",
