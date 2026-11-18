@@ -1,17 +1,177 @@
-import type { ReactElement } from "react";
+import { useState, type ReactElement } from "react";
+import {
+  BrowserRouter,
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+} from "react-router-dom";
+import {
+  AuthProvider,
+  getDefaultHomePath,
+  useAuth,
+} from "./context/AuthContext";
+import { Navbar } from "./components/layout/Navbar";
+import { RoleGuard } from "./components/layout/RoleGuard";
+import { Sidebar } from "./components/layout/Sidebar";
+import { LoginPage } from "./pages/LoginPage";
+
+function ProtectedAppLayout(): ReactElement {
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+
+  return (
+    <div className="flex min-h-screen bg-slate-50 text-slate-900">
+      <Sidebar
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Navbar onOpenSidebar={() => setIsSidebarOpen(true)} />
+        <main className="flex-1 p-4 sm:p-6 lg:p-8">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function RoleHomeRedirect(): ReactElement {
+  const { user } = useAuth();
+  if (user === null) {
+    return <Navigate to="/login" replace />;
+  }
+  return <Navigate to={getDefaultHomePath(user.role)} replace />;
+}
+
+interface WorkspaceSectionProps {
+  title: string;
+  subtitle: string;
+  taskBadge: string;
+}
+
+function WorkspaceSectionPlaceholder({
+  title,
+  subtitle,
+  taskBadge,
+}: WorkspaceSectionProps): ReactElement {
+  const { user } = useAuth();
+
+  return (
+    <div className="mx-auto max-w-4xl rounded-2xl border border-slate-200 bg-white p-6 shadow-xs sm:p-8">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+          {taskBadge}
+        </span>
+        {user !== null && (
+          <span className="text-xs font-medium text-slate-500">
+            Активний профіль: {user.full_name} ({user.email})
+          </span>
+        )}
+      </div>
+      <h2 className="mt-4 text-xl font-bold text-slate-900">{title}</h2>
+      <p className="mt-2 text-sm leading-relaxed text-slate-600">{subtitle}</p>
+    </div>
+  );
+}
 
 export function App(): ReactElement {
   return (
-    <main className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
-      <div className="max-w-xl w-full rounded-xl bg-white p-8 shadow-sm border border-slate-200">
-        <h1 className="text-2xl font-bold text-slate-900">
-          Edu Auto Grader
-        </h1>
-        <p className="mt-2 text-sm text-slate-600">
-          Вебсистема електронних посібників та автоматизованої перевірки практичних робіт (Word, Excel, Access, HTML).
-        </p>
-      </div>
-    </main>
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+
+          <Route element={<RoleGuard />}>
+            <Route element={<ProtectedAppLayout />}>
+              <Route index element={<RoleHomeRedirect />} />
+
+              <Route element={<RoleGuard allowedRoles={["student"]} />}>
+                <Route
+                  path="/student/courses"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Навчальні курси (Word, Excel, Access, HTML)"
+                      subtitle="Перелік доступних дисциплін, модулів, лекцій та індивідуальний прогрес студента."
+                      taskBadge="Кабінет студента"
+                    />
+                  }
+                />
+                <Route
+                  path="/student/modules/:moduleId"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Навчальний модуль та практична робота"
+                      subtitle="Структурована лекція, тест-допуск (>= 70%) та індивідуальний варіант практичної роботи."
+                      taskBadge="Модуль курсу"
+                    />
+                  }
+                />
+                <Route
+                  path="/student/gradebook"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Електронна залікова книжка"
+                      subtitle="Історія здач практичних робіт, деталізовані звіти автоперевірки за критеріями та статус перевірки авторства."
+                      taskBadge="Залікова книжка"
+                    />
+                  }
+                />
+              </Route>
+
+              <Route
+                element={<RoleGuard allowedRoles={["teacher", "admin"]} />}
+              >
+                <Route
+                  path="/teacher/courses"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Конструктор навчальних курсів і лекцій"
+                      subtitle="Створення та редагування курсів, модулів, лекційних матеріалів, тестових питань для допуску та методичних вказівок."
+                      taskBadge="Кабінет викладача"
+                    />
+                  }
+                />
+                <Route
+                  path="/teacher/rules"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Налаштування критеріїв автоперевірки"
+                      subtitle="Візуальний конструктор JSONB-правил оцінювання практичних робіт із дисциплін Word, Excel, Access та HTML."
+                      taskBadge="Правила автоперевірки"
+                    />
+                  }
+                />
+                <Route
+                  path="/teacher/journal"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Електронний журнал групи та антиплагіат"
+                      subtitle="Зведена відомість успішності групи, індикація збігів SHA-256 / core.xml, ручне коригування оцінок та експорт у .xlsx / .pdf."
+                      taskBadge="Журнал та аналітика"
+                    />
+                  }
+                />
+              </Route>
+
+              <Route element={<RoleGuard allowedRoles={["admin"]} />}>
+                <Route
+                  path="/admin/users"
+                  element={
+                    <WorkspaceSectionPlaceholder
+                      title="Керування користувачами та академічними групами"
+                      subtitle="Адміністрування облікових записів студентів, викладачів, призначення ролей та ведення довідника академічних груп коледжу."
+                      taskBadge="Панель адміністратора"
+                    />
+                  }
+                />
+              </Route>
+
+              <Route path="*" element={<RoleHomeRedirect />} />
+            </Route>
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }
 
