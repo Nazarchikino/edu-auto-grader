@@ -1,4 +1,6 @@
 {
-  "15": "user.py",
-  "20": "tailwind.config.js"
+  "7": "client.ts",
+  "15": "course.py",
+  "20": "tailwind.config.js",
+  "22": "get_db"
 }
