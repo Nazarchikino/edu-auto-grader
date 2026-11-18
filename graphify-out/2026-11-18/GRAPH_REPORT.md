@@ -1,7 +1,9 @@
 # Graph Report - edu-auto-grader  (2026-11-18)
 
 ## Corpus Check
-- cluster-only mode — file stats not available
+- 26 files · ~4,155 words
+- Verdict: corpus is large enough that graph structure adds value.
+- Unclassified: 5 file(s) not represented in the graph (top: (none) 4, .css 1)
 
 ## Summary
 - 177 nodes · 202 edges · 22 communities (8 shown, 14 thin omitted)
@@ -27,8 +29,8 @@
 3. `postgres` - 8 edges
 4. `create_application()` - 6 edges
 5. `scripts` - 6 edges
-6. `GradingError` - 5 edges
-7. `Settings` - 5 edges
+6. `Settings` - 5 edges
+7. `GradingError` - 5 edges
 8. `healthcheck` - 5 edges
 9. `InvalidFileFormatError` - 4 edges
 10. `PlagiarismDetectedError` - 4 edges

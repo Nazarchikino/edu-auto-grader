@@ -7,7 +7,7 @@
 - [x] **T1.4:** Запустити початкову індексацію графа кодової бази командою `graphify . --code-only` та перевірити генерацію `graphify-out/GRAPH_REPORT.md`.
 
 ## Фаза 2: Схеми БД, типи та контракти (Contract-First)
-- [ ] **T2.1:** Реалізувати асинхронне підключення до PostgreSQL у `backend/app/core/database.py` та створити SQLAlchemy 2.0 моделі `AcademicGroup`, `User` у `backend/app/models/user.py`.
+- [x] **T2.1:** Реалізувати асинхронне підключення до PostgreSQL у `backend/app/core/database.py` та створити SQLAlchemy 2.0 моделі `AcademicGroup`, `User` у `backend/app/models/user.py`.
 - [ ] **T2.2:** Створити SQLAlchemy 2.0 моделі `Course`, `Module`, `QuizQuestion`, `Practical` у `backend/app/models/course.py` та `QuizAttempt`, `Submission` у `backend/app/models/progress.py`.
 - [ ] **T2.3:** Налаштувати Alembic, згенерувати початкову міграцію БД, застосувати її та написати CLI-скрипт `backend/app/seed.py` для наповнення БД 4 курсами (`word`, `excel`, `access`, `html`), тестовою групою, викладачем та студентами.
 - [ ] **T2.4:** Описати Pydantic v2 схеми контрактів у `backend/app/schemas/` (`auth.py`, `course.py`, `grading.py`, `submission.py`), включно зі строго типізованими моделями `GradingRule`, `CriterionResult` та `GradingReport`.

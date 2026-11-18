@@ -1,1 +1,7 @@
-# SQLAlchemy 2.0 ORM models.
+from app.models.user import AcademicGroup, User, UserRole
+
+__all__ = [
+    "AcademicGroup",
+    "User",
+    "UserRole",
+]
