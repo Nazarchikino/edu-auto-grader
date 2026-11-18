@@ -16,6 +16,7 @@ import { RoleGuard } from "./components/layout/RoleGuard";
 import { Sidebar } from "./components/layout/Sidebar";
 import { LoginPage } from "./pages/LoginPage";
 import { CoursesPage } from "./pages/student/CoursesPage";
+import { GradebookPage } from "./pages/student/GradebookPage";
 import { ModuleViewPage } from "./pages/student/ModuleViewPage";
 
 function ProtectedAppLayout(): ReactElement {
@@ -93,16 +94,7 @@ export function App(): ReactElement {
                   path="/student/modules/:moduleId"
                   element={<ModuleViewPage />}
                 />
-                <Route
-                  path="/student/gradebook"
-                  element={
-                    <WorkspaceSectionPlaceholder
-                      title="Електронна залікова книжка"
-                      subtitle="Історія здач практичних робіт, деталізовані звіти автоперевірки за критеріями та статус перевірки авторства."
-                      taskBadge="Залікова книжка"
-                    />
-                  }
-                />
+                <Route path="/student/gradebook" element={<GradebookPage />} />
               </Route>
 
               <Route
