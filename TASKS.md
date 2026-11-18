@@ -16,7 +16,7 @@
 ## Фаза 3: Бекенд та ядро автоперевірки
 - [x] **T3.1:** Реалізувати JWT-автентифікацію (`backend/app/core/security.py`), RBAC-залежності (`get_current_user`, `require_role` у `backend/app/api/deps.py`) та ендпоінти `/api/v1/auth/login` і `/auth/me`.
 - [x] **T3.2:** Реалізувати ендпоінти курсів, лекцій та логіку тесту-допуску (`backend/app/services/quiz_service.py`, `backend/app/api/v1/courses.py`) із розрахунком індивідуального варіанта студента.
-- [ ] **T3.3:** Реалізувати абстрактний клас `BaseGrader` (`backend/app/graders/base.py`), фабрику `GraderFactory` (`factory.py`) та модуль екстракції метаданих `docProps/core.xml` + SHA-256 антиплагіату (`backend/app/graders/metadata.py`).
+- [x] **T3.3:** Реалізувати абстрактний клас `BaseGrader` (`backend/app/graders/base.py`), фабрику `GraderFactory` (`factory.py`) та модуль екстракції метаданих `docProps/core.xml` + SHA-256 антиплагіату (`backend/app/graders/metadata.py`).
 - [ ] **T3.4:** Реалізувати `DocxGrader` (`backend/app/graders/docx_grader.py`) для перевірки полів сторінки, шрифтів, інтервалів, вирівнювання, таблиць та списків у `.docx`.
 - [ ] **T3.5:** Реалізувати `XlsxGrader` (`backend/app/graders/xlsx_grader.py`) для перевірки формул (`data_only=False`), обчислених значень (`data_only=True`) та діаграм у `.xlsx`.
 - [ ] **T3.6:** Реалізувати `AccdbGrader` (`backend/app/graders/accdb_grader.py`) для інспекції таблиць, полів та типів даних у `.accdb` та `HtmlGrader` (`backend/app/graders/html_grader.py`) на базі `BeautifulSoup4`.

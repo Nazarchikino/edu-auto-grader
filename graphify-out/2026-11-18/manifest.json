@@ -60,10 +60,10 @@
     "semantic_hash": ""
   },
   "backend/app/services/__init__.py": {
-    "mtime": 1795026704.8189304,
-    "seen": 1795028797.2389581,
-    "ast_hash": "e184e31cbc93fc8c88bf3edc8b77a80b",
-    "semantic_hash": "e184e31cbc93fc8c88bf3edc8b77a80b"
+    "mtime": 1795035039.2791011,
+    "seen": 1795035264.6447475,
+    "ast_hash": "38be75712ec88bca34547b9325f7aec6",
+    "semantic_hash": ""
   },
   "backend/pyproject.toml": {
     "mtime": 1795029177.4282362,
@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "TASKS.md": {
-    "mtime": 1795034499.0581758,
-    "seen": 1795034502.7799685,
-    "ast_hash": "5a9f6a2803a51d77d8a10aefecbb05c1",
+    "mtime": 1795035260.7180264,
+    "seen": 1795035264.6447797,
+    "ast_hash": "61405a8396fc74bcfe21427170f07cad",
     "semantic_hash": ""
   },
   "frontend/index.html": {
@@ -282,15 +282,27 @@
     "semantic_hash": ""
   },
   "backend/app/api/v1/router.py": {
-    "mtime": 1795034379.1382983,
-    "seen": 1795034502.7799127,
-    "ast_hash": "3ad5c05111831bde79509e6e3f5420ea",
+    "mtime": 1795035038.1521142,
+    "seen": 1795035264.6447215,
+    "ast_hash": "e89498cbefcc2a79bea10e73ea3cb790",
     "semantic_hash": ""
   },
   "backend/app/core/security.py": {
     "mtime": 1795034374.8698628,
     "seen": 1795034502.7799203,
     "ast_hash": "970b47e8e98673010aa37c90c2d997c6",
+    "semantic_hash": ""
+  },
+  "backend/app/api/v1/courses.py": {
+    "mtime": 1795035236.5787663,
+    "seen": 1795035264.6447191,
+    "ast_hash": "b24f31c74910042e99e5bbcf3e72e924",
+    "semantic_hash": ""
+  },
+  "backend/app/services/quiz_service.py": {
+    "mtime": 1795035233.9532976,
+    "seen": 1795035264.6447487,
+    "ast_hash": "5494da2bd8d5c7ddb4c0cda29df33f8e",
     "semantic_hash": ""
   },
   "frontend/package-lock.json": {

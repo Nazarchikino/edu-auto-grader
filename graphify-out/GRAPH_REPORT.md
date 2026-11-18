@@ -1,17 +1,17 @@
 # Graph Report - edu-auto-grader  (2026-11-18)
 
 ## Corpus Check
-- 46 files · ~14,437 words
+- 49 files · ~16,278 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 7 file(s) not represented in the graph (top: (none) 4, .ini 1, .mako 1)
 
 ## Summary
-- 571 nodes · 1224 edges · 35 communities (23 shown, 12 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 46 edges (avg confidence: 0.94)
+- 653 nodes · 1418 edges · 32 communities (22 shown, 10 thin omitted)
+- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 48 edges (avg confidence: 0.94)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `7a015ddd`
+- Built from commit: `225ca6c1`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -22,58 +22,56 @@
 - main.py
 - main.tsx
 - DomainError
-- submission.py
+- schemas/__init__.py
 - client.ts
 - scripts
 - vite-env.d.ts
-- security.py
+- v1/auth.py
+- metadata.py
 - env.py
 - course.py
-- auth.py
+- BaseGrader
 - get_db
 - edu-auto-grader-backend
-- 0001_initial_schema.py
+- exceptions.py
 - devDependencies
 - eslint.config.js
 - api.ts
 - vite
 - course.ts
 - grading.ts
-- login
-- BaseModel
-- seed_database
-- UserRole
-- GradingRuleType
-- ExportFormat
+- evaluate_plagiarism
+- GraderFactory
+- _find_xml_text
 
 ## God Nodes (most connected - your core abstractions)
 1. `User` - 28 edges
 2. `DomainError` - 28 edges
 3. `get_db()` - 22 edges
-4. `compilerOptions` - 19 edges
-5. `PracticalFormat` - 18 edges
-6. `Course` - 16 edges
-7. `get_current_user()` - 16 edges
-8. `Base` - 15 edges
-9. `Module` - 15 edges
-10. `Practical` - 15 edges
+4. `PracticalFormat` - 21 edges
+5. `compilerOptions` - 19 edges
+6. `BaseGrader` - 17 edges
+7. `InvalidFileFormatError` - 17 edges
+8. `Course` - 16 edges
+9. `get_current_user()` - 16 edges
+10. `Base` - 15 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `submit_module_quiz()` --uses--> `QuizService`  [INFERRED]
-  backend/app/api/v1/courses.py → backend/app/services/quiz_service.py
-- `get_practical_for_student()` --uses--> `QuizService`  [INFERRED]
-  backend/app/api/v1/courses.py → backend/app/services/quiz_service.py
-- `seed_database()` --uses--> `Course`  [INFERRED]
-  backend/app/seed.py → backend/app/models/course.py
+- `GraderFactory` --uses--> `BaseGrader`  [INFERRED]
+  backend/app/graders/factory.py → backend/app/graders/base.py
+- `CourseCreate` --uses--> `CourseSlug`  [INFERRED]
+  backend/app/schemas/course.py → backend/app/models/course.py
+- `CourseRead` --uses--> `CourseSlug`  [INFERRED]
+  backend/app/schemas/course.py → backend/app/models/course.py
 - `SubmissionRead` --uses--> `CourseSlug`  [INFERRED]
   backend/app/schemas/submission.py → backend/app/models/course.py
-- `seed_database()` --uses--> `AcademicGroup`  [INFERRED]
-  backend/app/seed.py → backend/app/models/user.py
+- `_build_access_course()` --uses--> `PracticalFormat`  [INFERRED]
+  backend/app/seed.py → backend/app/models/course.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (35 total, 12 thin omitted)
+## Communities (32 total, 10 thin omitted)
 
 ### Community 0 - "package.json"
 Cohesion: 0.17
@@ -96,12 +94,12 @@ Cohesion: 0.32
 Nodes (5): react@^18.3.1, App(), queryClient, rootElement, react
 
 ### Community 5 - "DomainError"
-Cohesion: 0.07
-Nodes (10): require_role(), role_checker(), DomainError, GradingError, InvalidFileFormatError, PlagiarismDetectedError, QuizNotPassedError, calculate_variant_index() (+2 more)
+Cohesion: 0.12
+Nodes (3): calculate_variant_index(), QuizService, resolve_student_variant()
 
-### Community 6 - "submission.py"
-Cohesion: 0.18
-Nodes (6): CriterionResult, ExtractedMetadata, GradingReport, GradingRulesUpdateRequest, PlagiarismCheckResult, SubmissionRead
+### Community 6 - "schemas/__init__.py"
+Cohesion: 0.05
+Nodes (33): PracticalFormat, CourseCreate, CourseRead, CourseUpdate, ModuleCreate, ModuleDetailRead, ModuleSummaryRead, ModuleUpdate (+25 more)
 
 ### Community 7 - "client.ts"
 Cohesion: 0.22
@@ -111,25 +109,29 @@ Nodes (3): axios@^1.7.7, apiClient, axios
 Cohesion: 0.33
 Nodes (6): scripts, build, dev, lint, preview, typecheck
 
-### Community 11 - "security.py"
-Cohesion: 0.14
-Nodes (8): create_access_token(), create_refresh_token(), create_token_pair(), decode_token(), _encode_jwt_token(), hash_password(), verify_password(), TokenResponse
+### Community 11 - "v1/auth.py"
+Cohesion: 0.05
+Nodes (25): login(), read_current_user(), refresh_tokens(), serialize_user(), create_access_token(), create_refresh_token(), create_token_pair(), decode_token() (+17 more)
+
+### Community 13 - "metadata.py"
+Cohesion: 0.18
+Nodes (9): InvalidFileFormatError, compute_bytes_sha256(), compute_code_sha256(), compute_file_sha256(), compute_submission_hash(), extract_core_xml_metadata(), extract_document_metadata(), normalize_code_for_hashing() (+1 more)
 
 ### Community 14 - "env.py"
 Cohesion: 0.09
 Nodes (6): do_run_migrations(), run_async_migrations(), run_migrations_offline(), run_migrations_online(), get_settings(), Settings
 
 ### Community 15 - "course.py"
-Cohesion: 0.06
-Nodes (39): Base, Course, CourseSlug, _enum_values(), Module, Practical, PracticalFormat, QuizQuestion (+31 more)
-
-### Community 16 - "auth.py"
-Cohesion: 0.15
-Nodes (11): AcademicGroupBase, AcademicGroupCreate, AcademicGroupRead, ErrorResponse, LoginRequest, RefreshTokenRequest, TokenPayload, UserBase (+3 more)
+Cohesion: 0.07
+Nodes (25): downgrade(), upgrade(), Base, Course, CourseSlug, _enum_values(), Module, Practical (+17 more)
 
 ### Community 17 - "get_db"
 Cohesion: 0.06
-Nodes (23): get_current_user(), _build_module_detail_read(), create_course(), create_module(), create_quiz_question(), delete_quiz_question(), _fetch_user_progress_maps(), get_course() (+15 more)
+Nodes (28): get_current_user(), require_role(), role_checker(), _build_module_detail_read(), create_course(), create_module(), create_quiz_question(), delete_quiz_question() (+20 more)
+
+### Community 22 - "exceptions.py"
+Cohesion: 0.13
+Nodes (3): GradingError, PlagiarismDetectedError, QuizNotPassedError
 
 ### Community 23 - "devDependencies"
 Cohesion: 0.13
@@ -155,37 +157,29 @@ Nodes (22): COURSE_SLUGS, CourseCreate, CourseRead, CourseUpdate, ModuleCreate, 
 Cohesion: 0.20
 Nodes (10): SubmissionRead, CourseSlug, CriterionResult, ExtractedMetadata, GRADING_RULE_TYPES, GradingReport, GradingRulesUpdateRequest, GradingRuleType (+2 more)
 
-### Community 29 - "login"
-Cohesion: 0.18
-Nodes (4): login(), read_current_user(), refresh_tokens(), serialize_user()
-
-### Community 30 - "BaseModel"
-Cohesion: 0.15
-Nodes (6): CriterionErrorStat, GroupJournalRead, GroupJournalRow, GroupJournalStudentCell, HtmlSubmissionRequest, ManualGradeUpdateRequest
-
-### Community 31 - "seed_database"
-Cohesion: 0.21
-Nodes (5): main(), run_seed(), seed_database(), SeedSummary, summarize_bundle()
+### Community 29 - "evaluate_plagiarism"
+Cohesion: 0.16
+Nodes (4): check_submission_plagiarism(), _coerce_metadata(), evaluate_plagiarism(), SubmissionRecordProtocol
 
 ## Knowledge Gaps
 - **1 isolated node(s):** `edu-auto-grader-backend`
-  These have ≤1 connection - possible missing edges. (Counts symbols only; 283 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **12 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges. (Counts symbols only; 317 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `DomainError` connect `DomainError` to `main.py`, `security.py`, `course.py`, `get_db`, `login`?**
-  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `DomainError` connect `get_db` to `main.py`, `DomainError`, `v1/auth.py`, `course.py`, `exceptions.py`?**
+  _High betweenness centrality (0.048) - this node is a cross-community bridge._
 - **Are the 6 inferred relationships involving `User` (e.g. with `_build_access_course()` and `_build_excel_course()`) actually correct?**
   _`User` has 6 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `edu-auto-grader-backend` to the rest of the system?**
   _1 weakly-connected nodes found - possible missing edges._
 - **Should `postgres` be split into smaller, more focused modules?**
   _Cohesion score 0.09523809523809523 - nodes in this community are weakly interconnected._
-- **Why does `User` connect `course.py` to `DomainError`, `security.py`, `get_db`, `login`, `seed_database`?**
-  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+- **Why does `User` connect `course.py` to `get_db`, `v1/auth.py`, `DomainError`?**
+  _High betweenness centrality (0.027) - this node is a cross-community bridge._
+- **Are the 11 inferred relationships involving `PracticalFormat` (e.g. with `ModuleSummaryRead` and `PracticalCreate`) actually correct?**
+  _`PracticalFormat` has 11 INFERRED edges - model-reasoned connections that need verification._
 - **Should `compilerOptions` be split into smaller, more focused modules?**
   _Cohesion score 0.09523809523809523 - nodes in this community are weakly interconnected._
-- **Why does `UserRole` connect `UserRole` to `auth.py`, `security.py`, `seed_database`, `course.py`?**
-  _High betweenness centrality (0.019) - this node is a cross-community bridge._
