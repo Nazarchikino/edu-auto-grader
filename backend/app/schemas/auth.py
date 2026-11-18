@@ -69,6 +69,16 @@ class AcademicGroupCreate(AcademicGroupBase):
     model_config = ConfigDict(extra="forbid")
 
 
+class AcademicGroupUpdate(BaseModel):
+    """Схема часткового оновлення академічної групи адміністратором."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str | None = Field(default=None, min_length=1, max_length=32)
+    specialty: str | None = Field(default=None, min_length=1, max_length=128)
+    course_year: int | None = Field(default=None, ge=1, le=6)
+
+
 class AcademicGroupRead(AcademicGroupBase):
     """Схема читання даних академічної групи."""
 
@@ -100,10 +110,12 @@ class UserUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    email: str | None = Field(default=None, min_length=3, max_length=255)
     full_name: str | None = Field(default=None, min_length=1, max_length=255)
     role: UserRole | None = None
     group_id: uuid.UUID | None = None
     list_number: int | None = Field(default=None, ge=1, le=100)
+    password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class UserRead(UserBase):

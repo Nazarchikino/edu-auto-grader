@@ -47,6 +47,12 @@ export interface AcademicGroupBase {
 
 export type AcademicGroupCreate = AcademicGroupBase;
 
+export interface AcademicGroupUpdate {
+  code?: string | null;
+  specialty?: string | null;
+  course_year?: number | null;
+}
+
 export interface AcademicGroupRead extends AcademicGroupBase {
   id: string;
 }
@@ -69,10 +75,12 @@ export interface UserCreate {
 }
 
 export interface UserUpdate {
+  email?: string | null;
   full_name?: string | null;
   role?: UserRole | null;
   group_id?: string | null;
   list_number?: number | null;
+  password?: string | null;
 }
 
 export interface UserRead extends UserBase {
