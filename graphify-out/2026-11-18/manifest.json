@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "TASKS.md": {
-    "mtime": 1795032177.1474245,
-    "seen": 1795032187.9174857,
-    "ast_hash": "f54bb9c88570719476a7a2f6b41e4737",
+    "mtime": 1795032964.1003976,
+    "seen": 1795032967.4280536,
+    "ast_hash": "ab1096d21a4989a0ca8a03deac0d717e",
     "semantic_hash": ""
   },
   "frontend/index.html": {
@@ -249,6 +249,24 @@
     "mtime": 1795032523.7842705,
     "seen": 1795032654.1477354,
     "ast_hash": "bbec4de52fe681e58bc00a6b6efcd52d",
+    "semantic_hash": ""
+  },
+  "frontend/src/types/api.ts": {
+    "mtime": 1795032922.4379895,
+    "seen": 1795032967.4280374,
+    "ast_hash": "b547f5ed89e6cb095cddd40d991d1505",
+    "semantic_hash": ""
+  },
+  "frontend/src/types/course.ts": {
+    "mtime": 1795032921.5137262,
+    "seen": 1795032967.4280403,
+    "ast_hash": "bcd31af8b0d9512110fee1e21323276f",
+    "semantic_hash": ""
+  },
+  "frontend/src/types/grading.ts": {
+    "mtime": 1795032920.174555,
+    "seen": 1795032967.4280415,
+    "ast_hash": "259d8dddd3b2314cb693c839d9de7e01",
     "semantic_hash": ""
   },
   "frontend/package-lock.json": {
