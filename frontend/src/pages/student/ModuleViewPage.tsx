@@ -1,7 +1,10 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type ChangeEvent,
+  type DragEvent,
   type FormEvent,
   type ReactElement,
   type ReactNode,
@@ -10,25 +13,36 @@ import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Award,
   BookOpen,
   CheckCircle2,
   ClipboardCheck,
+  FileCheck2,
   FileCode2,
+  FileSpreadsheet,
+  FileText,
+  HardDriveUpload,
   HelpCircle,
   Loader2,
   Lock,
   RefreshCw,
   RotateCcw,
   Send,
+  ShieldAlert,
+  ShieldCheck,
   Sparkles,
+  Trash2,
   Unlock,
+  UploadCloud,
   XCircle,
 } from "lucide-react";
 import apiClient from "../../api/client";
+import { HtmlSandbox } from "../../components/sandbox/HtmlSandbox";
 import { extractApiErrorMessage, useAuth } from "../../context/AuthContext";
+import type { HtmlSubmissionRequest, SubmissionRead } from "../../types/api";
 import type {
   ModuleDetailRead,
   PracticalFormat,
@@ -39,6 +53,14 @@ import type {
 } from "../../types/course";
 
 type ModuleSectionTab = "lecture" | "quiz" | "practical";
+type BinaryPracticalFormat = Exclude<PracticalFormat, "html">;
+
+interface FileUploadFormatMeta {
+  extension: string;
+  acceptAttr: string;
+  applicationLabel: string;
+  hintText: string;
+}
 
 const FORMAT_BADGE_LABELS: Record<PracticalFormat, string> = {
   docx: "Microsoft Word (.docx)",
@@ -46,6 +68,47 @@ const FORMAT_BADGE_LABELS: Record<PracticalFormat, string> = {
   accdb: "Microsoft Access (.accdb)",
   html: "HTML5 & DOM (Пісочниця)",
 };
+
+const FILE_UPLOAD_FORMAT_META: Record<
+  BinaryPracticalFormat,
+  FileUploadFormatMeta
+> = {
+  docx: {
+    extension: ".docx",
+    acceptAttr:
+      ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    applicationLabel: "Документ Microsoft Word (.docx)",
+    hintText:
+      "Перевіряються поля сторінки, шрифти, міжрядковий інтервал, вирівнювання абзаців, таблиці, списки та метадані docProps/core.xml.",
+  },
+  xlsx: {
+    extension: ".xlsx",
+    acceptAttr:
+      ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    applicationLabel: "Книга Microsoft Excel (.xlsx)",
+    hintText:
+      "Перевіряються формули в цільових комірках (data_only=False), обчислені значення (data_only=True), наявність діаграм та метадані docProps/core.xml.",
+  },
+  accdb: {
+    extension: ".accdb",
+    acceptAttr: ".accdb,application/msaccess,application/x-msaccess",
+    applicationLabel: "База даних Microsoft Access (.accdb)",
+    hintText:
+      "Перевіряються наявність таблиць у схемі БД, назви стовпців, їхні типи даних та контрольна сума SHA-256.",
+  },
+};
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} Б`;
+  }
+  const kilobytes = bytes / 1024;
+  if (kilobytes < 1024) {
+    return `${kilobytes.toFixed(1)} КБ`;
+  }
+  const megabytes = kilobytes / 1024;
+  return `${megabytes.toFixed(2)} МБ`;
+}
 
 async function fetchModuleDetail(moduleId: string): Promise<ModuleDetailRead> {
   const response = await apiClient.get<ModuleDetailRead>(
@@ -70,6 +133,35 @@ async function submitQuizAnswers(
   const response = await apiClient.post<QuizSubmitResponse>(
     `/modules/${moduleId}/quiz/submit`,
     payload
+  );
+  return response.data;
+}
+
+async function submitHtmlPractical(
+  practicalId: string,
+  payload: HtmlSubmissionRequest
+): Promise<SubmissionRead> {
+  const response = await apiClient.post<SubmissionRead>(
+    `/practicals/${practicalId}/submit`,
+    payload
+  );
+  return response.data;
+}
+
+async function submitFilePractical(
+  practicalId: string,
+  file: File
+): Promise<SubmissionRead> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await apiClient.post<SubmissionRead>(
+    `/practicals/${practicalId}/submit`,
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
   );
   return response.data;
 }
@@ -258,6 +350,7 @@ export function ModuleViewPage(): ReactElement {
   const { moduleId } = useParams<{ moduleId: string }>();
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [activeTab, setActiveTab] = useState<ModuleSectionTab>("lecture");
   const [selectedAnswers, setSelectedAnswers] = useState<
@@ -266,6 +359,12 @@ export function ModuleViewPage(): ReactElement {
   const [lastQuizResult, setLastQuizResult] =
     useState<QuizSubmitResponse | null>(null);
   const [quizError, setQuizError] = useState<string | null>(null);
+
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isDragActive, setIsDragActive] = useState<boolean>(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [lastSubmissionResult, setLastSubmissionResult] =
+    useState<SubmissionRead | null>(null);
 
   const resolvedModuleId = moduleId ?? "";
 
@@ -302,8 +401,29 @@ export function ModuleViewPage(): ReactElement {
     setSelectedAnswers({});
     setLastQuizResult(null);
     setQuizError(null);
+    setSelectedFile(null);
+    setIsDragActive(false);
+    setSubmissionError(null);
+    setLastSubmissionResult(null);
     setActiveTab("lecture");
   }, [resolvedModuleId]);
+
+  const invalidateSubmissionRelatedQueries = async (): Promise<void> => {
+    await Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: ["module", resolvedModuleId],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["courses"],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["practical-student"],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["submissions-my"],
+      }),
+    ]);
+  };
 
   const submitQuizMutation = useMutation<
     QuizSubmitResponse,
@@ -314,17 +434,7 @@ export function ModuleViewPage(): ReactElement {
     onSuccess: async (result) => {
       setLastQuizResult(result);
       setQuizError(null);
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["module", resolvedModuleId],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["courses"],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["practical-student"],
-        }),
-      ]);
+      await invalidateSubmissionRelatedQueries();
     },
     onError: (err) => {
       setQuizError(
@@ -335,6 +445,47 @@ export function ModuleViewPage(): ReactElement {
       );
     },
   });
+
+  const submitHtmlMutation = useMutation<
+    SubmissionRead,
+    unknown,
+    HtmlSubmissionRequest
+  >({
+    mutationFn: (payload) => submitHtmlPractical(practicalId ?? "", payload),
+    onSuccess: async (result) => {
+      setLastSubmissionResult(result);
+      setSubmissionError(null);
+      await invalidateSubmissionRelatedQueries();
+    },
+    onError: (err) => {
+      setSubmissionError(
+        extractApiErrorMessage(
+          err,
+          "Не вдалося виконати перевірку HTML-коду. Спробуйте ще раз."
+        )
+      );
+    },
+  });
+
+  const submitFileMutation = useMutation<SubmissionRead, unknown, File>({
+    mutationFn: (file) => submitFilePractical(practicalId ?? "", file),
+    onSuccess: async (result) => {
+      setLastSubmissionResult(result);
+      setSubmissionError(null);
+      await invalidateSubmissionRelatedQueries();
+    },
+    onError: (err) => {
+      setSubmissionError(
+        extractApiErrorMessage(
+          err,
+          "Помилка завантаження або автоперевірки файлу практичної роботи."
+        )
+      );
+    },
+  });
+
+  const isSubmittingPractical =
+    submitHtmlMutation.isPending || submitFileMutation.isPending;
 
   const totalQuestions = module?.quiz_questions.length ?? 0;
   const answeredCount = useMemo(() => {
@@ -387,6 +538,121 @@ export function ModuleViewPage(): ReactElement {
     }));
 
     submitQuizMutation.mutate({ answers });
+  };
+
+  const validateAndSelectFile = (
+    candidate: File,
+    expectedFormat: BinaryPracticalFormat
+  ): void => {
+    const formatMeta = FILE_UPLOAD_FORMAT_META[expectedFormat];
+    const lowerName = candidate.name.toLowerCase();
+
+    if (!lowerName.endsWith(formatMeta.extension)) {
+      setSelectedFile(null);
+      setSubmissionError(
+        `Невірний формат файлу "${candidate.name}". Для цієї практичної роботи очікується файл із розширенням ${formatMeta.extension}.`
+      );
+      return;
+    }
+
+    if (candidate.size === 0) {
+      setSelectedFile(null);
+      setSubmissionError(
+        `Обраний файл "${candidate.name}" порожній (0 байтів). Оберіть збережений документ.`
+      );
+      return;
+    }
+
+    setSelectedFile(candidate);
+    setSubmissionError(null);
+  };
+
+  const handleFileInputChange = (
+    event: ChangeEvent<HTMLInputElement>,
+    expectedFormat: BinaryPracticalFormat
+  ): void => {
+    const pickedFile = event.target.files?.[0];
+    if (!pickedFile) {
+      return;
+    }
+    validateAndSelectFile(pickedFile, expectedFormat);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!isDragActive) {
+      setIsDragActive(true);
+    }
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragActive(false);
+  };
+
+  const handleDrop = (
+    event: DragEvent<HTMLDivElement>,
+    expectedFormat: BinaryPracticalFormat
+  ): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragActive(false);
+
+    const droppedFile = event.dataTransfer.files?.[0];
+    if (!droppedFile) {
+      return;
+    }
+    validateAndSelectFile(droppedFile, expectedFormat);
+  };
+
+  const handleRemoveSelectedFile = (): void => {
+    setSelectedFile(null);
+    setSubmissionError(null);
+    if (fileInputRef.current !== null) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleFileFormSubmit = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    if (practicalId === null) {
+      return;
+    }
+    if (selectedFile === null) {
+      setSubmissionError(
+        "Будь ласка, оберіть або перетягніть виконаний файл практичної роботи перед відправкою."
+      );
+      return;
+    }
+    setSubmissionError(null);
+    submitFileMutation.mutate(selectedFile);
+  };
+
+  const handleHtmlSandboxSubmit = (rawCode: string): void => {
+    if (practicalId === null) {
+      return;
+    }
+    if (rawCode.trim().length === 0) {
+      setSubmissionError("HTML-код не може бути порожнім.");
+      return;
+    }
+    setSubmissionError(null);
+    submitHtmlMutation.mutate({ raw_code: rawCode });
+  };
+
+  const renderBinaryFormatIcon = (
+    formatType: BinaryPracticalFormat
+  ): ReactElement => {
+    switch (formatType) {
+      case "docx":
+        return <FileText className="h-6 w-6 text-blue-600" />;
+      case "xlsx":
+        return <FileSpreadsheet className="h-6 w-6 text-emerald-600" />;
+      case "accdb":
+        return <HardDriveUpload className="h-6 w-6 text-rose-600" />;
+    }
   };
 
   if (isLoading) {
@@ -986,6 +1252,314 @@ export function ModuleViewPage(): ReactElement {
                       </div>
                     )}
                   </div>
+
+                  {/* Повідомлення про помилку здачі роботи */}
+                  {submissionError !== null && (
+                    <div
+                      className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs font-medium text-rose-800"
+                      role="alert"
+                    >
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                      <span>{submissionError}</span>
+                    </div>
+                  )}
+
+                  {/* Гілка Б (HTML): Вбудована HTML-пісочниця (Monaco Editor + <iframe sandbox>) */}
+                  {practicalDetail.format_type === "html" ? (
+                    <HtmlSandbox
+                      practicalTitle={practicalDetail.title}
+                      variant={practicalDetail.variant}
+                      variantNumber={practicalDetail.variant_number}
+                      isSubmitting={isSubmittingPractical}
+                      onSubmitCode={handleHtmlSandboxSubmit}
+                    />
+                  ) : (
+                    /* Гілка А (Word .docx / Excel .xlsx / Access .accdb): Drag-and-drop форма завантаження файлу */
+                    (() => {
+                      const binaryFormat: BinaryPracticalFormat =
+                        practicalDetail.format_type;
+                      const formatMeta = FILE_UPLOAD_FORMAT_META[binaryFormat];
+
+                      return (
+                        <form
+                          onSubmit={handleFileFormSubmit}
+                          className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs sm:p-6"
+                        >
+                          <div className="flex flex-col justify-between gap-3 border-b border-slate-100 pb-4 sm:flex-row sm:items-center">
+                            <div className="flex items-center gap-3">
+                              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50">
+                                {renderBinaryFormatIcon(binaryFormat)}
+                              </div>
+                              <div>
+                                <h3 className="text-base font-bold text-slate-900">
+                                  Здача файлу практичної роботи (
+                                  {formatMeta.extension})
+                                </h3>
+                                <p className="text-xs text-slate-600">
+                                  {formatMeta.applicationLabel} • Варіант №
+                                  {practicalDetail.variant_number}
+                                </p>
+                              </div>
+                            </div>
+
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
+                              <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
+                              Контроль SHA-256 + core.xml
+                            </span>
+                          </div>
+
+                          <p className="mt-3 text-xs leading-relaxed text-slate-600">
+                            {formatMeta.hintText}
+                          </p>
+
+                          <input
+                            ref={fileInputRef}
+                            id={`file-upload-${practicalDetail.id}`}
+                            type="file"
+                            accept={formatMeta.acceptAttr}
+                            onChange={(event) =>
+                              handleFileInputChange(event, binaryFormat)
+                            }
+                            className="sr-only"
+                          />
+
+                          {/* Drag-and-drop зона вибору файлу */}
+                          <div
+                            onDragOver={handleDragOver}
+                            onDragLeave={handleDragLeave}
+                            onDrop={(event) => handleDrop(event, binaryFormat)}
+                            className={`mt-4 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-6 text-center transition-colors sm:p-8 ${
+                              isDragActive
+                                ? "border-blue-500 bg-blue-50/70"
+                                : selectedFile !== null
+                                  ? "border-emerald-300 bg-emerald-50/40"
+                                  : "border-slate-300 bg-slate-50/60 hover:border-blue-400 hover:bg-slate-50"
+                            }`}
+                          >
+                            {selectedFile === null ? (
+                              <>
+                                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-blue-100 text-blue-600">
+                                  <UploadCloud className="h-6 w-6" />
+                                </div>
+                                <p className="mt-3 text-sm font-bold text-slate-900">
+                                  Перетягніть виконаний файл{" "}
+                                  <span className="font-mono text-blue-700">
+                                    {formatMeta.extension}
+                                  </span>{" "}
+                                  сюди
+                                </p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  або оберіть збережений документ зі свого
+                                  комп&apos;ютера для миттєвої автоперевірки
+                                </p>
+                                <label
+                                  htmlFor={`file-upload-${practicalDetail.id}`}
+                                  className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-800 shadow-2xs hover:border-blue-400 hover:bg-blue-50"
+                                >
+                                  <UploadCloud className="h-4 w-4 text-blue-600" />
+                                  <span>
+                                    Обрати файл {formatMeta.extension}
+                                  </span>
+                                </label>
+                              </>
+                            ) : (
+                              <div className="flex w-full max-w-lg flex-col items-center justify-between gap-4 rounded-xl border border-emerald-200 bg-white p-4 text-left shadow-2xs sm:flex-row">
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                                    <FileCheck2 className="h-5 w-5" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-bold text-slate-900">
+                                      {selectedFile.name}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                      Розмір:{" "}
+                                      {formatFileSize(selectedFile.size)} •
+                                      Формат: {formatMeta.extension}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="flex shrink-0 items-center gap-2">
+                                  <label
+                                    htmlFor={`file-upload-${practicalDetail.id}`}
+                                    className="cursor-pointer rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                  >
+                                    Замінити
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={handleRemoveSelectedFile}
+                                    disabled={isSubmittingPractical}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                                    title="Видалити обраний файл"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    <span>Очистити</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="mt-5 flex flex-col items-stretch justify-between gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center">
+                            <p className="text-xs text-slate-500">
+                              Перевірка виконується автоматично за{" "}
+                              <span className="font-semibold text-slate-700">
+                                варіантом №{practicalDetail.variant_number}
+                              </span>{" "}
+                              протягом 1–3 секунд.
+                            </p>
+
+                            <button
+                              type="submit"
+                              disabled={
+                                selectedFile === null || isSubmittingPractical
+                              }
+                              className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {isSubmittingPractical ? (
+                                <>
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                  <span>Автоперевірка файлу...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="h-4 w-4" />
+                                  <span>Надіслати файл на перевірку</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </form>
+                      );
+                    })()
+                  )}
+
+                  {/* Миттєвий звіт результату автоперевірки та контролю авторства */}
+                  {lastSubmissionResult !== null && (
+                    <div
+                      className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5 shadow-xs sm:p-6"
+                      role="status"
+                    >
+                      <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-4 sm:flex-row sm:items-center">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
+                              <Award className="h-3.5 w-3.5" />
+                              Результат автоперевірки:{" "}
+                              {lastSubmissionResult.final_score.toFixed(1)} /{" "}
+                              {lastSubmissionResult.max_score.toFixed(1)} б.
+                            </span>
+
+                            {lastSubmissionResult.is_plagiarism_flagged ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-rose-300 bg-rose-100 px-3 py-1 text-xs font-bold text-rose-800">
+                                <ShieldAlert className="h-3.5 w-3.5" />
+                                Підозра на плагіат
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
+                                <ShieldCheck className="h-3.5 w-3.5" />
+                                Авторство підтверджено
+                              </span>
+                            )}
+                          </div>
+                          <h3 className="mt-2 text-base font-bold text-slate-900">
+                            Звіт перевірки за варіантом №
+                            {lastSubmissionResult.variant_number}
+                          </h3>
+                          <p className="text-xs text-slate-600">
+                            Виконано критеріїв:{" "}
+                            <span className="font-bold text-emerald-700">
+                              {lastSubmissionResult.grading_report.passed_count}
+                            </span>{" "}
+                            • Провалено:{" "}
+                            <span className="font-bold text-rose-700">
+                              {lastSubmissionResult.grading_report.failed_count}
+                            </span>
+                            {lastSubmissionResult.file_hash !== null && (
+                              <span className="ml-2 font-mono text-[11px] text-slate-500">
+                                • SHA-256:{" "}
+                                {lastSubmissionResult.file_hash.slice(0, 12)}…
+                              </span>
+                            )}
+                          </p>
+                        </div>
+
+                        <Link
+                          to="/student/gradebook"
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-blue-200 bg-white px-4 py-2 text-xs font-semibold text-blue-700 shadow-2xs hover:bg-blue-50"
+                        >
+                          <span>Відкрити у заліковій книжці</span>
+                          <ArrowRight className="h-3.5 w-3.5" />
+                        </Link>
+                      </div>
+
+                      {lastSubmissionResult.is_plagiarism_flagged &&
+                        lastSubmissionResult.plagiarism_reason !== null && (
+                          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-900">
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                            <div>
+                              <p className="font-bold">
+                                Спрацював модуль академічної доброчесності:
+                              </p>
+                              <p className="mt-0.5">
+                                {lastSubmissionResult.plagiarism_reason}
+                              </p>
+                            </div>
+                          </div>
+                        )}
+
+                      <div className="mt-4 space-y-2.5">
+                        {lastSubmissionResult.grading_report.results.map(
+                          (criterion) => (
+                            <div
+                              key={criterion.rule_id}
+                              className={`flex flex-col justify-between gap-2 rounded-xl border p-3.5 text-xs sm:flex-row sm:items-center ${
+                                criterion.passed
+                                  ? "border-emerald-200 bg-white"
+                                  : "border-rose-200 bg-rose-50/60"
+                              }`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                {criterion.passed ? (
+                                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                                ) : (
+                                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                                )}
+                                <div>
+                                  <p className="font-bold text-slate-900">
+                                    {criterion.description}
+                                  </p>
+                                  <p className="mt-0.5 text-slate-600">
+                                    {criterion.feedback}
+                                  </p>
+                                  <p className="mt-1 font-mono text-[11px] text-slate-500">
+                                    Ціль: {criterion.target} • Очікувалось:{" "}
+                                    {criterion.expected}
+                                    {criterion.actual !== null
+                                      ? ` • Фактично: ${criterion.actual}`
+                                      : ""}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <span
+                                className={`inline-flex shrink-0 items-center self-start rounded-lg px-2.5 py-1 font-mono text-xs font-bold sm:self-center ${
+                                  criterion.passed
+                                    ? "bg-emerald-100 text-emerald-800"
+                                    : "bg-rose-100 text-rose-800"
+                                }`}
+                              >
+                                +{criterion.points_awarded.toFixed(1)} /{" "}
+                                {criterion.max_points.toFixed(1)} б.
+                              </span>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : null}
             </div>
