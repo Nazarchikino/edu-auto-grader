@@ -18,6 +18,9 @@ import { LoginPage } from "./pages/LoginPage";
 import { CoursesPage } from "./pages/student/CoursesPage";
 import { GradebookPage } from "./pages/student/GradebookPage";
 import { ModuleViewPage } from "./pages/student/ModuleViewPage";
+import { CourseEditorPage } from "./pages/teacher/CourseEditorPage";
+import { GroupJournalPage } from "./pages/teacher/GroupJournalPage";
+import { RuleBuilderPage } from "./pages/teacher/RuleBuilderPage";
 
 function ProtectedAppLayout(): ReactElement {
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
@@ -102,33 +105,12 @@ export function App(): ReactElement {
               >
                 <Route
                   path="/teacher/courses"
-                  element={
-                    <WorkspaceSectionPlaceholder
-                      title="Конструктор навчальних курсів і лекцій"
-                      subtitle="Створення та редагування курсів, модулів, лекційних матеріалів, тестових питань для допуску та методичних вказівок."
-                      taskBadge="Кабінет викладача"
-                    />
-                  }
+                  element={<CourseEditorPage />}
                 />
-                <Route
-                  path="/teacher/rules"
-                  element={
-                    <WorkspaceSectionPlaceholder
-                      title="Налаштування критеріїв автоперевірки"
-                      subtitle="Візуальний конструктор JSONB-правил оцінювання практичних робіт із дисциплін Word, Excel, Access та HTML."
-                      taskBadge="Правила автоперевірки"
-                    />
-                  }
-                />
+                <Route path="/teacher/rules" element={<RuleBuilderPage />} />
                 <Route
                   path="/teacher/journal"
-                  element={
-                    <WorkspaceSectionPlaceholder
-                      title="Електронний журнал групи та антиплагіат"
-                      subtitle="Зведена відомість успішності групи, індикація збігів SHA-256 / core.xml, ручне коригування оцінок та експорт у .xlsx / .pdf."
-                      taskBadge="Журнал та аналітика"
-                    />
-                  }
+                  element={<GroupJournalPage />}
                 />
               </Route>
 
