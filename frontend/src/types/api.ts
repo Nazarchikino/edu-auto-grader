@@ -1,0 +1,148 @@
+import type { CourseSlug } from "./course";
+import type { ExtractedMetadata, GradingReport } from "./grading";
+
+export const USER_ROLES = ["student", "teacher", "admin"] as const;
+
+export type UserRole = (typeof USER_ROLES)[number];
+
+export type TokenType = "access" | "refresh";
+
+export const EXPORT_FORMATS = ["xlsx", "pdf"] as const;
+
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
+
+export interface ErrorResponse {
+  detail: string;
+  code: string;
+  context: Record<string, unknown>;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface RefreshTokenRequest {
+  refresh_token: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+}
+
+export interface TokenPayload {
+  sub: string;
+  role: UserRole;
+  token_type: TokenType;
+  exp: number;
+}
+
+export interface AcademicGroupBase {
+  code: string;
+  specialty: string;
+  course_year: number;
+}
+
+export type AcademicGroupCreate = AcademicGroupBase;
+
+export interface AcademicGroupRead extends AcademicGroupBase {
+  id: string;
+}
+
+export interface UserBase {
+  email: string;
+  full_name: string;
+  role: UserRole;
+  group_id: string | null;
+  list_number: number | null;
+}
+
+export interface UserCreate {
+  email: string;
+  full_name: string;
+  role: UserRole;
+  group_id?: string | null;
+  list_number?: number | null;
+  password: string;
+}
+
+export interface UserUpdate {
+  full_name?: string | null;
+  role?: UserRole | null;
+  group_id?: string | null;
+  list_number?: number | null;
+}
+
+export interface UserRead extends UserBase {
+  id: string;
+  group_code: string | null;
+  created_at: string;
+}
+
+export interface HtmlSubmissionRequest {
+  raw_code: string;
+}
+
+export interface ManualGradeUpdateRequest {
+  final_score: number;
+  teacher_comment?: string | null;
+}
+
+export interface SubmissionRead {
+  id: string;
+  practical_id: string;
+  practical_title: string | null;
+  course_slug: CourseSlug | null;
+  student_id: string;
+  student_full_name: string | null;
+  variant_index: number;
+  variant_number: number;
+  file_path: string | null;
+  raw_code: string | null;
+  file_hash: string | null;
+  extracted_metadata: ExtractedMetadata;
+  is_plagiarism_flagged: boolean;
+  plagiarism_reason: string | null;
+  auto_score: number;
+  final_score: number;
+  max_score: number;
+  grading_report: GradingReport;
+  teacher_comment: string | null;
+  submitted_at: string;
+}
+
+export interface CriterionErrorStat {
+  rule_id: string;
+  description: string;
+  total_attempts: number;
+  failure_count: number;
+  failure_rate_percent: number;
+}
+
+export interface GroupJournalStudentCell {
+  practical_id: string;
+  submission_id: string | null;
+  auto_score: number | null;
+  final_score: number | null;
+  is_plagiarism_flagged: boolean;
+  plagiarism_reason: string | null;
+  submitted_at: string | null;
+}
+
+export interface GroupJournalRow {
+  student_id: string;
+  student_full_name: string;
+  list_number: number | null;
+  cells: GroupJournalStudentCell[];
+  total_score: number;
+}
+
+export interface GroupJournalRead {
+  group_id: string;
+  group_code: string;
+  specialty: string;
+  rows: GroupJournalRow[];
+  error_stats: CriterionErrorStat[];
+}
