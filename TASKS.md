@@ -19,7 +19,7 @@
 - [x] **T3.3:** Реалізувати абстрактний клас `BaseGrader` (`backend/app/graders/base.py`), фабрику `GraderFactory` (`factory.py`) та модуль екстракції метаданих `docProps/core.xml` + SHA-256 антиплагіату (`backend/app/graders/metadata.py`).
 - [x] **T3.4:** Реалізувати `DocxGrader` (`backend/app/graders/docx_grader.py`) для перевірки полів сторінки, шрифтів, інтервалів, вирівнювання, таблиць та списків у `.docx`.
 - [x] **T3.5:** Реалізувати `XlsxGrader` (`backend/app/graders/xlsx_grader.py`) для перевірки формул (`data_only=False`), обчислених значень (`data_only=True`) та діаграм у `.xlsx`.
-- [ ] **T3.6:** Реалізувати `AccdbGrader` (`backend/app/graders/accdb_grader.py`) для інспекції таблиць, полів та типів даних у `.accdb` та `HtmlGrader` (`backend/app/graders/html_grader.py`) на базі `BeautifulSoup4`.
+- [x] **T3.6:** Реалізувати `AccdbGrader` (`backend/app/graders/accdb_grader.py`) для інспекції таблиць, полів та типів даних у `.accdb` та `HtmlGrader` (`backend/app/graders/html_grader.py`) на базі `BeautifulSoup4`.
 - [ ] **T3.7:** Реалізувати оркестратор здачі робіт `SubmissionService` (`backend/app/services/submission_service.py`) та ендпоінти `POST /practicals/{id}/submit`, `PUT /practicals/{id}/rules`, `PATCH /submissions/{id}/grade`.
 - [ ] **T3.8:** Реалізувати `ExportService` (`backend/app/services/export_service.py`) для генерації відомостей групи у `.xlsx` та `.pdf` (`GET /analytics/groups/{group_id}/export`).
 - [ ] **T3.9:** Написати модульні та інтеграційні тести (`backend/tests/test_graders.py`, `backend/tests/test_submissions_api.py`) для всіх 4 парсерів, перевірки антиплагіату та блокування здачі без тесту-допуску.
