@@ -2,6 +2,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.v1.auth import router as auth_router
+from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import DomainError
 
@@ -32,6 +34,9 @@ def create_application() -> FastAPI:
                 "context": exc.context,
             },
         )
+
+    application.include_router(api_router, prefix=settings.API_V1_STR)
+    application.include_router(auth_router, include_in_schema=False)
 
     @application.get("/health", tags=["system"])
     async def health_check() -> dict[str, str]:

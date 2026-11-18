@@ -14,7 +14,7 @@
 - [x] **T2.5:** Синхронізувати контракти даних на фронтенді у `frontend/src/types/` (`api.ts`, `course.ts`, `grading.ts`) у повній відповідності до Pydantic-схем бекенду.
 
 ## Фаза 3: Бекенд та ядро автоперевірки
-- [ ] **T3.1:** Реалізувати JWT-автентифікацію (`backend/app/core/security.py`), RBAC-залежності (`get_current_user`, `require_role` у `backend/app/api/deps.py`) та ендпоінти `/api/v1/auth/login` і `/auth/me`.
+- [x] **T3.1:** Реалізувати JWT-автентифікацію (`backend/app/core/security.py`), RBAC-залежності (`get_current_user`, `require_role` у `backend/app/api/deps.py`) та ендпоінти `/api/v1/auth/login` і `/auth/me`.
 - [ ] **T3.2:** Реалізувати ендпоінти курсів, лекцій та логіку тесту-допуску (`backend/app/services/quiz_service.py`, `backend/app/api/v1/courses.py`) із розрахунком індивідуального варіанта студента.
 - [ ] **T3.3:** Реалізувати абстрактний клас `BaseGrader` (`backend/app/graders/base.py`), фабрику `GraderFactory` (`factory.py`) та модуль екстракції метаданих `docProps/core.xml` + SHA-256 антиплагіату (`backend/app/graders/metadata.py`).
 - [ ] **T3.4:** Реалізувати `DocxGrader` (`backend/app/graders/docx_grader.py`) для перевірки полів сторінки, шрифтів, інтервалів, вирівнювання, таблиць та списків у `.docx`.

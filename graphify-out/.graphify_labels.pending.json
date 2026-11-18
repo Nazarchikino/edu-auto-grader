@@ -1,8 +1,10 @@
 {
   "0": "package.json",
   "4": "main.tsx",
+  "5": "v1/auth.py",
   "6": "schemas/__init__.py",
   "7": "client.ts",
+  "11": "security.py",
   "14": "env.py",
   "15": "course.py",
   "16": "auth.py",
@@ -13,6 +15,5 @@
   "25": "api.ts",
   "26": "vite",
   "27": "course.ts",
-  "28": "grading.ts",
-  "29": "get_db"
+  "28": "grading.ts"
 }
