@@ -7,11 +7,11 @@
 - [x] **T1.4:** Запустити початкову індексацію графа кодової бази командою `graphify . --code-only` та перевірити генерацію `graphify-out/GRAPH_REPORT.md`.
 
 ## Фаза 2: Схеми БД, типи та контракти (Contract-First)
-- [ ] **T2.1:** Реалізувати асинхронне підключення до PostgreSQL у `backend/app/core/database.py` та створити SQLAlchemy 2.0 моделі `AcademicGroup`, `User` у `backend/app/models/user.py`.
-- [ ] **T2.2:** Створити SQLAlchemy 2.0 моделі `Course`, `Module`, `QuizQuestion`, `Practical` у `backend/app/models/course.py` та `QuizAttempt`, `Submission` у `backend/app/models/progress.py`.
-- [ ] **T2.3:** Налаштувати Alembic, згенерувати початкову міграцію БД, застосувати її та написати CLI-скрипт `backend/app/seed.py` для наповнення БД 4 курсами (`word`, `excel`, `access`, `html`), тестовою групою, викладачем та студентами.
-- [ ] **T2.4:** Описати Pydantic v2 схеми контрактів у `backend/app/schemas/` (`auth.py`, `course.py`, `grading.py`, `submission.py`), включно зі строго типізованими моделями `GradingRule`, `CriterionResult` та `GradingReport`.
-- [ ] **T2.5:** Синхронізувати контракти даних на фронтенді у `frontend/src/types/` (`api.ts`, `course.ts`, `grading.ts`) у повній відповідності до Pydantic-схем бекенду.
+- [x] **T2.1:** Реалізувати асинхронне підключення до PostgreSQL у `backend/app/core/database.py` та створити SQLAlchemy 2.0 моделі `AcademicGroup`, `User` у `backend/app/models/user.py`.
+- [x] **T2.2:** Створити SQLAlchemy 2.0 моделі `Course`, `Module`, `QuizQuestion`, `Practical` у `backend/app/models/course.py` та `QuizAttempt`, `Submission` у `backend/app/models/progress.py`.
+- [x] **T2.3:** Налаштувати Alembic, згенерувати початкову міграцію БД, застосувати її та написати CLI-скрипт `backend/app/seed.py` для наповнення БД 4 курсами (`word`, `excel`, `access`, `html`), тестовою групою, викладачем та студентами.
+- [x] **T2.4:** Описати Pydantic v2 схеми контрактів у `backend/app/schemas/` (`auth.py`, `course.py`, `grading.py`, `submission.py`), включно зі строго типізованими моделями `GradingRule`, `CriterionResult` та `GradingReport`.
+- [x] **T2.5:** Синхронізувати контракти даних на фронтенді у `frontend/src/types/` (`api.ts`, `course.ts`, `grading.ts`) у повній відповідності до Pydantic-схем бекенду.
 
 ## Фаза 3: Бекенд та ядро автоперевірки
 - [ ] **T3.1:** Реалізувати JWT-автентифікацію (`backend/app/core/security.py`), RBAC-залежності (`get_current_user`, `require_role` у `backend/app/api/deps.py`) та ендпоінти `/api/v1/auth/login` і `/auth/me`.
