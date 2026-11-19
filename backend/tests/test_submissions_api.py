@@ -1,8 +1,10 @@
 import uuid
 from pathlib import Path
 
+import openpyxl  # type: ignore[import-untyped]
 import pytest
 from httpx import AsyncClient
+from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 from sqlalchemy import select
 
 from app.models.course import Course, CourseSlug, Module, Practical
@@ -12,8 +14,8 @@ from tests.conftest import (
     SqliteAsyncSessionAdapter,
     build_sample_accdb,
     build_sample_docx,
-    build_sample_xlsx,
     make_auth_headers,
+    rewrite_openxml_core_metadata,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -34,21 +36,20 @@ async def _get_course_module_and_practical(
     db_session: SqliteAsyncSessionAdapter,
     slug: CourseSlug,
 ) -> tuple[Course, Module, Practical]:
-    """Завантажує курс, його перший модуль та практичну роботу за CourseSlug."""
+    """Завантажує курс, його перший модуль із практичною та саму практичну роботу."""
     course_res = await db_session.execute(select(Course).where(Course.slug == slug))
     course = course_res.scalar_one()
     assert isinstance(course, Course)
 
-    module_res = await db_session.execute(
-        select(Module).where(Module.course_id == course.id)
+    row_res = await db_session.execute(
+        select(Module, Practical)
+        .join(Practical, Practical.module_id == Module.id)
+        .where(Module.course_id == course.id)
+        .order_by(Module.order_index.asc())
+        .limit(1)
     )
-    module = module_res.scalar_one()
+    module, practical = row_res.one()
     assert isinstance(module, Module)
-
-    practical_res = await db_session.execute(
-        select(Practical).where(Practical.module_id == module.id)
-    )
-    practical = practical_res.scalar_one()
     assert isinstance(practical, Practical)
 
     return course, module, practical
@@ -132,7 +133,7 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     assert submit_locked_resp.status_code == 403
     assert submit_locked_resp.json()["code"] == "QUIZ_NOT_PASSED"
 
-    # 2. Невдала спроба тесту (1 правильна з 5 = 20% < 70%) не відкриває практичну роботу
+    # 2. Невдала спроба тесту (1 правильна з 6 = 16.67% < 70%) не відкриває практичну роботу
     teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
     teacher_headers = make_auth_headers(teacher.id, teacher.role)
     questions_resp = await async_client.get(
@@ -141,7 +142,7 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     )
     assert questions_resp.status_code == 200
     questions = questions_resp.json()
-    assert len(questions) == 5
+    assert len(questions) == 6
 
     failed_answers = [
         {
@@ -162,7 +163,7 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     assert fail_quiz_resp.status_code == 200
     fail_quiz_data = fail_quiz_resp.json()
     assert fail_quiz_data["passed"] is False
-    assert fail_quiz_data["score_percent"] == 20.0
+    assert fail_quiz_data["score_percent"] == pytest.approx(16.67, abs=0.01)
     assert fail_quiz_data["practical_unlocked"] is False
 
     still_locked_resp = await async_client.post(
@@ -173,13 +174,13 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     assert still_locked_resp.status_code == 403
     assert still_locked_resp.json()["code"] == "QUIZ_NOT_PASSED"
 
-    # 3. Успішна спроба тесту (4 правильні з 5 = 80% >= 70%) розблоковує практичну роботу
+    # 3. Успішна спроба тесту (5 правильних з 6 = 83.33% >= 70%) розблоковує практичну роботу
     passed_answers = [
         {
             "question_id": q["id"],
             "selected_option_index": (
                 q["correct_option_index"]
-                if idx < 4
+                if idx < 5
                 else (q["correct_option_index"] + 1) % len(q["options"])
             ),
         }
@@ -193,7 +194,7 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     assert pass_quiz_resp.status_code == 200
     pass_quiz_data = pass_quiz_resp.json()
     assert pass_quiz_data["passed"] is True
-    assert pass_quiz_data["score_percent"] == 80.0
+    assert pass_quiz_data["score_percent"] == pytest.approx(83.33, abs=0.01)
     assert pass_quiz_data["practical_unlocked"] is True
 
     # 4. Перевірка індивідуального варіанта для student2 (list_number=2 -> variant_index=1)
@@ -216,13 +217,19 @@ async def test_submit_all_four_practical_formats_via_api(
     student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
     headers = make_auth_headers(student1.id, student1.role)
 
-    # 1. Здача Microsoft Word (.docx)
+    # 1. Здача Microsoft Word (.docx) — Модуль 1 із word.json
     _, word_mod, word_prac = await _get_course_module_and_practical(
         db_session,
         CourseSlug.WORD,
     )
     await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_mod.id)
-    docx_file = build_sample_docx(tmp_path / "work1.docx")
+    docx_file = build_sample_docx(
+        tmp_path / "work1.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+    )
 
     word_resp = await async_client.post(
         f"/api/v1/practicals/{word_prac.id}/submit",
@@ -240,15 +247,33 @@ async def test_submit_all_four_practical_formats_via_api(
     assert word_sub["auto_score"] == 10.0
     assert word_sub["final_score"] == 10.0
     assert word_sub["is_plagiarism_flagged"] is False
-    assert word_sub["grading_report"]["passed_count"] == 6
+    assert word_sub["grading_report"]["passed_count"] == 4
 
-    # 2. Здача Microsoft Excel (.xlsx)
+    # 2. Здача Microsoft Excel (.xlsx) — Модуль 1 із excel.json
     _, excel_mod, excel_prac = await _get_course_module_and_practical(
         db_session,
         CourseSlug.EXCEL,
     )
     await _grant_quiz_pass(db_session, student_id=student1.id, module_id=excel_mod.id)
-    xlsx_file = build_sample_xlsx(tmp_path / "work2.xlsx")
+    xlsx_file = tmp_path / "work2.xlsx"
+    wb = openpyxl.Workbook()
+    ws_exams = wb.active
+    assert isinstance(ws_exams, Worksheet)
+    ws_exams.title = "Іспити"
+    ws_exams["A1"] = "Прізвище"
+    ws_exams["B1"] = "Алгебра"
+    ws_budget = wb.create_sheet("Бюджет")
+    ws_budget["E10"] = "=SUM(E2:E9)"
+    wb.save(str(xlsx_file))
+    wb.close()
+    rewrite_openxml_core_metadata(
+        xlsx_file,
+        creator="Student One",
+        last_modified_by="Student One",
+        created="2026-11-18T11:00:00Z",
+        modified="2026-11-18T11:30:00Z",
+        revision="1",
+    )
 
     excel_resp = await async_client.post(
         f"/api/v1/practicals/{excel_prac.id}/submit",
@@ -266,15 +291,32 @@ async def test_submit_all_four_practical_formats_via_api(
     assert excel_sub["auto_score"] == 10.0
     assert excel_sub["final_score"] == 10.0
     assert excel_sub["is_plagiarism_flagged"] is False
-    assert excel_sub["grading_report"]["passed_count"] == 4
+    assert excel_sub["grading_report"]["passed_count"] == 3
 
-    # 3. Здача Microsoft Access (.accdb)
+    # 3. Здача Microsoft Access (.accdb) — Модуль 3 із access.json (таблиця 'Друзі')
     _, access_mod, access_prac = await _get_course_module_and_practical(
         db_session,
         CourseSlug.ACCESS,
     )
     await _grant_quiz_pass(db_session, student_id=student1.id, module_id=access_mod.id)
-    accdb_file = build_sample_accdb(tmp_path / "work3.accdb")
+    accdb_file = build_sample_accdb(
+        tmp_path / "work3.accdb",
+        tables={
+            "Друзі": [
+                ("№ п/п", "AUTONUMBER"),
+                ("Прізвище", "SHORT TEXT"),
+                ("Ім'я", "SHORT TEXT"),
+                ("По батькові", "SHORT TEXT"),
+                ("Адреса", "SHORT TEXT"),
+                ("Індекс", "LONG"),
+                ("Телефон", "SHORT TEXT"),
+                ("Захоплення", "SHORT TEXT"),
+                ("Ел. пошта", "HYPERLINK"),
+                ("Дата народження", "DATE/TIME"),
+                ("Сімейний стан", "YES/NO"),
+            ]
+        },
+    )
 
     access_resp = await async_client.post(
         f"/api/v1/practicals/{access_prac.id}/submit",
@@ -292,9 +334,9 @@ async def test_submit_all_four_practical_formats_via_api(
     assert access_sub["auto_score"] == 10.0
     assert access_sub["final_score"] == 10.0
     assert access_sub["is_plagiarism_flagged"] is False
-    assert access_sub["grading_report"]["passed_count"] == 4
+    assert access_sub["grading_report"]["passed_count"] == 17
 
-    # 4. Здача HTML5 (JSON із пісочниці)
+    # 4. Здача HTML5 (JSON із пісочниці) — Модуль 1 із html.json
     _, html_mod, html_prac = await _get_course_module_and_practical(
         db_session,
         CourseSlug.HTML,
@@ -302,17 +344,18 @@ async def test_submit_all_four_practical_formats_via_api(
     await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
     valid_html = """<!DOCTYPE html>
     <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Візитівка студента КН-31</title>
+      </head>
       <body>
-        <header><h1>Розклад занять КН-31</h1></header>
-        <main>
-          <table>
-            <tr><th>Пара</th><th>Предмет</th></tr>
-            <tr><td>1</td><td>Інформатика</td></tr>
-            <tr><td>2</td><td>Програмування</td></tr>
-            <tr><td>3</td><td>Бази даних</td></tr>
-          </table>
-          <form><input type="text"><button>Надіслати</button></form>
-        </main>
+        <h1>Профіль студента</h1>
+        <h2>Навчання</h2>
+        <p>Вивчаю <strong>вебтехнології</strong> та основи HTML5.</p>
+        <h2>Інтереси</h2>
+        <p>Цікавлюся <em>семантичною версткою</em> та доступністю.</p>
+        <p>Регулярно виконую практичні роботи коледжу.</p>
+        <blockquote>Якісна розмітка — основа сучасного вебу.</blockquote>
       </body>
     </html>
     """
@@ -327,7 +370,7 @@ async def test_submit_all_four_practical_formats_via_api(
     assert html_sub["auto_score"] == 10.0
     assert html_sub["final_score"] == 10.0
     assert html_sub["is_plagiarism_flagged"] is False
-    assert html_sub["grading_report"]["passed_count"] == 4
+    assert html_sub["grading_report"]["passed_count"] == 9
 
     # 5. Перевірка заліковки студента (/submissions/me)
     my_subs_resp = await async_client.get("/api/v1/submissions/me", headers=headers)

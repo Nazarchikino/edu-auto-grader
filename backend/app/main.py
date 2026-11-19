@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.router import api_router
@@ -37,6 +38,11 @@ def create_application() -> FastAPI:
 
     application.include_router(api_router, prefix=settings.API_V1_STR)
     application.include_router(auth_router, include_in_schema=False)
+    application.mount(
+        "/media/courses",
+        StaticFiles(directory=settings.COURSE_MEDIA_DIR, check_dir=False),
+        name="course-media",
+    )
 
     @application.get("/health", tags=["system"])
     async def health_check() -> dict[str, str]:
