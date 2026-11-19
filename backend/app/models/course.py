@@ -23,6 +23,15 @@ class CourseSlug(StrEnum):
     HTML = "html"
 
 
+ALLOWED_COURSE_SLUGS: tuple[CourseSlug, ...] = (
+    CourseSlug.WORD,
+    CourseSlug.EXCEL,
+    CourseSlug.ACCESS,
+    CourseSlug.HTML,
+)
+MAX_COURSES_COUNT: int = len(ALLOWED_COURSE_SLUGS)
+
+
 class PracticalFormat(StrEnum):
     """Формати практичних робіт для ядра автоперевірки."""
 

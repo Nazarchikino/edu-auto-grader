@@ -39,10 +39,14 @@ export interface TokenPayload {
   exp: number;
 }
 
+export const ACADEMIC_COURSE_YEARS = [1, 2, 3, 4] as const;
+
+export type AcademicCourseYear = (typeof ACADEMIC_COURSE_YEARS)[number];
+
 export interface AcademicGroupBase {
   code: string;
   specialty: string;
-  course_year: number;
+  course_year: AcademicCourseYear;
 }
 
 export type AcademicGroupCreate = AcademicGroupBase;
@@ -50,7 +54,7 @@ export type AcademicGroupCreate = AcademicGroupBase;
 export interface AcademicGroupUpdate {
   code?: string | null;
   specialty?: string | null;
-  course_year?: number | null;
+  course_year?: AcademicCourseYear | null;
 }
 
 export interface AcademicGroupRead extends AcademicGroupBase {
@@ -87,6 +91,32 @@ export interface UserRead extends UserBase {
   id: string;
   group_code: string | null;
   created_at: string;
+}
+
+export interface ImportedStudentItem {
+  user_id: string;
+  list_number: number;
+  variant_number: number;
+  full_name: string;
+  email: string;
+  temp_password: string;
+}
+
+export interface ImportSkippedItem {
+  row_number: number;
+  full_name: string | null;
+  email: string | null;
+  reason: string;
+}
+
+export interface StudentImportResponse {
+  group_id: string;
+  group_code: string;
+  total_variants: number;
+  created_count: number;
+  skipped_count: number;
+  created: ImportedStudentItem[];
+  skipped: ImportSkippedItem[];
 }
 
 export interface HtmlSubmissionRequest {

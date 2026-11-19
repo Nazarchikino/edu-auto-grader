@@ -10,7 +10,14 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_db, require_role
 from app.core.exceptions import DomainError
-from app.models.course import Course, Module, Practical, QuizQuestion
+from app.models.course import (
+    ALLOWED_COURSE_SLUGS,
+    MAX_COURSES_COUNT,
+    Course,
+    Module,
+    Practical,
+    QuizQuestion,
+)
 from app.models.progress import QuizAttempt, Submission
 from app.models.user import User, UserRole
 from app.schemas.course import (
@@ -293,9 +300,10 @@ async def list_courses(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CourseRead]:
-    """Повертає перелік усіх курсів із прогресом поточного користувача."""
+    """Повертає перелік 4 навчальних курсів із прогресом поточного користувача."""
     stmt = (
         select(Course)
+        .where(Course.slug.in_(ALLOWED_COURSE_SLUGS))
         .options(
             selectinload(Course.modules).selectinload(Module.quiz_questions),
             selectinload(Course.modules).selectinload(Module.practical),
@@ -349,7 +357,7 @@ async def create_course(
     current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseRead:
-    """Створює новий навчальний курс (доступно для викладача та адміністратора)."""
+    """Створює новий навчальний курс у межах 4 фіксованих дисциплін."""
     existing_stmt = select(Course).where(Course.slug == payload.slug)
     existing_result = await db.execute(existing_stmt)
     if existing_result.scalar_one_or_none() is not None:
@@ -358,6 +366,16 @@ async def create_course(
             code="COURSE_SLUG_EXISTS",
             status_code=409,
             context={"slug": payload.slug.value},
+        )
+
+    total_courses_result = await db.execute(select(func.count(Course.id)))
+    total_courses_count = int(total_courses_result.scalar_one())
+    if total_courses_count >= MAX_COURSES_COUNT:
+        raise DomainError(
+            f"У системі дозволено не більше {MAX_COURSES_COUNT} навчальних курсів.",
+            code="MAX_COURSES_LIMIT_REACHED",
+            status_code=409,
+            context={"max_courses": MAX_COURSES_COUNT},
         )
 
     course = Course(

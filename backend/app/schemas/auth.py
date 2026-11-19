@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.user import UserRole
+from app.models.user import MAX_COURSE_YEAR, MIN_COURSE_YEAR, UserRole
 
 
 class ErrorResponse(BaseModel):
@@ -60,7 +60,7 @@ class AcademicGroupBase(BaseModel):
 
     code: str = Field(..., min_length=1, max_length=32)
     specialty: str = Field(..., min_length=1, max_length=128)
-    course_year: int = Field(..., ge=1, le=6)
+    course_year: int = Field(..., ge=MIN_COURSE_YEAR, le=MAX_COURSE_YEAR)
 
 
 class AcademicGroupCreate(AcademicGroupBase):
@@ -76,7 +76,11 @@ class AcademicGroupUpdate(BaseModel):
 
     code: str | None = Field(default=None, min_length=1, max_length=32)
     specialty: str | None = Field(default=None, min_length=1, max_length=128)
-    course_year: int | None = Field(default=None, ge=1, le=6)
+    course_year: int | None = Field(
+        default=None,
+        ge=MIN_COURSE_YEAR,
+        le=MAX_COURSE_YEAR,
+    )
 
 
 class AcademicGroupRead(AcademicGroupBase):
@@ -126,3 +130,41 @@ class UserRead(UserBase):
     id: uuid.UUID
     group_code: str | None = None
     created_at: datetime
+
+
+class ImportedStudentItem(BaseModel):
+    """Запис про успішно імпортованого студента з номером у групі, варіантом і паролем."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+    list_number: int = Field(..., ge=1, le=100)
+    variant_number: int = Field(..., ge=1)
+    full_name: str = Field(..., min_length=1, max_length=255)
+    email: str = Field(..., min_length=3, max_length=255)
+    temp_password: str = Field(..., min_length=1, max_length=128)
+
+
+class ImportSkippedItem(BaseModel):
+    """Запис про пропущений рядок під час масового імпорту студентів."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_number: int = Field(..., ge=1)
+    full_name: str | None = None
+    email: str | None = None
+    reason: str = Field(..., min_length=1)
+
+
+class StudentImportResponse(BaseModel):
+    """Підсумковий звіт масового імпорту студентів до академічної групи."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: uuid.UUID
+    group_code: str
+    total_variants: int = Field(..., ge=1)
+    created_count: int = Field(..., ge=0)
+    skipped_count: int = Field(..., ge=0)
+    created: list[ImportedStudentItem] = Field(default_factory=list)
+    skipped: list[ImportSkippedItem] = Field(default_factory=list)

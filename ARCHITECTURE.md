@@ -41,18 +41,21 @@ edu-auto-grader/
 │   │   ├── services/                # Бізнес-логіка
 │   │   │   ├── quiz_service.py      # Перевірка тесту-допуску
 │   │   │   ├── submission_service.py# Оркестрація перевірки та збереження результату
-│   │   │   └── export_service.py    # Генерація .xlsx та .pdf відомостей
+│   │   │   ├── export_service.py    # Генерація .xlsx та .pdf відомостей
+│   │   │   └── student_import_service.py # Масовий імпорт студентів (.docx/.txt)
 │   │   └── api/
 │   │       ├── deps.py              # Залежності get_db, get_current_user, require_role
 │   │       └── v1/
 │   │           ├── router.py
 │   │           ├── auth.py
+│   │           ├── admin.py
 │   │           ├── courses.py
 │   │           ├── practicals.py
 │   │           ├── submissions.py
 │   │           └── analytics.py
 │   └── tests/
 │       ├── conftest.py
+│       ├── test_admin_api.py
 │       ├── test_graders.py
 │       └── test_submissions_api.py
 └── frontend/
@@ -95,7 +98,7 @@ edu-auto-grader/
    * `id`: `UUID` (PK)
    * `code`: `VARCHAR(32)` (UNIQUE, NOT NULL, напр. `"КН-31"`)
    * `specialty`: `VARCHAR(128)` (NOT NULL)
-   * `course_year`: `SMALLINT` (NOT NULL)
+   * `course_year`: `SMALLINT` (NOT NULL, `CHECK (course_year BETWEEN 1 AND 4)` — 4 курси навчання коледжу)
 
 2. **`users`**
    * `id`: `UUID` (PK)
@@ -110,7 +113,7 @@ edu-auto-grader/
 3. **`courses`**
    * `id`: `UUID` (PK)
    * `title`: `VARCHAR(255)` (NOT NULL)
-   * `slug`: `ENUM('word', 'excel', 'access', 'html')` (UNIQUE, NOT NULL)
+   * `slug`: `ENUM('word', 'excel', 'access', 'html')` (UNIQUE, NOT NULL — фіксований перелік із 4 навчальних дисциплін)
    * `description`: `TEXT` (NOT NULL)
    * `teacher_id`: `UUID` (FK -> `users.id`, NOT NULL)
 
@@ -227,3 +230,41 @@ class BaseGrader(ABC):
 | `PUT` | `/practicals/{practical_id}/rules` | Teacher | Оновлення JSONB правил автоперевірки |
 | `PATCH` | `/submissions/{submission_id}/grade` | Teacher | Ручне коригування оцінки та додавання коментаря викладача |
 | `GET` | `/analytics/groups/{group_id}/export` | Teacher | Генерація відомості успішності у форматі `.xlsx` або `.pdf` |
+| `POST` | `/admin/users/import` | Admin | Масовий імпорт студентів із `.docx` або `.txt` з українським алфавітним сортуванням та звітом |
+
+### 3.4. Контракт масового імпорту студентів (`POST /api/v1/admin/users/import`)
+* **Запит (`multipart/form-data`):**
+  * `group_id`: `UUID` — ідентифікатор цільової академічної групи;
+  * `file`: бінарний файл `.docx` (офіційна таблиця видачі коледжу `ПІБ | Логін | E-mail | Пароль | Дод. інформація`) або `.txt` (UTF-8, один студент на рядок: `ПІБ; email; пароль`, `ПІБ; email` або `ПІБ`).
+* **Алгоритм обробки:**
+  1. Зчитування всіх валідних записів із нормалізацією символів апострофа (`` ` ``, `’`, `‘`, `ʼ`, `´` → `'`) у `full_name`. Якщо в `.docx` вказано лише `Логін`, формується `{login}@kpefk.com.ua`; якщо у `.txt` (або `.docx`) відсутній email чи пароль — генерується унікальний транслітерований `{surname}.{initial}@kpefk.com.ua` та тимчасовий 8-символьний пароль.
+  2. Сортування всіх зібраних кандидатів за українською абеткою (`А Б В Г Ґ Д Е Є Ж З И І Ї Й К Л М Н О П Р С Т У Ф Х Ц Ч Ш Щ Ь Ю Я`).
+  3. Пропуск дублікатів за `email` (у БД або в межах файлу) без переривання транзакції, присвоєння `list_number` (починаючи з `max(list_number у групі) + 1`, або з `1` для порожньої групи) та розрахунок `variant_number = calculate_variant_index(list_number, total_variants) + 1` (узгоджено з `quiz_service.py`).
+* **Відповідь (`200 OK`, `StudentImportResponse`):**
+```json
+{
+  "group_id": "00000000-0000-0000-0000-000000000000",
+  "group_code": "КН-31",
+  "total_variants": 3,
+  "created_count": 2,
+  "skipped_count": 1,
+  "created": [
+    {
+      "user_id": "11111111-1111-1111-1111-111111111111",
+      "list_number": 1,
+      "variant_number": 1,
+      "full_name": "Авраменко Іван Сергійович",
+      "email": "avramenko.i@kpefk.com.ua",
+      "temp_password": "PassWord1"
+    }
+  ],
+  "skipped": [
+    {
+      "row_number": 3,
+      "full_name": "Бондаренко Ірина Василівна",
+      "email": "student1@kpefk.lcloud.in.ua",
+      "reason": "Користувач із поштою «student1@kpefk.lcloud.in.ua» вже зареєстрований у системі."
+    }
+  ]
+}
+```
