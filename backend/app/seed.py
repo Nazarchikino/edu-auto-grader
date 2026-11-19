@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.models.course import (
+    ALLOWED_COURSE_SLUGS,
+    MAX_COURSES_COUNT,
     Course,
     CourseSlug,
     Module,
@@ -17,7 +19,13 @@ from app.models.course import (
     PracticalFormat,
     QuizQuestion,
 )
-from app.models.user import AcademicGroup, User, UserRole
+from app.models.user import (
+    MAX_COURSE_YEAR,
+    MIN_COURSE_YEAR,
+    AcademicGroup,
+    User,
+    UserRole,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,6 +694,18 @@ def build_seed_bundle() -> SeedBundle:
         _build_access_course(teacher),
         _build_html_course(teacher),
     ]
+
+    if not (MIN_COURSE_YEAR <= group.course_year <= MAX_COURSE_YEAR):
+        raise ValueError(
+            f"Курс академічної групи має бути в межах {MIN_COURSE_YEAR}..{MAX_COURSE_YEAR}."
+        )
+
+    course_slugs = tuple(course.slug for course in courses)
+    if len(courses) != MAX_COURSES_COUNT or course_slugs != ALLOWED_COURSE_SLUGS:
+        raise ValueError(
+            "Набір початкових даних повинен містити виключно 4 дисципліни: "
+            "word, excel, access, html."
+        )
 
     return SeedBundle(
         group=group,

@@ -32,7 +32,9 @@ import {
 import apiClient from "../../api/client";
 import { extractApiErrorMessage, useAuth } from "../../context/AuthContext";
 import {
+  ACADEMIC_COURSE_YEARS,
   USER_ROLES,
+  type AcademicCourseYear,
   type AcademicGroupCreate,
   type AcademicGroupRead,
   type AcademicGroupUpdate,
@@ -45,7 +47,7 @@ import {
 type AdminTab = "users" | "groups";
 type RoleFilter = "all" | UserRole;
 type GroupFilter = "all" | "unassigned" | string;
-type CourseYearFilter = "all" | number;
+type CourseYearFilter = "all" | AcademicCourseYear;
 
 interface FeedbackBanner {
   type: "success" | "error";
@@ -97,7 +99,11 @@ const ROLE_META: Record<
   },
 };
 
-const COURSE_YEARS: readonly number[] = [1, 2, 3, 4, 5, 6];
+const COURSE_YEARS: readonly AcademicCourseYear[] = ACADEMIC_COURSE_YEARS;
+
+function isAcademicCourseYear(value: number): value is AcademicCourseYear {
+  return (ACADEMIC_COURSE_YEARS as readonly number[]).includes(value);
+}
 
 async function fetchAdminUsers(): Promise<UserRead[]> {
   const response = await apiClient.get<UserRead[]>("/admin/users");
@@ -671,8 +677,8 @@ export function AdminUsersPage(): ReactElement {
       setGroupFormError("Вкажіть спеціальність академічної групи.");
       return;
     }
-    if (!Number.isInteger(parsedYear) || parsedYear < 1 || parsedYear > 6) {
-      setGroupFormError("Курс навчання має бути в межах від 1 до 6.");
+    if (!Number.isInteger(parsedYear) || !isAcademicCourseYear(parsedYear)) {
+      setGroupFormError("Курс навчання має бути в межах від 1 до 4.");
       return;
     }
 

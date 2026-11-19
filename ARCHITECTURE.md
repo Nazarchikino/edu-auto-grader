@@ -95,7 +95,7 @@ edu-auto-grader/
    * `id`: `UUID` (PK)
    * `code`: `VARCHAR(32)` (UNIQUE, NOT NULL, напр. `"КН-31"`)
    * `specialty`: `VARCHAR(128)` (NOT NULL)
-   * `course_year`: `SMALLINT` (NOT NULL)
+   * `course_year`: `SMALLINT` (NOT NULL, `CHECK (course_year BETWEEN 1 AND 4)` — 4 курси навчання коледжу)
 
 2. **`users`**
    * `id`: `UUID` (PK)
@@ -110,7 +110,7 @@ edu-auto-grader/
 3. **`courses`**
    * `id`: `UUID` (PK)
    * `title`: `VARCHAR(255)` (NOT NULL)
-   * `slug`: `ENUM('word', 'excel', 'access', 'html')` (UNIQUE, NOT NULL)
+   * `slug`: `ENUM('word', 'excel', 'access', 'html')` (UNIQUE, NOT NULL — фіксований перелік із 4 навчальних дисциплін)
    * `description`: `TEXT` (NOT NULL)
    * `teacher_id`: `UUID` (FK -> `users.id`, NOT NULL)
 

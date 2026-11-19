@@ -3,8 +3,11 @@ import uuid
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
+from app.models.course import ALLOWED_COURSE_SLUGS, CourseSlug
 from app.models.user import AcademicGroup, User
+from app.seed import build_seed_bundle
 from tests.conftest import SqliteAsyncSessionAdapter, make_auth_headers
 
 pytestmark = pytest.mark.asyncio
@@ -264,3 +267,116 @@ async def test_admin_users_crud_filters_and_safety_guards(
         headers=headers,
     )
     assert delete_new_resp.status_code == 204
+
+
+async def test_academic_group_course_year_restricted_to_1_through_4(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє обмеження AcademicGroup.course_year діапазоном 1..4 у API, seed та БД."""
+    admin = await _get_user_by_email(db_session, "admin@kpefk.lcloud.in.ua")
+    headers = make_auth_headers(admin.id, admin.role)
+
+    # 1. Валідні граничні значення 1 та 4 приймаються
+    create_y1 = await async_client.post(
+        "/api/v1/admin/groups",
+        headers=headers,
+        json={
+            "code": "КН-11",
+            "specialty": "122 Комп'ютерні науки",
+            "course_year": 1,
+        },
+    )
+    assert create_y1.status_code == 201
+    group_id = create_y1.json()["id"]
+
+    patch_y4 = await async_client.patch(
+        f"/api/v1/admin/groups/{group_id}",
+        headers=headers,
+        json={"course_year": 4},
+    )
+    assert patch_y4.status_code == 200
+    assert patch_y4.json()["course_year"] == 4
+
+    # 2. Значення поза 1..4 (0, 5, 6) відхиляються Pydantic із HTTP 422
+    for invalid_year in (0, 5, 6):
+        create_invalid = await async_client.post(
+            "/api/v1/admin/groups",
+            headers=headers,
+            json={
+                "code": f"КН-{invalid_year}1",
+                "specialty": "122 Комп'ютерні науки",
+                "course_year": invalid_year,
+            },
+        )
+        assert create_invalid.status_code == 422
+
+        patch_invalid = await async_client.patch(
+            f"/api/v1/admin/groups/{group_id}",
+            headers=headers,
+            json={"course_year": invalid_year},
+        )
+        assert patch_invalid.status_code == 422
+
+    # 3. Перевірка CheckConstraint безпосередньо на рівні БД
+    db_session.add(
+        AcademicGroup(
+            code="КН-51",
+            specialty="122 Комп'ютерні науки",
+            course_year=5,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+    # 4. Перевірка seed-даних: course_year у межах 1..4
+    seed_bundle = build_seed_bundle()
+    assert 1 <= seed_bundle.group.course_year <= 4
+
+
+async def test_courses_restricted_strictly_to_4_disciplines(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє, що в системі присутні виключно 4 дисципліни (word, excel, access, html)."""
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    headers = make_auth_headers(teacher.id, teacher.role)
+
+    # 1. Seed-набір містить строго 4 дисципліни у канонічному наборі
+    seed_bundle = build_seed_bundle()
+    assert len(seed_bundle.courses) == 4
+    assert tuple(course.slug for course in seed_bundle.courses) == ALLOWED_COURSE_SLUGS
+
+    # 2. API GET /courses повертає рівно 4 курси: word, excel, access, html
+    list_resp = await async_client.get("/api/v1/courses", headers=headers)
+    assert list_resp.status_code == 200
+    courses_payload = list_resp.json()
+    assert len(courses_payload) == 4
+    returned_slugs = {item["slug"] for item in courses_payload}
+    assert returned_slugs == {slug.value for slug in CourseSlug}
+
+    # 3. Створення сторонньої дисципліни відхиляється з HTTP 422
+    invalid_slug_resp = await async_client.post(
+        "/api/v1/courses",
+        headers=headers,
+        json={
+            "title": "Тестовий 5-й курс",
+            "slug": "powerpoint",
+            "description": "Зайвий тестовий курс",
+        },
+    )
+    assert invalid_slug_resp.status_code == 422
+
+    # 4. Повторне створення однієї з 4 наявних дисциплін відхиляється з HTTP 409
+    duplicate_resp = await async_client.post(
+        "/api/v1/courses",
+        headers=headers,
+        json={
+            "title": "Дубль Word",
+            "slug": "word",
+            "description": "Спроба створити 5-й курс",
+        },
+    )
+    assert duplicate_resp.status_code == 409
+    assert duplicate_resp.json()["code"] == "COURSE_SLUG_EXISTS"

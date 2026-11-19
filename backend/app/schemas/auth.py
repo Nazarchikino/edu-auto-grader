@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.user import UserRole
+from app.models.user import MAX_COURSE_YEAR, MIN_COURSE_YEAR, UserRole
 
 
 class ErrorResponse(BaseModel):
@@ -60,7 +60,7 @@ class AcademicGroupBase(BaseModel):
 
     code: str = Field(..., min_length=1, max_length=32)
     specialty: str = Field(..., min_length=1, max_length=128)
-    course_year: int = Field(..., ge=1, le=6)
+    course_year: int = Field(..., ge=MIN_COURSE_YEAR, le=MAX_COURSE_YEAR)
 
 
 class AcademicGroupCreate(AcademicGroupBase):
@@ -76,7 +76,11 @@ class AcademicGroupUpdate(BaseModel):
 
     code: str | None = Field(default=None, min_length=1, max_length=32)
     specialty: str | None = Field(default=None, min_length=1, max_length=128)
-    course_year: int | None = Field(default=None, ge=1, le=6)
+    course_year: int | None = Field(
+        default=None,
+        ge=MIN_COURSE_YEAR,
+        le=MAX_COURSE_YEAR,
+    )
 
 
 class AcademicGroupRead(AcademicGroupBase):

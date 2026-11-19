@@ -39,10 +39,14 @@ export interface TokenPayload {
   exp: number;
 }
 
+export const ACADEMIC_COURSE_YEARS = [1, 2, 3, 4] as const;
+
+export type AcademicCourseYear = (typeof ACADEMIC_COURSE_YEARS)[number];
+
 export interface AcademicGroupBase {
   code: string;
   specialty: string;
-  course_year: number;
+  course_year: AcademicCourseYear;
 }
 
 export type AcademicGroupCreate = AcademicGroupBase;
@@ -50,7 +54,7 @@ export type AcademicGroupCreate = AcademicGroupBase;
 export interface AcademicGroupUpdate {
   code?: string | null;
   specialty?: string | null;
-  course_year?: number | null;
+  course_year?: AcademicCourseYear | null;
 }
 
 export interface AcademicGroupRead extends AcademicGroupBase {

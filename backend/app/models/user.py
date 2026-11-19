@@ -2,10 +2,22 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, ForeignKey, SmallInteger, String, Uuid, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    SmallInteger,
+    String,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+MIN_COURSE_YEAR: int = 1
+MAX_COURSE_YEAR: int = 4
 
 
 class UserRole(StrEnum):
@@ -25,6 +37,12 @@ class AcademicGroup(Base):
     """Академічна група коледжу (таблиця `academic_groups`)."""
 
     __tablename__ = "academic_groups"
+    __table_args__ = (
+        CheckConstraint(
+            f"course_year >= {MIN_COURSE_YEAR} AND course_year <= {MAX_COURSE_YEAR}",
+            name="ck_academic_groups_course_year_range",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
