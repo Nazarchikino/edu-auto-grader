@@ -130,3 +130,41 @@ class UserRead(UserBase):
     id: uuid.UUID
     group_code: str | None = None
     created_at: datetime
+
+
+class ImportedStudentItem(BaseModel):
+    """Запис про успішно імпортованого студента з номером у групі, варіантом і паролем."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+    list_number: int = Field(..., ge=1, le=100)
+    variant_number: int = Field(..., ge=1)
+    full_name: str = Field(..., min_length=1, max_length=255)
+    email: str = Field(..., min_length=3, max_length=255)
+    temp_password: str = Field(..., min_length=1, max_length=128)
+
+
+class ImportSkippedItem(BaseModel):
+    """Запис про пропущений рядок під час масового імпорту студентів."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_number: int = Field(..., ge=1)
+    full_name: str | None = None
+    email: str | None = None
+    reason: str = Field(..., min_length=1)
+
+
+class StudentImportResponse(BaseModel):
+    """Підсумковий звіт масового імпорту студентів до академічної групи."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: uuid.UUID
+    group_code: str
+    total_variants: int = Field(..., ge=1)
+    created_count: int = Field(..., ge=0)
+    skipped_count: int = Field(..., ge=0)
+    created: list[ImportedStudentItem] = Field(default_factory=list)
+    skipped: list[ImportSkippedItem] = Field(default_factory=list)

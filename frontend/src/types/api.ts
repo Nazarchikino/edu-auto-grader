@@ -93,6 +93,32 @@ export interface UserRead extends UserBase {
   created_at: string;
 }
 
+export interface ImportedStudentItem {
+  user_id: string;
+  list_number: number;
+  variant_number: number;
+  full_name: string;
+  email: string;
+  temp_password: string;
+}
+
+export interface ImportSkippedItem {
+  row_number: number;
+  full_name: string | null;
+  email: string | null;
+  reason: string;
+}
+
+export interface StudentImportResponse {
+  group_id: string;
+  group_code: string;
+  total_variants: number;
+  created_count: number;
+  skipped_count: number;
+  created: ImportedStudentItem[];
+  skipped: ImportSkippedItem[];
+}
+
 export interface HtmlSubmissionRequest {
   raw_code: string;
 }

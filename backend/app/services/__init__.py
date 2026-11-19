@@ -17,6 +17,18 @@ from app.services.quiz_service import (
     calculate_variant_index,
     resolve_student_variant,
 )
+from app.services.student_import_service import (
+    DEFAULT_COLLEGE_EMAIL_DOMAIN,
+    DEFAULT_TOTAL_VARIANTS,
+    UKRAINIAN_ALPHABET,
+    StudentImportService,
+    build_generated_email,
+    generate_temp_password,
+    normalize_full_name,
+    parse_docx_students,
+    parse_txt_students,
+    ukrainian_sort_key,
+)
 from app.services.submission_service import (
     SubmissionService,
     serialize_practical_teacher,
@@ -24,6 +36,8 @@ from app.services.submission_service import (
 )
 
 __all__ = [
+    "DEFAULT_COLLEGE_EMAIL_DOMAIN",
+    "DEFAULT_TOTAL_VARIANTS",
     "ExportService",
     "ExportedDocument",
     "GroupJournalBundle",
@@ -31,15 +45,23 @@ __all__ = [
     "PracticalColumnInfo",
     "QUIZ_PASS_THRESHOLD_PERCENT",
     "QuizService",
+    "StudentImportService",
     "SubmissionService",
+    "UKRAINIAN_ALPHABET",
     "XLSX_MEDIA_TYPE",
     "build_content_disposition",
+    "build_generated_email",
     "build_group_journal",
     "calculate_criterion_error_stats",
     "calculate_variant_index",
+    "generate_temp_password",
+    "normalize_full_name",
+    "parse_docx_students",
+    "parse_txt_students",
     "render_group_journal_pdf",
     "render_group_journal_xlsx",
     "resolve_student_variant",
     "serialize_practical_teacher",
     "serialize_submission",
+    "ukrainian_sort_key",
 ]

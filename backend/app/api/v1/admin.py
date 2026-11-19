@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,10 +16,12 @@ from app.schemas.auth import (
     AcademicGroupCreate,
     AcademicGroupRead,
     AcademicGroupUpdate,
+    StudentImportResponse,
     UserCreate,
     UserRead,
     UserUpdate,
 )
+from app.services.student_import_service import StudentImportService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -344,6 +346,30 @@ async def create_admin_user(
 
     created_user = await _get_user_with_group_or_404(db, user.id)
     return serialize_user(created_user)
+
+
+@router.post(
+    "/users/import",
+    response_model=StudentImportResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def import_admin_students(
+    _current_admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    group_id: Annotated[uuid.UUID, Form()],
+    file: Annotated[UploadFile, File()],
+) -> StudentImportResponse:
+    """Масово імпортує студентів академічної групи з файлу відомості .docx або .txt."""
+    file_bytes = await file.read()
+    filename = file.filename or ""
+    await file.close()
+
+    service = StudentImportService(db)
+    return await service.import_students(
+        group_id=group_id,
+        filename=filename,
+        file_bytes=file_bytes,
+    )
 
 
 @router.patch("/users/{user_id}", response_model=UserRead)

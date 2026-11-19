@@ -1,7 +1,10 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type ChangeEvent,
+  type DragEvent,
   type FormEvent,
   type ReactElement,
 } from "react";
@@ -12,7 +15,9 @@ import {
   BookMarked,
   Building2,
   CheckCircle2,
+  Download,
   Edit3,
+  FileText,
   GraduationCap,
   KeyRound,
   Layers,
@@ -23,6 +28,7 @@ import {
   Search,
   Shield,
   Trash2,
+  Upload,
   UserCheck,
   UserCog,
   UserPlus,
@@ -38,6 +44,7 @@ import {
   type AcademicGroupCreate,
   type AcademicGroupRead,
   type AcademicGroupUpdate,
+  type StudentImportResponse,
   type UserCreate,
   type UserRead,
   type UserRole,
@@ -115,6 +122,111 @@ async function fetchAdminGroups(): Promise<AcademicGroupRead[]> {
   return response.data;
 }
 
+async function importStudentsFile(
+  groupId: string,
+  file: File
+): Promise<StudentImportResponse> {
+  const formData = new FormData();
+  formData.append("group_id", groupId);
+  formData.append("file", file);
+  const response = await apiClient.post<StudentImportResponse>(
+    "/admin/users/import",
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+      timeout: 60000,
+    }
+  );
+  return response.data;
+}
+
+function isSupportedImportFileName(fileName: string): boolean {
+  const normalized = fileName.trim().toLowerCase();
+  return normalized.endsWith(".docx") || normalized.endsWith(".txt");
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} Б`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} КБ`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(2)} МБ`;
+}
+
+function buildCredentialsReportText(report: StudentImportResponse): string {
+  const generatedAt = new Date().toLocaleString("uk-UA", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  const lines: string[] = [
+    "ЗВІТ ОБЛІКОВИХ ДАНИХ СТУДЕНТІВ (Edu Auto Grader)",
+    `Академічна група: ${report.group_code}`,
+    `Дата імпорту: ${generatedAt}`,
+    `Створено студентів: ${report.created_count}`,
+    `Пропущено записів: ${report.skipped_count}`,
+    `Кількість варіантів практичних робіт: ${report.total_variants}`,
+    "========================================================================================",
+    "№ у групі | Варіант | ПІБ | E-mail | Пароль",
+    "----------------------------------------------------------------------------------------",
+  ];
+
+  if (report.created.length === 0) {
+    lines.push("Нових студентів не створено.");
+  } else {
+    for (const item of report.created) {
+      lines.push(
+        `${item.list_number} | Варіант ${item.variant_number} | ${item.full_name} | ${item.email} | ${item.temp_password}`
+      );
+    }
+  }
+
+  if (report.skipped.length > 0) {
+    lines.push(
+      "",
+      "ПРОПУЩЕНІ ЗАПИСИ ТА ПОМИЛКИ:",
+      "----------------------------------------------------------------------------------------"
+    );
+    for (const skipped of report.skipped) {
+      const identityParts = [
+        skipped.full_name ?? "без ПІБ",
+        skipped.email !== null ? `<${skipped.email}>` : null,
+      ].filter((part): part is string => part !== null);
+      lines.push(
+        `Рядок #${skipped.row_number} | ${identityParts.join(" ")} | ${skipped.reason}`
+      );
+    }
+  }
+
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+function downloadCredentialsReportTxt(report: StudentImportResponse): void {
+  const reportText = buildCredentialsReportText(report);
+  const blob = new Blob([`\uFEFF${reportText}`], {
+    type: "text/plain;charset=utf-8",
+  });
+  const url = window.URL.createObjectURL(blob);
+  const safeGroupCode = report.group_code
+    .trim()
+    .replace(/[^a-zA-Zа-яА-ЯіІїЇєЄґҐ0-9_-]+/g, "_");
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `students_credentials_${safeGroupCode || "group"}_${dateStamp}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 function formatRegistrationDate(isoString: string): string {
   const parsed = new Date(isoString);
   if (Number.isNaN(parsed.getTime())) {
@@ -149,6 +261,16 @@ export function AdminUsersPage(): ReactElement {
   const [userModal, setUserModal] = useState<UserModalState | null>(null);
   const [groupModal, setGroupModal] = useState<GroupModalState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
+
+  // Поля масового імпорту студентів (.docx / .txt)
+  const [importGroupId, setImportGroupId] = useState<string>("");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importFormError, setImportFormError] = useState<string | null>(null);
+  const [importResult, setImportResult] =
+    useState<StudentImportResponse | null>(null);
+  const [isImportDragOver, setIsImportDragOver] = useState<boolean>(false);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Поля форми користувача
   const [userFullName, setUserFullName] = useState<string>("");
@@ -197,6 +319,8 @@ export function AdminUsersPage(): ReactElement {
       }
       if (deleteTarget !== null) {
         setDeleteTarget(null);
+      } else if (isImportModalOpen) {
+        setIsImportModalOpen(false);
       } else if (userModal !== null) {
         setUserModal(null);
       } else if (groupModal !== null) {
@@ -205,7 +329,7 @@ export function AdminUsersPage(): ReactElement {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deleteTarget, groupModal, userModal]);
+  }, [deleteTarget, groupModal, isImportModalOpen, userModal]);
 
   // Допоміжні довідники та агрегації
   const groupById = useMemo<Record<string, AcademicGroupRead>>(() => {
@@ -511,7 +635,126 @@ export function AdminUsersPage(): ReactElement {
     },
   });
 
+  // Мутація масового імпорту студентів (.docx / .txt)
+  const importStudentsMutation = useMutation({
+    mutationFn: async ({
+      groupId,
+      file,
+    }: {
+      groupId: string;
+      file: File;
+    }): Promise<StudentImportResponse> => importStudentsFile(groupId, file),
+    onSuccess: async (report) => {
+      await invalidateAdminCaches();
+      setImportFormError(null);
+      setImportResult(report);
+      setFeedback({
+        type: "success",
+        text: `Імпорт для групи «${report.group_code}» завершено: створено ${report.created_count} студ., пропущено ${report.skipped_count}.`,
+      });
+    },
+    onError: (error: unknown) => {
+      setImportFormError(
+        extractApiErrorMessage(
+          error,
+          "Не вдалося виконати масовий імпорт студентів."
+        )
+      );
+    },
+  });
+
   // Відкриття модалок
+  const openImportModal = (preselectedGroupId?: string): void => {
+    setFeedback(null);
+    setImportFormError(null);
+    setImportResult(null);
+    setImportFile(null);
+    setIsImportDragOver(false);
+    if (importFileInputRef.current !== null) {
+      importFileInputRef.current.value = "";
+    }
+    const defaultGroupId =
+      preselectedGroupId ??
+      (groupFilter !== "all" && groupFilter !== "unassigned"
+        ? groupFilter
+        : (groups[0]?.id ?? ""));
+    setImportGroupId(defaultGroupId);
+    setIsImportModalOpen(true);
+  };
+
+  const resetImportForAnotherFile = (): void => {
+    setImportResult(null);
+    setImportFile(null);
+    setImportFormError(null);
+    setIsImportDragOver(false);
+    if (importFileInputRef.current !== null) {
+      importFileInputRef.current.value = "";
+    }
+  };
+
+  const handleSelectImportFile = (file: File | null): void => {
+    setImportFormError(null);
+    if (file === null) {
+      setImportFile(null);
+      return;
+    }
+    if (!isSupportedImportFileName(file.name)) {
+      setImportFile(null);
+      setImportFormError(
+        "Підтримуються лише файли відомостей у форматах .docx або .txt."
+      );
+      return;
+    }
+    if (file.size === 0) {
+      setImportFile(null);
+      setImportFormError("Обраний файл порожній.");
+      return;
+    }
+    setImportFile(file);
+  };
+
+  const handleImportFileInputChange = (
+    event: ChangeEvent<HTMLInputElement>
+  ): void => {
+    const selected = event.target.files?.[0] ?? null;
+    handleSelectImportFile(selected);
+  };
+
+  const handleImportDragOver = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    setIsImportDragOver(true);
+  };
+
+  const handleImportDragLeave = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    setIsImportDragOver(false);
+  };
+
+  const handleImportDrop = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    setIsImportDragOver(false);
+    const droppedFile = event.dataTransfer.files?.[0] ?? null;
+    handleSelectImportFile(droppedFile);
+  };
+
+  const handleSubmitImportForm = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    setImportFormError(null);
+
+    if (importGroupId.trim().length === 0) {
+      setImportFormError("Оберіть академічну групу для імпорту студентів.");
+      return;
+    }
+    if (importFile === null) {
+      setImportFormError("Оберіть файл відомості у форматі .docx або .txt.");
+      return;
+    }
+
+    importStudentsMutation.mutate({
+      groupId: importGroupId,
+      file: importFile,
+    });
+  };
   const openCreateUserModal = (defaultRole: UserRole = "student"): void => {
     setFeedback(null);
     setUserFormError(null);
@@ -817,6 +1060,15 @@ export function AdminUsersPage(): ReactElement {
                 className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
               />
               Оновити
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openImportModal()}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-100"
+            >
+              <Upload className="h-4 w-4" />
+              Імпорт студентів
             </button>
 
             <button
@@ -1450,6 +1702,15 @@ export function AdminUsersPage(): ReactElement {
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
+                          onClick={() => openImportModal(group.id)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
+                          title={`Масовий імпорт студентів у групу ${group.code}`}
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                          Імпорт
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => openEditGroupModal(group)}
                           className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
                         >
@@ -1863,6 +2124,418 @@ export function AdminUsersPage(): ReactElement {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* МОДАЛКА: Масовий імпорт студентів (.docx / .txt) */}
+      {isImportModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="import-modal-title"
+        >
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
+                  <Upload className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3
+                    id="import-modal-title"
+                    className="text-base font-bold text-slate-900"
+                  >
+                    Імпорт студентів (.docx / .txt)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Масове завантаження відомості коледжу з алфавітним
+                    сортуванням та автоматичною прив&apos;язкою варіантів
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsImportModalOpen(false)}
+                disabled={importStudentsMutation.isPending}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
+                aria-label="Закрити вікно імпорту"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto p-6">
+              {importResult === null ? (
+                <form onSubmit={handleSubmitImportForm} className="space-y-5">
+                  {importFormError !== null && (
+                    <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>{importFormError}</span>
+                    </div>
+                  )}
+
+                  {groups.length === 0 ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
+                      У довіднику ще немає жодної академічної групи. Спочатку
+                      створіть групу, щоб імпортувати до неї студентів.
+                    </div>
+                  ) : (
+                    <div>
+                      <label
+                        htmlFor="import-students-group"
+                        className="block text-xs font-semibold text-slate-700"
+                      >
+                        Цільова академічна група *
+                      </label>
+                      <select
+                        id="import-students-group"
+                        value={importGroupId}
+                        onChange={(event) =>
+                          setImportGroupId(event.target.value)
+                        }
+                        required
+                        className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                      >
+                        {groups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {group.code} — {group.course_year} курс (
+                            {group.specialty}) • зараз{" "}
+                            {studentsCountByGroup[group.id] ?? 0} студ.
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Завантаження файлу (.docx або .txt) */}
+                  <div>
+                    <label
+                      htmlFor="import-students-file"
+                      className="block text-xs font-semibold text-slate-700"
+                    >
+                      Файл відомості або списку студентів (.docx / .txt) *
+                    </label>
+                    <div
+                      onDragOver={handleImportDragOver}
+                      onDragLeave={handleImportDragLeave}
+                      onDrop={handleImportDrop}
+                      className={`mt-1.5 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-7 text-center transition-colors ${
+                        isImportDragOver
+                          ? "border-emerald-500 bg-emerald-50/70"
+                          : importFile !== null
+                            ? "border-emerald-300 bg-emerald-50/30"
+                            : "border-slate-300 bg-slate-50/60 hover:border-slate-400"
+                      }`}
+                    >
+                      <input
+                        ref={importFileInputRef}
+                        id="import-students-file"
+                        type="file"
+                        accept=".docx,.txt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                        onChange={handleImportFileInputChange}
+                        className="sr-only"
+                      />
+
+                      {importFile === null ? (
+                        <>
+                          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-emerald-600 shadow-sm">
+                            <FileText className="h-5 w-5" />
+                          </div>
+                          <p className="mt-3 text-sm font-semibold text-slate-800">
+                            Перетягніть файл сюди або оберіть з комп&apos;ютера
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Підтримуються таблиці Microsoft Word (.docx) та
+                            текстові списки UTF-8 (.txt) до 10 МБ
+                          </p>
+                          <label
+                            htmlFor="import-students-file"
+                            className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm transition-colors hover:bg-slate-100"
+                          >
+                            <Upload className="h-3.5 w-3.5" />
+                            Обрати файл (.docx / .txt)
+                          </label>
+                        </>
+                      ) : (
+                        <div className="flex w-full max-w-md items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-white px-4 py-3 text-left shadow-sm">
+                          <div className="flex min-w-0 items-center gap-3">
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+                              <FileText className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-slate-900">
+                                {importFile.name}
+                              </p>
+                              <p className="text-xs text-slate-500">
+                                {formatFileSize(importFile.size)}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setImportFile(null);
+                              if (importFileInputRef.current !== null) {
+                                importFileInputRef.current.value = "";
+                              }
+                            }}
+                            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                            aria-label="Прибрати обраний файл"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Пам'ятка про підтримувані формати та сортування */}
+                  <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 text-xs leading-relaxed text-slate-700 space-y-2">
+                    <p className="font-semibold text-blue-900">
+                      Підтримувані формати та правила нумерації:
+                    </p>
+                    <ul className="list-disc space-y-1 pl-4">
+                      <li>
+                        <strong>Відомість коледжу (.docx):</strong> таблиця з
+                        колонками{" "}
+                        <code className="rounded bg-white px-1 py-0.5 text-[11px]">
+                          ПІБ | Логін | E-mail | Пароль | Дод. інформація
+                        </code>
+                        . Якщо заповнено лише <strong>Логін</strong>, пошта
+                        формується як{" "}
+                        <code className="rounded bg-white px-1 py-0.5 text-[11px]">
+                          {"{login}@kpefk.com.ua"}
+                        </code>
+                        .
+                      </li>
+                      <li>
+                        <strong>Текстовий список (.txt, UTF-8):</strong> один
+                        студент на рядок у форматі{" "}
+                        <code className="rounded bg-white px-1 py-0.5 text-[11px]">
+                          ПІБ; email; пароль
+                        </code>
+                        ,{" "}
+                        <code className="rounded bg-white px-1 py-0.5 text-[11px]">
+                          ПІБ; email
+                        </code>{" "}
+                        або просто{" "}
+                        <code className="rounded bg-white px-1 py-0.5 text-[11px]">
+                          ПІБ
+                        </code>{" "}
+                        (email та 8-символьний пароль згенеруються автоматично).
+                      </li>
+                      <li>
+                        <strong>Алфавітне сортування:</strong> усі валідні
+                        записи автоматично сортуються за українською абеткою (з
+                        коректним порядком <strong>Ґ, Є, І, Ї</strong>) перед
+                        присвоєнням <strong>№ у групі</strong> та{" "}
+                        <strong>Варіанта</strong>; дублікати e-mail
+                        пропускаються без переривання імпорту.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2.5 border-t border-slate-100 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setIsImportModalOpen(false)}
+                      disabled={importStudentsMutation.isPending}
+                      className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      Скасувати
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={
+                        importStudentsMutation.isPending ||
+                        groups.length === 0 ||
+                        importFile === null
+                      }
+                      className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {importStudentsMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Upload className="h-4 w-4" />
+                      )}
+                      {importStudentsMutation.isPending
+                        ? "Імпортування..."
+                        : "Імпортувати студентів"}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="space-y-5">
+                  {/* Зведена статистика імпорту */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                        Академічна група
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">
+                        {importResult.group_code}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700">
+                        Створено
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-emerald-800">
+                        {importResult.created_count}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">
+                        Пропущено
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-amber-800">
+                        {importResult.skipped_count}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">
+                        База варіантів
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-blue-800">
+                        {importResult.total_variants}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Попередження про збереження паролів + кнопка завантаження звіту */}
+                  <div className="flex flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-2.5 text-xs text-emerald-900">
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                      <p>
+                        Список студентів відсортовано за українською абеткою та
+                        збережено в базі даних. Збережіть звіт облікових даних
+                        зараз, оскільки паролі в системі зберігаються у
+                        захешованому вигляді.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => downloadCredentialsReportTxt(importResult)}
+                      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700"
+                    >
+                      <Download className="h-4 w-4" />
+                      Завантажити звіт облікових даних (.txt)
+                    </button>
+                  </div>
+
+                  {/* Таблиця створених студентів */}
+                  {importResult.created.length > 0 ? (
+                    <div className="overflow-hidden rounded-xl border border-slate-200">
+                      <div className="max-h-80 overflow-x-auto overflow-y-auto">
+                        <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
+                          <thead className="sticky top-0 bg-slate-50 font-semibold uppercase tracking-wider text-slate-500">
+                            <tr>
+                              <th className="px-3.5 py-2.5">№ у групі</th>
+                              <th className="px-3.5 py-2.5">Варіант</th>
+                              <th className="px-3.5 py-2.5">ПІБ</th>
+                              <th className="px-3.5 py-2.5">E-mail</th>
+                              <th className="px-3.5 py-2.5">Пароль</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 bg-white">
+                            {importResult.created.map((student) => (
+                              <tr
+                                key={student.user_id}
+                                className="hover:bg-slate-50/80"
+                              >
+                                <td className="whitespace-nowrap px-3.5 py-2.5">
+                                  <span className="inline-flex items-center rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">
+                                    №{student.list_number}
+                                  </span>
+                                </td>
+                                <td className="whitespace-nowrap px-3.5 py-2.5">
+                                  <span className="inline-flex items-center rounded-md border border-purple-200 bg-purple-50 px-2 py-0.5 font-semibold text-purple-700">
+                                    Варіант {student.variant_number}
+                                  </span>
+                                </td>
+                                <td className="px-3.5 py-2.5 font-semibold text-slate-900">
+                                  {student.full_name}
+                                </td>
+                                <td className="whitespace-nowrap px-3.5 py-2.5 font-mono text-slate-700">
+                                  {student.email}
+                                </td>
+                                <td className="whitespace-nowrap px-3.5 py-2.5">
+                                  <code className="rounded bg-slate-100 px-2 py-0.5 font-mono font-semibold text-slate-900">
+                                    {student.temp_password}
+                                  </code>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-xs text-slate-600">
+                      Жодного нового облікового запису не створено (усі рядки
+                      були пропущені).
+                    </div>
+                  )}
+
+                  {/* Пропущені записи / дублікати / помилки */}
+                  {importResult.skipped.length > 0 && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4">
+                      <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
+                        <AlertTriangle className="h-4 w-4 text-amber-600" />
+                        <span>
+                          Пропущені записи та попередження (
+                          {importResult.skipped.length})
+                        </span>
+                      </div>
+                      <ul className="mt-2.5 max-h-40 space-y-1.5 overflow-y-auto text-xs text-amber-900">
+                        {importResult.skipped.map((item, idx) => (
+                          <li
+                            key={`${item.row_number}-${item.email ?? idx}`}
+                            className="rounded-lg border border-amber-200/70 bg-white/80 px-3 py-2"
+                          >
+                            <span className="font-semibold">
+                              Рядок #{item.row_number}
+                            </span>
+                            {item.full_name !== null && (
+                              <span> • {item.full_name}</span>
+                            )}
+                            {item.email !== null && (
+                              <span className="font-mono text-slate-600">
+                                {" "}
+                                ({item.email})
+                              </span>
+                            )}
+                            <span className="block text-amber-800">
+                              {item.reason}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 border-t border-slate-100 pt-4">
+                    <button
+                      type="button"
+                      onClick={resetImportForAnotherFile}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      <Upload className="h-4 w-4" />
+                      Імпортувати ще файл
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsImportModalOpen(false)}
+                      className="rounded-xl bg-slate-900 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800"
+                    >
+                      Готово
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
