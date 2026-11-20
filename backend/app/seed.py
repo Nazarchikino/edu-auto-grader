@@ -1,13 +1,18 @@
 import argparse
 import asyncio
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 import bcrypt
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
@@ -26,6 +31,63 @@ from app.models.user import (
     User,
     UserRole,
 )
+from app.schemas.grading import GradingRule
+
+
+class _SeedQuizQuestionPayload(BaseModel):
+    """Контракт тестового питання модуля у JSON-файлі навчального курсу."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_text: str = Field(..., min_length=1)
+    options: list[str] = Field(..., min_length=2)
+    correct_option_index: int = Field(..., ge=0)
+
+    @model_validator(mode="after")
+    def _validate_correct_option_index(self) -> "_SeedQuizQuestionPayload":
+        if self.correct_option_index >= len(self.options):
+            raise ValueError(
+                f"correct_option_index ({self.correct_option_index}) виходить за межі "
+                f"списку варіантів довжини {len(self.options)}."
+            )
+        return self
+
+
+class _SeedPracticalPayload(BaseModel):
+    """Контракт практичної роботи модуля у JSON-файлі курсу (meta ігнорується)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(..., min_length=1, max_length=255)
+    instructions: str = Field(..., min_length=1)
+    format_type: PracticalFormat
+    max_score: Decimal = Field(default=Decimal("10.00"), gt=Decimal("0"))
+    variants: list[dict[str, object]] = Field(default_factory=list)
+    grading_rules: list[GradingRule] = Field(..., min_length=1)
+    meta: dict[str, object] | None = Field(default=None, exclude=True)
+
+
+class _SeedModulePayload(BaseModel):
+    """Контракт навчального модуля у JSON-файлі курсу."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_index: int = Field(..., ge=1)
+    title: str = Field(..., min_length=1, max_length=255)
+    lecture_content: str = Field(..., min_length=1)
+    quiz_questions: list[_SeedQuizQuestionPayload] = Field(default_factory=list)
+    practical: _SeedPracticalPayload | None = None
+
+
+class _SeedCoursePayload(BaseModel):
+    """Контракт повного JSON-файлу одного навчального курсу."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slug: CourseSlug
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(..., min_length=1)
+    modules: list[_SeedModulePayload] = Field(..., min_length=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +100,7 @@ class SeedSummary:
     modules_count: int
     questions_count: int
     practicals_count: int
+    variants_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,588 +121,74 @@ def hash_password(plain_password: str) -> str:
     return hashed.decode("utf-8")
 
 
-def _build_word_course(teacher: User) -> Course:
-    """Створює навчальний курс Microsoft Word із лекцією, тестом та практичною."""
+def _load_course_from_json(
+    course_path: Path,
+    *,
+    expected_slug: CourseSlug,
+    teacher: User,
+) -> Course:
+    """Завантажує, валідує через Pydantic v2 та конвертує JSON-курс у ORM-граф."""
+    if not course_path.is_file():
+        raise FileNotFoundError(
+            f"Не знайдено JSON-файл курсу '{expected_slug.value}': {course_path}"
+        )
+
+    raw_data: object = json.loads(course_path.read_text(encoding="utf-8"))
+    payload = _SeedCoursePayload.model_validate(raw_data)
+
+    if payload.slug != expected_slug:
+        raise ValueError(
+            f"Файл '{course_path.name}' має slug='{payload.slug.value}', "
+            f"очікувалося '{expected_slug.value}'."
+        )
+
     course = Course(
-        title="Microsoft Word: Оформлення текстових документів",
-        slug=CourseSlug.WORD,
-        description=(
-            "Практичний курс зі створення, форматування та структурування "
-            "офіційних і академічних документів у текстовому процесорі Microsoft Word."
-        ),
+        title=payload.title,
+        slug=payload.slug,
+        description=payload.description,
         teacher=teacher,
     )
-    module = Module(
-        course=course,
-        order_index=1,
-        title="Параметри сторінки, стилі абзаців, таблиці та списки у Word",
-        lecture_content=(
-            "# Оформлення офіційних та академічних документів у Microsoft Word\n\n"
-            "## 1. Параметри сторінки\n"
-            "Згідно зі стандартами оформлення навчальних робіт коледжу, документ повинен мати:\n"
-            "- ліве поле — **30 мм** (для підшивання);\n"
-            "- праве поле — **10–15 мм**;\n"
-            "- верхнє та нижнє поля — **20 мм**.\n\n"
-            "## 2. Форматування тексту та абзаців\n"
-            "Основний текст документа набирається гарнітурою **Times New Roman**, кегль **14 пт**, "
-            "міжрядковий інтервал — **1.5 рядка**, вирівнювання — **за шириною** (`JUSTIFY`).\n\n"
-            "## 3. Таблиці та списки\n"
-            "Для подання структурованих даних використовуються таблиці з шапкою та марковані або "
-            "нумеровані списки."
-        ),
-    )
-    module.quiz_questions = [
-        QuizQuestion(
-            question_text="Який розмір лівого поля сторінки встановлюється для підшивання звіту?",
-            options=["10 мм", "20 мм", "30 мм", "15 мм"],
-            correct_option_index=2,
-        ),
-        QuizQuestion(
-            question_text="Яка гарнітура та кегль є стандартними для основного тексту звіту?",
-            options=[
-                "Calibri, 11 пт",
-                "Times New Roman, 14 пт",
-                "Arial, 12 пт",
-                "Courier New, 10 пт",
-            ],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Який міжрядковий інтервал застосовується до основного тексту роботи?",
-            options=["Одинарний (1.0)", "Множинний (1.15)", "Півтора (1.5)", "Подвійний (2.0)"],
-            correct_option_index=2,
-        ),
-        QuizQuestion(
-            question_text="Який тип вирівнювання абзаців є обов'язковим для основного тексту?",
-            options=["За лівим краєм", "По центру", "За правим краєм", "За шириною"],
-            correct_option_index=3,
-        ),
-        QuizQuestion(
-            question_text="У якому XML-файлі архіву .docx зберігаються метадані автора документа?",
-            options=[
-                "word/document.xml",
-                "docProps/core.xml",
-                "word/styles.xml",
-                "[Content_Types].xml",
-            ],
-            correct_option_index=1,
-        ),
-    ]
-    module.practical = Practical(
-        title="Практична робота №1: Форматування звіту з таблицями та списками (.docx)",
-        instructions=(
-            "Створіть документ Microsoft Word (`.docx`) відповідно до вашого індивідуального "
-            "варіанта. Налаштуйте поля сторінки, шрифт Times New Roman 14 пт, міжрядковий "
-            "інтервал 1.5, вирівнювання за шириною, додайте підсумкову таблицю та список."
-        ),
-        format_type=PracticalFormat.DOCX,
-        max_score=Decimal("10.00"),
-        variants=[
-            {
-                "variant_number": 1,
-                "title": "Варіант 1: Звіт про успішність студентів відділення ІТ",
-                "task_description": (
-                    "Оформіть пояснювальну записку з таблицею результатів зимової сесії "
-                    "(4 стовпці) та переліком рекомендованої літератури."
-                ),
-                "parameters": {"min_tables": 1, "min_rows": 4, "font_name": "Times New Roman"},
-            },
-            {
-                "variant_number": 2,
-                "title": "Варіант 2: Відомість інвентаризації комп'ютерної лабораторії",
-                "task_description": (
-                    "Оформіть акт інвентаризації обладнання кабінету інформатики з таблицею обліку "
-                    "та списком відповідальних осіб."
-                ),
-                "parameters": {"min_tables": 1, "min_rows": 5, "font_name": "Times New Roman"},
-            },
-            {
-                "variant_number": 3,
-                "title": "Варіант 3: Програма студентської науково-практичної конференції",
-                "task_description": (
-                    "Оформіть програму секційного засідання з таблицею розкладу доповідей "
-                    "та нумерованим переліком вимог до тез."
-                ),
-                "parameters": {"min_tables": 1, "min_rows": 4, "font_name": "Times New Roman"},
-            },
-        ],
-        grading_rules=[
-            {
-                "id": "word_rule_1",
-                "type": "docx_page_margins",
-                "target": "section_0",
-                "expected": "left=30,right=15,top=20,bottom=20",
-                "points": 2.0,
-                "description": "Поля сторінки відповідають стандарту (30/15/20/20 мм)",
-            },
-            {
-                "id": "word_rule_2",
-                "type": "docx_font",
-                "target": "body",
-                "expected": "Times New Roman:14",
-                "points": 2.5,
-                "description": "Основний текст набрано шрифтом Times New Roman, 14 пт",
-            },
-            {
-                "id": "word_rule_3",
-                "type": "docx_line_spacing",
-                "target": "body",
-                "expected": "1.5",
-                "points": 1.5,
-                "description": "Встановлено полуторний міжрядковий інтервал (1.5)",
-            },
-            {
-                "id": "word_rule_4",
-                "type": "docx_alignment",
-                "target": "body",
-                "expected": "JUSTIFY",
-                "points": 1.5,
-                "description": "Абзаци основного тексту вирівняно за шириною",
-            },
-            {
-                "id": "word_rule_5",
-                "type": "docx_table_exists",
-                "target": "document",
-                "expected": ">=1",
-                "points": 1.5,
-                "description": "Документ містить щонайменше одну зведену таблицю",
-            },
-            {
-                "id": "word_rule_6",
-                "type": "docx_list_exists",
-                "target": "document",
-                "expected": "true",
-                "points": 1.0,
-                "description": "Документ містить маркований або нумерований список",
-            },
-        ],
-    )
+
+    sorted_modules = sorted(payload.modules, key=lambda item: item.order_index)
+    for mod_payload in sorted_modules:
+        module = Module(
+            course=course,
+            order_index=mod_payload.order_index,
+            title=mod_payload.title,
+            lecture_content=mod_payload.lecture_content,
+        )
+        module.quiz_questions = [
+            QuizQuestion(
+                question_text=question.question_text,
+                options=list(question.options),
+                correct_option_index=question.correct_option_index,
+            )
+            for question in mod_payload.quiz_questions
+        ]
+        if mod_payload.practical is not None:
+            prac_payload = mod_payload.practical
+            validated_rules: list[dict[str, object]] = [
+                GradingRule.model_validate(rule).model_dump(mode="json")
+                for rule in prac_payload.grading_rules
+            ]
+            module.practical = Practical(
+                title=prac_payload.title,
+                instructions=prac_payload.instructions,
+                format_type=prac_payload.format_type,
+                max_score=prac_payload.max_score.quantize(Decimal("0.01")),
+                variants=list(prac_payload.variants),
+                grading_rules=validated_rules,
+            )
+
     return course
 
 
-def _build_excel_course(teacher: User) -> Course:
-    """Створює навчальний курс Microsoft Excel із лекцією, тестом та практичною."""
-    course = Course(
-        title="Microsoft Excel: Електронні таблиці, формули та діаграми",
-        slug=CourseSlug.EXCEL,
-        description=(
-            "Автоматизація фінансово-економічних та статистичних розрахунків у Microsoft Excel "
-            "із використанням вбудованих функцій та візуалізації даних."
-        ),
-        teacher=teacher,
+def build_seed_bundle(content_dir: Path | None = None) -> SeedBundle:
+    """Конструює повний граф даних із JSON-курсів: групу, викладача, студентів та 4 курси."""
+    resolved_content_dir = (
+        content_dir if content_dir is not None else settings.COURSE_CONTENT_DIR
     )
-    module = Module(
-        course=course,
-        order_index=1,
-        title="Формули, статистичні функції SUM/AVERAGE та побудова діаграм",
-        lecture_content=(
-            "# Аналіз даних та візуалізація у Microsoft Excel\n\n"
-            "## 1. Формули та адресація комірок\n"
-            "Кожна формула в Excel починається зі знака `=`. Для підсумовування діапазону "
-            "використовується функція `=SUM(D2:D11)`, для середнього значення — "
-            "`=AVERAGE(D2:D11)`.\n\n"
-            "## 2. Перевірка формул та обчислених значень\n"
-            "Система автоперевірки інспектує книгу `.xlsx` у двох режимах:\n"
-            "- `data_only=False` — перевірка наявності самої формули у цільовій комірці;\n"
-            "- `data_only=True` — звірка обчисленого кешованого результату.\n\n"
-            "## 3. Побудова діаграм\n"
-            "Діаграма будується на основі підсумкового діапазону даних та розміщується на аркуші."
-        ),
-    )
-    module.quiz_questions = [
-        QuizQuestion(
-            question_text="З якого символу обов'язково починається формула в Microsoft Excel?",
-            options=["#", "=", "@", "$"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Яка функція обчислює суму значень у діапазоні комірок D2:D11?",
-            options=["=COUNT(D2:D11)", "=AVERAGE(D2:D11)", "=SUM(D2:D11)", "=MAX(D2:D11)"],
-            correct_option_index=2,
-        ),
-        QuizQuestion(
-            question_text="Як позначається абсолютне посилання на комірку A1 в Excel?",
-            options=["A1", "$A$1", "&A&1", "#A#1"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Який параметр openpyxl дозволяє зчитати текст формули замість числа?",
-            options=["read_only=True", "data_only=False", "data_only=True", "keep_vba=True"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Яка функція повертає середнє арифметичне діапазону комірок?",
-            options=["=MEDIAN()", "=AVERAGE()", "=MEAN()", "=MID()"],
-            correct_option_index=1,
-        ),
-    ]
-    module.practical = Practical(
-        title="Практична робота №1: Розрахункова відомість та діаграма в Excel (.xlsx)",
-        instructions=(
-            "Створіть книгу Microsoft Excel (`.xlsx`) з аркушем `Sheet1`. Заповніть вхідні дані "
-            "вашого варіанта у рядках 2–11, обчисліть підсумок функцією `SUM(D2:D11)` у комірці "
-            "`D12`, середнє значення функцією `AVERAGE(D2:D11)` у `D13` та побудуйте діаграму."
-        ),
-        format_type=PracticalFormat.XLSX,
-        max_score=Decimal("10.00"),
-        variants=[
-            {
-                "variant_number": 1,
-                "title": "Варіант 1: Відомість нарахування стипендії студентам групи",
-                "task_description": (
-                    "Заповніть таблицю з 10 студентів, розрахуйте загальний фонд стипендії в D12 "
-                    "та середній розмір виплати в D13."
-                ),
-                "parameters": {"sheet": "Sheet1", "sum_cell": "D12", "expected_sum": 18500},
-            },
-            {
-                "variant_number": 2,
-                "title": "Варіант 2: Облік споживання електроенергії підрозділами коледжу",
-                "task_description": (
-                    "Заповніть показники за 10 місяців, обчисліть сумарні витрати в D12 "
-                    "та середньомісячне споживання в D13."
-                ),
-                "parameters": {"sheet": "Sheet1", "sum_cell": "D12", "expected_sum": 24200},
-            },
-            {
-                "variant_number": 3,
-                "title": "Варіант 3: Кошторис закупівлі мережевого обладнання",
-                "task_description": (
-                    "Заповніть 10 позицій специфікації, обчисліть підсумкову вартість у D12 "
-                    "та середню вартість позиції в D13."
-                ),
-                "parameters": {"sheet": "Sheet1", "sum_cell": "D12", "expected_sum": 31400},
-            },
-        ],
-        grading_rules=[
-            {
-                "id": "excel_rule_1",
-                "type": "xlsx_formula",
-                "target": "D12",
-                "expected": "SUM(D2:D11)",
-                "points": 3.5,
-                "description": "Використано функцію SUM для підрахунку підсумку в комірці D12",
-            },
-            {
-                "id": "excel_rule_2",
-                "type": "xlsx_formula",
-                "target": "D13",
-                "expected": "AVERAGE(D2:D11)",
-                "points": 2.5,
-                "description": "Використано функцію AVERAGE для середнього значення в комірці D13",
-            },
-            {
-                "id": "excel_rule_3",
-                "type": "xlsx_value",
-                "target": "D12",
-                "expected": "not_null",
-                "points": 2.0,
-                "description": "У комірці D12 збережено обчислене числове значення",
-            },
-            {
-                "id": "excel_rule_4",
-                "type": "xlsx_chart_exists",
-                "target": "Sheet1",
-                "expected": "true",
-                "points": 2.0,
-                "description": "На аркуші Sheet1 побудовано діаграму",
-            },
-        ],
-    )
-    return course
 
-
-def _build_access_course(teacher: User) -> Course:
-    """Створює навчальний курс Microsoft Access із лекцією, тестом та практичною."""
-    course = Course(
-        title="Microsoft Access: Проєктування реляційних баз даних",
-        slug=CourseSlug.ACCESS,
-        description=(
-            "Основи реляційного моделювання, створення таблиць, первинних ключів, типів полів "
-            "та зв'язків між таблицями в СКБД Microsoft Access."
-        ),
-        teacher=teacher,
-    )
-    module = Module(
-        course=course,
-        order_index=1,
-        title="Структура таблиць, типи даних полів та цілісність даних у Access",
-        lecture_content=(
-            "# Проєктування реляційних таблиць у Microsoft Access\n\n"
-            "## 1. Таблиці та первинні ключі\n"
-            "Кожна сутність предметної області моделюється окремою таблицею з первинним ключем "
-            "(`Primary Key`, зазвичай поле `id` типу `AutoNumber` / `Long Integer`).\n\n"
-            "## 2. Основні типи даних полів\n"
-            "- **Short Text** (`TEXT`) — текстові рядки до 255 символів;\n"
-            "- **Number / Long Integer** (`LONG`) — цілі числа та зовнішні ключі;\n"
-            "- **Currency / Double** (`CURRENCY`, `DOUBLE`) — грошові та дробові величини;\n"
-            "- **Date/Time** (`DATETIME`) — дати та часові позначки."
-        ),
-    )
-    module.quiz_questions = [
-        QuizQuestion(
-            question_text="Яке розширення має сучасний файл бази даних Microsoft Access?",
-            options=[".xlsx", ".docx", ".accdb", ".sqlite"],
-            correct_option_index=2,
-        ),
-        QuizQuestion(
-            question_text="Як називається поле або набір полів, що унікально ідентифікує запис?",
-            options=["Зовнішній ключ", "Первинний ключ", "Індексне поле", "Обчислюване поле"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Який тип даних Access використовується для автоматичної нумерації ID?",
-            options=["Short Text", "AutoNumber (Лічильник)", "Memo", "Yes/No"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Який тип зв'язку є найпоширенішим між таблицею груп та студентами?",
-            options=[
-                "Один-до-одного (1:1)",
-                "Один-до-багатьох (1:M)",
-                "Багато-до-багатьох (M:N) без проміжної таблиці",
-                "Ієрархічний цикл",
-            ],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Що забезпечує увімкнення параметра 'Забезпечення цілісності даних'?",
-            options=[
-                "Шифрування файлу паролем",
-                "Заборону створення записів із неіснуючим зовнішнім ключем",
-                "Автоматичний експорт у PDF",
-                "Стиснення зображень у таблиці",
-            ],
-            correct_option_index=1,
-        ),
-    ]
-    module.practical = Practical(
-        title="Практична робота №1: Створення схеми бази даних коледжу (.accdb)",
-        instructions=(
-            "Створіть файл бази даних Microsoft Access (`.accdb`), який містить таблиці "
-            "`Students` та `Grades` із визначеними стовпцями та відповідними типами даних "
-            "згідно з вашим індивідуальним варіантом."
-        ),
-        format_type=PracticalFormat.ACCDB,
-        max_score=Decimal("10.00"),
-        variants=[
-            {
-                "variant_number": 1,
-                "title": "Варіант 1: База даних обліку успішності студентів",
-                "task_description": (
-                    "Створіть таблицю Students (ID, FullName, GroupCode) та таблицю Grades "
-                    "(ID, StudentID, SubjectName, Score)."
-                ),
-                "parameters": {
-                    "required_tables": ["Students", "Grades"],
-                    "primary_table": "Students",
-                },
-            },
-            {
-                "variant_number": 2,
-                "title": "Варіант 2: База даних бібліотечного фонду коледжу",
-                "task_description": (
-                    "Створіть таблицю Students (ID, FullName, GroupCode) та таблицю Grades "
-                    "для обліку рейтингових балів читацької активності."
-                ),
-                "parameters": {
-                    "required_tables": ["Students", "Grades"],
-                    "primary_table": "Students",
-                },
-            },
-            {
-                "variant_number": 3,
-                "title": "Варіант 3: База даних результатів лабораторного практикуму",
-                "task_description": (
-                    "Створіть таблицю Students (ID, FullName, GroupCode) та таблицю Grades "
-                    "(ID, StudentID, SubjectName, Score) із тестовими записами."
-                ),
-                "parameters": {
-                    "required_tables": ["Students", "Grades"],
-                    "primary_table": "Students",
-                },
-            },
-        ],
-        grading_rules=[
-            {
-                "id": "access_rule_1",
-                "type": "accdb_table_exists",
-                "target": "Students",
-                "expected": "true",
-                "points": 3.0,
-                "description": "У базі даних присутня таблиця Students",
-            },
-            {
-                "id": "access_rule_2",
-                "type": "accdb_table_exists",
-                "target": "Grades",
-                "expected": "true",
-                "points": 3.0,
-                "description": "У базі даних присутня таблиця Grades",
-            },
-            {
-                "id": "access_rule_3",
-                "type": "accdb_column_exists",
-                "target": "Students.FullName",
-                "expected": "true",
-                "points": 2.0,
-                "description": "Таблиця Students містить текстове поле FullName",
-            },
-            {
-                "id": "access_rule_4",
-                "type": "accdb_column_exists",
-                "target": "Grades.Score",
-                "expected": "true",
-                "points": 2.0,
-                "description": "Таблиця Grades містить числове поле Score",
-            },
-        ],
-    )
-    return course
-
-
-def _build_html_course(teacher: User) -> Course:
-    """Створює навчальний курс HTML5 із лекцією, тестом та практичною для HTML-пісочниці."""
-    course = Course(
-        title="HTML5: Семантична верстка вебсторінок",
-        slug=CourseSlug.HTML,
-        description=(
-            "Інтерактивний курс із розробки структурованих HTML5-документів: семантичні теги, "
-            "таблиці, гіперпосилання та форми з миттєвою перевіркою DOM-дерева."
-        ),
-        teacher=teacher,
-    )
-    module = Module(
-        course=course,
-        order_index=1,
-        title="Семантична структура HTML5, таблиці та форми",
-        lecture_content=(
-            "# Семантична розмітка вебсторінок у HTML5\n\n"
-            "## 1. Базовий каркас документа\n"
-            "Кожна HTML5-сторінка містить декларацію `<!DOCTYPE html>`, кореневий елемент "
-            "`<html lang=\"uk\">`, секцію метаданих `<head>` та тіло `<main>` у `<body>`.\n\n"
-            "## 2. Таблиці в HTML\n"
-            "Таблиці створюються тегом `<table>`, рядки — `<tr>`, комірки заголовка — `<th>`, "
-            "а комірки даних — `<td>`.\n\n"
-            "## 3. Перевірка DOM через BeautifulSoup4\n"
-            "Автоматичний валідатор аналізує CSS-селектори (`header > h1`, `table tr`, `form`) "
-            "та перевіряє обов'язкові атрибути елементів."
-        ),
-    )
-    module.quiz_questions = [
-        QuizQuestion(
-            question_text="Яка декларація на початку документа вказує браузеру на стандарт HTML5?",
-            options=[
-                "<?xml version='1.0'?>",
-                "<!DOCTYPE html>",
-                "<meta charset='utf-8'>",
-                "<html version='5.0'>",
-            ],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text=(
-                "Який семантичний тег HTML5 призначений для основного унікального вмісту?"
-            ),
-            options=["<div>", "<main>", "<aside>", "<span>"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Який тег використовується для створення рядка в HTML-таблиці?",
-            options=["<td>", "<th>", "<tr>", "<row>"],
-            correct_option_index=2,
-        ),
-        QuizQuestion(
-            question_text=(
-                "Який атрибут є обов'язковим для тегу зображення <img> з точки зору доступності?"
-            ),
-            options=["title", "alt", "name", "target"],
-            correct_option_index=1,
-        ),
-        QuizQuestion(
-            question_text="Який CSS-селектор обирає всі рядки tr усередині таблиці table?",
-            options=["table + tr", "table tr", "tr > table", "#table.tr"],
-            correct_option_index=1,
-        ),
-    ]
-    module.practical = Practical(
-        title="Практична робота №1: Верстка сторінки розкладу занять у HTML5",
-        instructions=(
-            "Напишіть HTML5-код у вбудованій пісочниці. Сторінка повинна містити семантичну "
-            "шапку `<header>` із заголовком `<h1>`, блок `<main>`, таблицю `<table>` "
-            "щонайменше з 4 рядками `<tr>` та форму зворотного зв'язку `<form>`."
-        ),
-        format_type=PracticalFormat.HTML,
-        max_score=Decimal("10.00"),
-        variants=[
-            {
-                "variant_number": 1,
-                "title": "Варіант 1: Сторінка розкладу занять групи КН-31",
-                "task_description": (
-                    "Зверстайте сторінку з розкладом пар на тиждень у вигляді таблиці (4+ рядки) "
-                    "та формою запису на консультацію викладача."
-                ),
-                "parameters": {"required_heading": "Розклад занять КН-31", "min_rows": 4},
-            },
-            {
-                "variant_number": 2,
-                "title": "Варіант 2: Сторінка каталогу електронних посібників кафедри",
-                "task_description": (
-                    "Зверстайте таблицю навчальних посібників (4+ рядки) із колонками Назва, "
-                    "Дисципліна, Рік видання та формою замовлення примірника."
-                ),
-                "parameters": {"required_heading": "Каталог електронних посібників", "min_rows": 4},
-            },
-            {
-                "variant_number": 3,
-                "title": "Варіант 3: Сторінка рейтингу успішності студентів потоку",
-                "task_description": (
-                    "Зверстайте зведену таблицю рейтингу студентів (4+ рядки) "
-                    "та форму подання апеляції щодо результатів перевірки."
-                ),
-                "parameters": {"required_heading": "Рейтинг успішності студентів", "min_rows": 4},
-            },
-        ],
-        grading_rules=[
-            {
-                "id": "html_rule_1",
-                "type": "html_tag_exists",
-                "target": "header > h1",
-                "expected": "true",
-                "points": 2.5,
-                "description": "Наявний семантичний блок <header> із заголовком першого рівня <h1>",
-            },
-            {
-                "id": "html_rule_2",
-                "type": "html_tag_exists",
-                "target": "main",
-                "expected": "true",
-                "points": 2.0,
-                "description": "Основний контент сторінки обгорнуто в семантичний тег <main>",
-            },
-            {
-                "id": "html_rule_3",
-                "type": "html_tag_count",
-                "target": "table tr",
-                "expected": ">=4",
-                "points": 3.0,
-                "description": "Таблиця містить щонайменше 4 рядки (<tr>)",
-            },
-            {
-                "id": "html_rule_4",
-                "type": "html_tag_exists",
-                "target": "form",
-                "expected": "true",
-                "points": 2.5,
-                "description": "Сторінка містить інтерактивну форму <form>",
-            },
-        ],
-    )
-    return course
-
-
-def build_seed_bundle() -> SeedBundle:
-    """Конструює повний граф тестових даних: групу, викладача, студентів та 4 курси."""
     group = AcademicGroup(
         code="КН-31",
         specialty="122 Комп'ютерні науки",
@@ -689,10 +238,12 @@ def build_seed_bundle() -> SeedBundle:
     ]
 
     courses: list[Course] = [
-        _build_word_course(teacher),
-        _build_excel_course(teacher),
-        _build_access_course(teacher),
-        _build_html_course(teacher),
+        _load_course_from_json(
+            resolved_content_dir / f"{slug.value}.json",
+            expected_slug=slug,
+            teacher=teacher,
+        )
+        for slug in ALLOWED_COURSE_SLUGS
     ]
 
     if not (MIN_COURSE_YEAR <= group.course_year <= MAX_COURSE_YEAR):
@@ -730,6 +281,12 @@ def summarize_bundle(bundle: SeedBundle) -> SeedSummary:
         for module in course.modules
         if module.practical is not None
     )
+    variants_count = sum(
+        len(module.practical.variants)
+        for course in bundle.courses
+        for module in course.modules
+        if module.practical is not None
+    )
     return SeedSummary(
         group_code=bundle.group.code,
         users_count=2 + len(bundle.students),
@@ -737,12 +294,19 @@ def summarize_bundle(bundle: SeedBundle) -> SeedSummary:
         modules_count=modules_count,
         questions_count=questions_count,
         practicals_count=practicals_count,
+        variants_count=variants_count,
     )
 
 
-async def seed_database(session: AsyncSession) -> SeedSummary:
-    """Ідемпотентно наповнює базу даних групою, користувачами та 4 курсами."""
-    bundle = build_seed_bundle()
+async def seed_database(
+    session: AsyncSession,
+    *,
+    sync_courses: bool = False,
+    content_dir: Path | None = None,
+) -> SeedSummary:
+    """Ідемпотентно наповнює БД групою, користувачами та 4 курсами (або синхронізує курси)."""
+    bundle = build_seed_bundle(content_dir=content_dir)
+    summary = summarize_bundle(bundle)
 
     existing_group_result = await session.execute(
         select(AcademicGroup).where(AcademicGroup.code == bundle.group.code)
@@ -775,47 +339,88 @@ async def seed_database(session: AsyncSession) -> SeedSummary:
         raise RuntimeError("Не вдалося створити або знайти обліковий запис викладача.")
 
     for course in bundle.courses:
-        course_result = await session.execute(
-            select(Course).where(Course.slug == course.slug)
-        )
+        stmt = select(Course).where(Course.slug == course.slug)
+        if sync_courses:
+            stmt = stmt.options(
+                selectinload(Course.modules).selectinload(Module.quiz_questions),
+                selectinload(Course.modules)
+                .selectinload(Module.practical)
+                .selectinload(Practical.submissions),
+                selectinload(Course.modules).selectinload(Module.quiz_attempts),
+            )
+        course_result = await session.execute(stmt)
         existing_course = course_result.scalar_one_or_none()
+
         if existing_course is None:
             course.teacher = persisted_teacher
             session.add(course)
+        elif sync_courses:
+            existing_course.title = course.title
+            existing_course.description = course.description
+            existing_course.modules.clear()
+            await session.flush()
+
+            fresh_modules = list(course.modules)
+            course.modules.clear()
+            for module in fresh_modules:
+                module.course = existing_course
+                existing_course.modules.append(module)
 
     await session.commit()
-    return summarize_bundle(bundle)
+    return summary
 
 
-async def run_seed(*, dry_run: bool = False) -> SeedSummary:
-    """Запускає ініціалізацію даних у режимі запису в БД або сухої перевірки (--dry-run)."""
-    bundle = build_seed_bundle()
+async def run_seed(
+    *,
+    dry_run: bool = False,
+    sync_courses: bool = False,
+) -> SeedSummary:
+    """Запускає ініціалізацію даних у режимі запису/синхронізації БД або --dry-run."""
     if dry_run:
+        bundle = build_seed_bundle()
         return summarize_bundle(bundle)
 
     async with AsyncSessionLocal() as session:
-        return await seed_database(session)
+        return await seed_database(session, sync_courses=sync_courses)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI-точка входу для запуску наповнення бази даних (`python -m app.seed`)."""
     parser = argparse.ArgumentParser(
-        description="Наповнення БД Edu Auto Grader початковими курсами та користувачами."
+        description="Наповнення БД Edu Auto Grader курсами з JSON та початковими користувачами."
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Перевірити побудову ORM-об'єктів без підключення до PostgreSQL.",
     )
+    parser.add_argument(
+        "--sync-courses",
+        action="store_true",
+        help=(
+            "Оновити існуючі курси в БД з актуального JSON (перезаписує модулі, "
+            "тести й практичні, зберігаючи користувачів та академічні групи)."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    summary = asyncio.run(run_seed(dry_run=bool(args.dry_run)))
-    mode_label = "DRY-RUN" if args.dry_run else "APPLIED"
+    summary = asyncio.run(
+        run_seed(
+            dry_run=bool(args.dry_run),
+            sync_courses=bool(args.sync_courses),
+        )
+    )
+    if args.dry_run:
+        mode_label = "DRY-RUN"
+    elif args.sync_courses:
+        mode_label = "SYNCED"
+    else:
+        mode_label = "APPLIED"
     print(
         f"[seed:{mode_label}] group={summary.group_code} "
         f"users={summary.users_count} courses={summary.courses_count} "
         f"modules={summary.modules_count} questions={summary.questions_count} "
-        f"practicals={summary.practicals_count}"
+        f"practicals={summary.practicals_count} variants={summary.variants_count}"
     )
     return 0
 

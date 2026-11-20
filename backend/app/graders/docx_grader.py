@@ -547,6 +547,9 @@ class DocxGrader(BaseGrader):
                 and p.style.name.lower() == style_target
             ]
 
+        if cleaned_lower in {"heading", "headings"}:
+            return [p for p in non_empty if self._is_heading_paragraph(p)]
+
         if cleaned_lower.startswith("heading"):
             suffix = cleaned_lower.removeprefix("heading").lstrip("_ ").strip()
             selected: list[Paragraph] = []
@@ -592,6 +595,15 @@ class DocxGrader(BaseGrader):
             for side, token in zip(_MARGIN_KEYS, raw_tokens, strict=True):
                 parsed[side] = self._parse_margin_value_mm(token, expected)
             return parsed
+
+        if len(raw_tokens) == 1 and "=" not in raw_tokens[0]:
+            single_token = raw_tokens[0]
+            cleaned_single = single_token.strip().lower()
+            has_explicit_unit = cleaned_single.endswith(("mm", "cm"))
+            margin_mm = self._parse_margin_value_mm(single_token, expected)
+            if not has_explicit_unit and margin_mm <= 5.0:
+                margin_mm *= 10.0
+            return {side: margin_mm for side in _MARGIN_KEYS}
 
         for token in raw_tokens:
             if "=" not in token:

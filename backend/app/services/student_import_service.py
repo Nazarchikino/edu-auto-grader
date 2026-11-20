@@ -658,7 +658,9 @@ class StudentImportService:
         ]
         if not counts:
             return DEFAULT_TOTAL_VARIANTS
-        frequency = Counter(counts)
+        multi_variant_counts = [count for count in counts if count > 1]
+        effective_counts = multi_variant_counts if multi_variant_counts else counts
+        frequency = Counter(effective_counts)
         best_count, _best_freq = max(
             frequency.items(),
             key=lambda item: (item[1], item[0]),

@@ -444,6 +444,59 @@ def test_accdb_grader_detects_missing_schema_elements_and_invalid_header(
         grader.evaluate(file_path=invalid_accdb, rules=rules, variant_data={})
 
 
+def test_accdb_grader_accepts_hyperlink_type_as_memo(tmp_path: Path) -> None:
+    """Перевіряє розпізнавання типу Hyperlink / Гіперпосилання для поля TYPE_MEMO."""
+    accdb_path = build_sample_accdb(
+        tmp_path / "friends.accdb",
+        tables={
+            "Друзі": [
+                ("№ п/п", "AUTONUMBER"),
+                ("Прізвище", "SHORT TEXT"),
+                ("Ел. пошта", "HYPERLINK"),
+                ("Дата народження", "DATE/TIME"),
+            ],
+        },
+    )
+
+    rules = [
+        GradingRule(
+            id="a_email_hyperlink",
+            type=GradingRuleType.ACCDB_COLUMN_TYPE,
+            target="Друзі.Ел. пошта",
+            expected="Hyperlink",
+            points=4.0,
+            description="Поле 'Друзі.Ел. пошта' має тип Hyperlink (TYPE_MEMO)",
+        ),
+        GradingRule(
+            id="a_email_hyperlink_uk",
+            type=GradingRuleType.ACCDB_COLUMN_TYPE,
+            target="Друзі.Ел. пошта",
+            expected="Гіперпосилання",
+            points=3.0,
+            description="Поле 'Друзі.Ел. пошта' відповідає українському аліасу Гіперпосилання",
+        ),
+        GradingRule(
+            id="a_surname_not_hyperlink",
+            type=GradingRuleType.ACCDB_COLUMN_TYPE,
+            target="Друзі.Прізвище",
+            expected="Hyperlink",
+            points=3.0,
+            description="Текстове поле Short Text НЕ повинно проходити перевірку Hyperlink",
+        ),
+    ]
+
+    grader = AccdbGrader()
+    report = grader.evaluate(file_path=accdb_path, rules=rules, variant_data={})
+
+    assert report.results[0].passed is True
+    assert report.results[0].actual == "MEMO"
+    assert report.results[1].passed is True
+    assert report.results[2].passed is False
+    assert report.total_points == 7.0
+    assert report.passed_count == 2
+    assert report.failed_count == 1
+
+
 def test_html_grader_evaluates_semantic_dom_structure_and_attributes() -> None:
     """Перевіряє валідацію DOM-дерева HTML5 через BeautifulSoup4 у HtmlGrader."""
     html_code = """<!DOCTYPE html>
@@ -590,6 +643,115 @@ def test_html_grader_detects_missing_tags_and_rejects_empty_code() -> None:
     ]
     with pytest.raises(GradingError):
         grader.evaluate(raw_code=incomplete_html, rules=incompatible_rule, variant_data={})
+
+
+def test_html_grader_attribute_filter_selector_and_compound_colspan() -> None:
+    """Перевіряє селектори з атрибутним фільтром (input[type='email'] -> required) та colspan."""
+    grader = HtmlGrader()
+
+    email_required_rule = GradingRule(
+        id="h_email_req",
+        type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+        target="input[type='email']",
+        expected="required",
+        points=2.0,
+        description="Поле введення email має атрибут required",
+    )
+    link_rel_rule = GradingRule(
+        id="h_link_rel",
+        type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+        target="a[target='_blank']",
+        expected="rel",
+        points=2.0,
+        description="Зовнішнє посилання з target='_blank' містить атрибут rel",
+    )
+    meta_charset_rule = GradingRule(
+        id="h_meta_charset",
+        type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+        target="head meta[charset]",
+        expected="charset",
+        points=2.0,
+        description="Метатег у head містить атрибут charset",
+    )
+    colspan_rule = GradingRule(
+        id="h_colspan",
+        type=GradingRuleType.HTML_TAG_EXISTS,
+        target="table td[colspan], table th[colspan]",
+        expected="true",
+        points=4.0,
+        description="Таблиця використовує об'єднання стовпців colspan",
+    )
+    rules = [email_required_rule, link_rel_rule, meta_charset_rule, colspan_rule]
+
+    # 1. Без required, без rel, без charset і без colspan — усі 4 правила мають провалитися
+    failing_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <head><meta name="description" content="demo"></head>
+      <body>
+        <a href="https://example.com" target="_blank">Зовнішнє посилання</a>
+        <form><input type="email" name="user_email"></form>
+        <table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>
+      </body>
+    </html>
+    """
+    fail_report = grader.evaluate(raw_code=failing_html, rules=rules, variant_data={})
+    assert fail_report.passed_count == 0
+    assert fail_report.failed_count == 4
+    assert fail_report.total_points == 0.0
+
+    # 2. З required, rel, charset і th[colspan] — усі 4 правила мають пройти
+    passing_th_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <head><meta charset="UTF-8"></head>
+      <body>
+        <a href="https://example.com" target="_blank" rel="noopener noreferrer">Посилання</a>
+        <form><input type="email" name="user_email" required></form>
+        <table><tr><th colspan="2">Заголовок</th></tr><tr><td>1</td><td>2</td></tr></table>
+      </body>
+    </html>
+    """
+    pass_report_th = grader.evaluate(raw_code=passing_th_html, rules=rules, variant_data={})
+    assert pass_report_th.passed_count == 4
+    assert pass_report_th.failed_count == 0
+    assert pass_report_th.total_points == 10.0
+
+    # 3. Складений селектор також спрацьовує, коли colspan задано на <td>
+    passing_td_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <body>
+        <table><tr><td colspan="2">Підсумок</td></tr></table>
+      </body>
+    </html>
+    """
+    pass_report_td = grader.evaluate(
+        raw_code=passing_td_html,
+        rules=[colspan_rule],
+        variant_data={},
+    )
+    assert pass_report_td.passed_count == 1
+    assert pass_report_td.total_points == 4.0
+
+
+def test_docx_grader_supports_uniform_single_number_margin(tmp_path: Path) -> None:
+    """Перевіряє підтримку уніфікованого числового формату полів сторінки ('2.0' -> 20 мм)."""
+    docx_path = build_sample_docx(
+        tmp_path / "uniform_margins.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+    )
+    rule = GradingRule(
+        id="w_uniform_margin",
+        type=GradingRuleType.DOCX_PAGE_MARGINS,
+        target="document",
+        expected="2.0",
+        points=2.0,
+        description="Усі поля сторінки 2.0 см (20 мм)",
+    )
+    report = DocxGrader().evaluate(file_path=docx_path, rules=[rule], variant_data={})
+    assert report.passed_count == 1
+    assert report.total_points == 2.0
 
 
 def test_metadata_extraction_and_plagiarism_detection(tmp_path: Path) -> None:

@@ -1,102 +1,111 @@
-# Graph Report - edu-auto-grader  (2026-11-19)
+# Graph Report - edu-auto-grader  (2026-11-20)
 
 ## Corpus Check
-- 78 files · ~82,740 words
+- 86 files · ~240,497 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 7 file(s) not represented in the graph (top: (none) 4, .ini 1, .mako 1)
 
 ## Summary
-- 1423 nodes · 3867 edges · 74 communities (33 shown, 41 thin omitted)
-- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 324 edges (avg confidence: 0.93)
+- 1484 nodes · 3994 edges · 68 communities (44 shown, 24 thin omitted)
+- Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 298 edges (avg confidence: 0.93)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `2b0ce5af`
+- Built from commit: `34536c5c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- v1/auth.py
+- UserRole
 - postgres
 - compilerOptions
 - InvalidFileFormatError
-- list_admin_users
-- test_admin_api.py
+- ._evaluate_column_exists
+- accdb_grader.py
 - get_current_user
 - GradebookPage.tsx
-- list_my_submissions
+- MarkdownRenderer.tsx
 - vite-env.d.ts
-- build_group_journal
+- export_service.py
 - InvalidFileFormatError
-- submit_practical_work
-- SqliteAsyncSessionAdapter
-- seed_database
+- BaseGrader
+- config.py
+- test_submissions_api.py
 - schemas/__init__.py
 - edu-auto-grader-backend
+- conftest.py
 - package.json
 - App.tsx
 - DomainError
 - AdminUsersPage.tsx
 - course.ts
-- build_accdb_bytes
+- _SeedQuizQuestionPayload
 - AuthContext.tsx
 - XlsxGrader
-- DocxGrader
-- AccdbGrader
+- .evaluate
 - QuizService
-- _format_number
-- import_admin_students
-- _canonicalize_formula
-- submission_service.py
-- conftest.py
-- _create_sqlite_test_engine
-- GradebookPage.tsx
-- test_submissions_api.py
-- _compile_jsonb_for_sqlite
-- ModuleViewPage.tsx
-- _normalize_text
-- export_service.py
-- _enum_values
-- html_grader.py
-- ExportService
+- HtmlSandbox.tsx
+- collections_abc
+- Settings
+- SubmissionService
 - student_import_service.py
+- GradebookPage.tsx
+- delete_quiz_question
+- test_admin_api.py
+- SqliteAsyncSessionAdapter
+- ModuleViewPage.tsx
+- DocxGrader
+- build_seed_bundle
+- db_session
+- html_grader.py
+- export_group_journal
+- parse_docx_students
 - get_db
-- 0001_initial_schema.py
-- 0002_restrict_course_year_to_4.py
+- User
+- xlsx_grader.py
+- ._extract_single_table_schema
+- seed.py
+- AccdbGrader
+- ._evaluate_page_margins
+- .evaluate
+- AccdbColumnSchema
 - env.py
+- DummySubmissionRecord
+- test_docx_grader_supports_uniform_single_number_margin
+- DomainError
 
 ## God Nodes (most connected - your core abstractions)
-1. `GradingRule` - 63 edges
-2. `DomainError` - 58 edges
-3. `User` - 53 edges
-4. `InvalidFileFormatError` - 49 edges
-5. `DocxGrader` - 45 edges
-6. `PracticalFormat` - 43 edges
-7. `GradingError` - 40 edges
-8. `get_db()` - 40 edges
-9. `SubmissionService` - 39 edges
-10. `XlsxGrader` - 36 edges
+1. `DomainError` - 57 edges
+2. `User` - 53 edges
+3. `GradingRule` - 44 edges
+4. `InvalidFileFormatError` - 41 edges
+5. `get_db()` - 40 edges
+6. `DocxGrader` - 39 edges
+7. `SubmissionService` - 39 edges
+8. `GradingError` - 36 edges
+9. `XlsxGrader` - 35 edges
+10. `UserRole` - 35 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `create_admin_group()` --uses--> `AcademicGroupCreate`  [INFERRED]
-  backend/app/api/v1/admin.py → backend/app/schemas/auth.py
-- `update_admin_group()` --uses--> `AcademicGroupUpdate`  [INFERRED]
-  backend/app/api/v1/admin.py → backend/app/schemas/auth.py
-- `list_admin_users()` --uses--> `UserRead`  [INFERRED]
-  backend/app/api/v1/admin.py → backend/app/schemas/auth.py
-- `create_admin_user()` --uses--> `UserCreate`  [INFERRED]
-  backend/app/api/v1/admin.py → backend/app/schemas/auth.py
-- `create_admin_user()` --uses--> `UserRead`  [INFERRED]
-  backend/app/api/v1/admin.py → backend/app/schemas/auth.py
+- `TokenPayload` --uses--> `UserRole`  [INFERRED]
+  backend/app/schemas/auth.py → backend/app/models/user.py
+- `get_group_journal()` --uses--> `GroupJournalRead`  [INFERRED]
+  backend/app/api/v1/analytics.py → backend/app/schemas/submission.py
+- `GroupJournalBundle` --uses--> `AcademicGroupRead`  [INFERRED]
+  backend/app/services/export_service.py → backend/app/schemas/auth.py
+- `PracticalColumnInfo` --uses--> `CourseSlug`  [INFERRED]
+  backend/app/services/export_service.py → backend/app/models/course.py
+- `export_group_journal()` --uses--> `ExportService`  [INFERRED]
+  backend/app/api/v1/analytics.py → backend/app/services/export_service.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (74 total, 41 thin omitted)
+## Communities (68 total, 24 thin omitted)
 
-### Community 0 - "v1/auth.py"
-Cohesion: 0.07
-Nodes (22): login(), read_current_user(), refresh_tokens(), serialize_user(), create_access_token(), create_refresh_token(), create_token_pair(), decode_token() (+14 more)
+### Community 0 - "UserRole"
+Cohesion: 0.06
+Nodes (23): login(), read_current_user(), refresh_tokens(), create_access_token(), create_refresh_token(), create_token_pair(), decode_token(), _encode_jwt_token() (+15 more)
 
 ### Community 1 - "postgres"
 Cohesion: 0.10
@@ -107,144 +116,188 @@ Cohesion: 0.10
 Nodes (20): compilerOptions, allowImportingTsExtensions, isolatedModules, jsx, lib, module, moduleDetection, moduleResolution (+12 more)
 
 ### Community 3 - "InvalidFileFormatError"
-Cohesion: 0.06
-Nodes (21): GradingError, InvalidFileFormatError, AccdbGrader, _parse_ddl_column_type(), BaseGrader, GraderFactory, HtmlGrader, PracticalFormat (+13 more)
+Cohesion: 0.11
+Nodes (5): GradingError, GraderFactory, PracticalFormat, GradingRuleType, test_grader_factory_resolves_all_four_formats()
 
-### Community 5 - "test_admin_api.py"
-Cohesion: 0.14
-Nodes (9): _build_college_import_docx(), _get_user_by_email(), test_admin_academic_groups_crud_and_detachment(), test_admin_bulk_import_docx_sorts_ukrainian_alphabet_and_assigns_variants(), test_admin_bulk_import_rbac_and_validation_errors(), test_admin_bulk_import_txt_formats_continuing_list_number_and_duplicates(), test_admin_endpoints_enforce_admin_rbac(), test_admin_users_crud_filters_and_safety_guards() (+1 more)
+### Community 4 - "._evaluate_column_exists"
+Cohesion: 0.18
+Nodes (3): AccdbDatabaseSchema, _is_numeric_condition(), _strip_identifiers()
+
+### Community 5 - "accdb_grader.py"
+Cohesion: 0.16
+Nodes (5): build_accdb_bytes(), _encode_data_page(), _encode_msys_catalog_record(), _encode_tdef_page(), _parse_ddl_column_type()
 
 ### Community 7 - "GradebookPage.tsx"
 Cohesion: 0.11
-Nodes (27): lucide-react@^0.460.0, COURSE_SLUG_LABELS, CriterionBreakdownItem(), CriterionFilterMode, extractFileNameFromPath(), FORMAT_META, formatDateTime(), GradingReportCard() (+19 more)
+Nodes (27): COURSE_SLUG_LABELS, CriterionBreakdownItem(), CriterionFilterMode, extractFileNameFromPath(), FORMAT_META, formatDateTime(), GradingReportCard(), GradingReportCardProps (+19 more)
 
-### Community 8 - "list_my_submissions"
-Cohesion: 0.22
-Nodes (4): get_submission_detail(), list_my_submissions(), list_submissions(), update_submission_grade()
+### Community 8 - "MarkdownRenderer.tsx"
+Cohesion: 0.12
+Nodes (31): dedentBlockLines(), findClosingDoubleStar(), findClosingParen(), findClosingSingleStar(), findMatchingBracket(), getAlignmentClass(), getLineIndent(), hasUnsafeControlChars() (+23 more)
 
-### Community 11 - "build_group_journal"
-Cohesion: 0.07
-Nodes (13): CriterionErrorStat, GroupJournalRow, GroupJournalStudentCell, _auto_adjust_worksheet_columns(), build_group_journal(), calculate_criterion_error_stats(), _configure_pdf_font(), PracticalColumnInfo (+5 more)
+### Community 11 - "export_service.py"
+Cohesion: 0.05
+Nodes (20): CriterionErrorStat, ExportFormat, GroupJournalRead, GroupJournalRow, GroupJournalStudentCell, _auto_adjust_worksheet_columns(), build_content_disposition(), build_group_journal() (+12 more)
 
 ### Community 13 - "InvalidFileFormatError"
 Cohesion: 0.08
-Nodes (17): check_submission_plagiarism(), _coerce_metadata(), compute_bytes_sha256(), compute_code_sha256(), compute_file_sha256(), compute_submission_hash(), evaluate_plagiarism(), extract_core_xml_metadata() (+9 more)
+Nodes (17): InvalidFileFormatError, check_submission_plagiarism(), _coerce_metadata(), compute_bytes_sha256(), compute_code_sha256(), compute_file_sha256(), compute_submission_hash(), evaluate_plagiarism() (+9 more)
 
-### Community 14 - "submit_practical_work"
-Cohesion: 0.15
-Nodes (4): _extract_submission_payload(), ExtractedSubmissionPayload, submit_practical_work(), update_practical_grading_rules()
+### Community 14 - "BaseGrader"
+Cohesion: 0.11
+Nodes (4): BaseGrader, GradingReport, test_xlsx_grader_evaluates_formulas_values_and_charts(), test_xlsx_grader_rejects_static_value_instead_of_formula_and_missing_chart()
 
-### Community 16 - "seed_database"
-Cohesion: 0.21
-Nodes (5): main(), run_seed(), seed_database(), SeedSummary, summarize_bundle()
+### Community 16 - "test_submissions_api.py"
+Cohesion: 0.17
+Nodes (8): make_auth_headers(), _get_course_module_and_practical(), _get_user_by_email(), test_antiplagiarism_flags_sha256_and_core_xml_matches_across_students(), test_health_check_and_jwt_login_flow(), test_submission_blocked_without_passed_quiz_and_unlocked_after_70_percent(), test_submit_all_four_practical_formats_via_api(), test_teacher_update_rules_manual_grade_and_group_export()
 
 ### Community 17 - "schemas/__init__.py"
-Cohesion: 0.10
-Nodes (21): _build_module_detail_read(), CourseCreate, CourseRead, CourseUpdate, ModuleCreate, ModuleDetailRead, ModuleSummaryRead, ModuleUpdate (+13 more)
+Cohesion: 0.11
+Nodes (19): _serialize_practical_teacher(), CourseCreate, CourseUpdate, ModuleCreate, ModuleDetailRead, ModuleSummaryRead, ModuleUpdate, PracticalCreate (+11 more)
+
+### Community 22 - "conftest.py"
+Cohesion: 0.11
+Nodes (5): build_sample_docx(), build_sample_xlsx(), _compile_jsonb_for_sqlite(), _replace_zip_member(), rewrite_openxml_core_metadata()
 
 ### Community 23 - "package.json"
 Cohesion: 0.07
-Nodes (41): @monaco-editor/react@4.6.0, devDependencies, autoprefixer@^10.4.20, eslint@^9.15.0, @eslint/js@^9.15.0, eslint-plugin-react-hooks@^5.0.0, eslint-plugin-react-refresh@^0.4.14, globals@^15.12.0 (+33 more)
+Nodes (39): devDependencies, autoprefixer@^10.4.20, eslint@^9.15.0, @eslint/js@^9.15.0, eslint-plugin-react-hooks@^5.0.0, eslint-plugin-react-refresh@^0.4.14, globals@^15.12.0, postcss@^8.4.49 (+31 more)
 
 ### Community 24 - "App.tsx"
-Cohesion: 0.10
-Nodes (35): dependencies, axios@^1.7.7, react@^18.3.1, react-dom@^18.3.1, react-router-dom@^6.28.0, App(), ProtectedAppLayout(), RoleHomeRedirect() (+27 more)
+Cohesion: 0.12
+Nodes (30): react-router-dom@^6.28.0, App(), ProtectedAppLayout(), RoleHomeRedirect(), Navbar(), NavbarProps, resolvePageTitle(), ROLE_BADGE_CONFIG (+22 more)
 
 ### Community 25 - "DomainError"
-Cohesion: 0.12
-Nodes (17): role_checker(), create_admin_group(), create_admin_user(), delete_admin_group(), delete_admin_user(), _ensure_email_unique(), _ensure_group_code_unique(), _get_group_or_404() (+9 more)
+Cohesion: 0.09
+Nodes (19): create_admin_group(), create_admin_user(), delete_admin_group(), delete_admin_user(), _ensure_email_unique(), _ensure_group_code_unique(), _get_group_or_404(), _get_user_with_group_or_404() (+11 more)
 
 ### Community 26 - "AdminUsersPage.tsx"
 Cohesion: 0.07
-Nodes (44): AdminTab, AdminUsersPage(), buildCredentialsReportText(), CourseYearFilter, DeleteTarget, downloadCredentialsReportTxt(), FeedbackBanner, fetchAdminGroups() (+36 more)
+Nodes (43): AdminTab, AdminUsersPage(), buildCredentialsReportText(), CourseYearFilter, DeleteTarget, downloadCredentialsReportTxt(), FeedbackBanner, fetchAdminGroups() (+35 more)
 
 ### Community 27 - "course.ts"
 Cohesion: 0.08
-Nodes (45): PracticalModuleContext, CourseEditorPage(), DISCIPLINE_META, DisciplineMeta, EditorTab, fetchCourses(), fetchModuleDetail(), fetchModuleQuizQuestions() (+37 more)
+Nodes (47): PracticalModuleContext, CourseEditorPage(), DISCIPLINE_META, DisciplineMeta, EditorTab, fetchCourses(), fetchModuleDetail(), fetchModuleQuizQuestions() (+39 more)
 
-### Community 28 - "build_accdb_bytes"
-Cohesion: 0.31
-Nodes (4): build_accdb_bytes(), _encode_data_page(), _encode_msys_catalog_record(), _encode_tdef_page()
+### Community 28 - "_SeedQuizQuestionPayload"
+Cohesion: 0.18
+Nodes (4): _SeedCoursePayload, _SeedModulePayload, _SeedPracticalPayload, _SeedQuizQuestionPayload
 
 ### Community 29 - "AuthContext.tsx"
 Cohesion: 0.23
 Nodes (15): apiClient, clearAuthTokens(), getAccessToken(), getRefreshToken(), setAccessToken(), setRefreshToken(), AuthContext, AuthContextValue (+7 more)
 
 ### Community 30 - "XlsxGrader"
-Cohesion: 0.05
-Nodes (5): _is_doctype_target(), _try_parse_numeric(), XlsxGrader, CriterionResult, GradingRule
+Cohesion: 0.09
+Nodes (4): _try_parse_numeric(), XlsxGrader, CriterionResult, GradingRule
 
-### Community 32 - "AccdbGrader"
-Cohesion: 0.08
-Nodes (7): AccdbColumnSchema, AccdbDatabaseSchema, AccdbTableSchema, _is_numeric_condition(), _is_system_table_name(), _resolve_canonical_type(), _strip_identifiers()
+### Community 32 - ".evaluate"
+Cohesion: 0.23
+Nodes (4): build_sample_accdb(), test_accdb_grader_accepts_hyperlink_type_as_memo(), test_accdb_grader_detects_missing_schema_elements_and_invalid_header(), test_accdb_grader_evaluates_tables_columns_and_types()
 
 ### Community 33 - "QuizService"
 Cohesion: 0.13
-Nodes (3): QuizNotPassedError, QuizService, resolve_student_variant()
+Nodes (5): _build_module_detail_read(), get_practical_for_student(), submit_module_quiz(), PracticalStudentRead, QuizService
 
-### Community 37 - "submission_service.py"
-Cohesion: 0.09
-Nodes (10): require_role(), PlagiarismDetectedError, UserRole, GradingRulesUpdateRequest, GroupJournalRead, HtmlSubmissionRequest, ManualGradeUpdateRequest, SubmissionRead (+2 more)
+### Community 34 - "HtmlSandbox.tsx"
+Cohesion: 0.13
+Nodes (16): dependencies, axios@^1.7.7, lucide-react@^0.460.0, @monaco-editor/react@4.6.0, react@^18.3.1, react-dom@^18.3.1, buildStarterHtmlTemplate(), EditorColorTheme (+8 more)
 
-### Community 38 - "conftest.py"
-Cohesion: 0.09
-Nodes (6): async_client(), build_sample_docx(), db_session(), _fast_seed_hash_password(), _replace_zip_member(), rewrite_openxml_core_metadata()
+### Community 35 - "collections_abc"
+Cohesion: 0.17
+Nodes (4): downgrade(), upgrade(), downgrade(), upgrade()
+
+### Community 36 - "Settings"
+Cohesion: 0.16
+Nodes (3): get_settings(), _resolve_backend_path(), Settings
+
+### Community 37 - "SubmissionService"
+Cohesion: 0.06
+Nodes (13): _extract_submission_payload(), submit_practical_work(), update_practical_grading_rules(), get_submission_detail(), list_my_submissions(), list_submissions(), update_submission_grade(), PlagiarismDetectedError (+5 more)
+
+### Community 38 - "student_import_service.py"
+Cohesion: 0.13
+Nodes (3): build_generated_email(), generate_temp_password(), StudentImportService
 
 ### Community 40 - "GradebookPage.tsx"
 Cohesion: 0.13
 Nodes (21): @tanstack/react-query@^5.60.0, extractApiErrorMessage(), COURSE_VISUAL_META, CoursesPage(), CourseVisualMeta, fetchCourses(), FilterOption, ModuleRowCard() (+13 more)
 
-### Community 42 - "test_submissions_api.py"
-Cohesion: 0.18
-Nodes (9): make_auth_headers(), _get_course_module_and_practical(), _get_user_by_email(), _grant_quiz_pass(), test_antiplagiarism_flags_sha256_and_core_xml_matches_across_students(), test_health_check_and_jwt_login_flow(), test_submission_blocked_without_passed_quiz_and_unlocked_after_70_percent(), test_submit_all_four_practical_formats_via_api() (+1 more)
+### Community 42 - "test_admin_api.py"
+Cohesion: 0.12
+Nodes (11): calculate_variant_index(), resolve_student_variant(), _build_college_import_docx(), _get_user_by_email(), test_admin_academic_groups_crud_and_detachment(), test_admin_bulk_import_docx_sorts_ukrainian_alphabet_and_assigns_variants(), test_admin_bulk_import_rbac_and_validation_errors(), test_admin_bulk_import_txt_formats_continuing_list_number_and_duplicates() (+3 more)
+
+### Community 43 - "SqliteAsyncSessionAdapter"
+Cohesion: 0.17
+Nodes (4): SqliteAsyncSessionAdapter, test_academic_group_course_year_restricted_to_1_through_4(), test_seed_database_sync_courses_preserves_users_and_groups(), _grant_quiz_pass()
 
 ### Community 44 - "ModuleViewPage.tsx"
 Cohesion: 0.11
-Nodes (25): buildStarterHtmlTemplate(), EditorColorTheme, HtmlSandbox(), HtmlSandboxProps, QUICK_HTML_SNIPPETS, QuickSnippet, SandboxViewMode, BinaryPracticalFormat (+17 more)
+Nodes (29): AccessFieldDescriptor, AccessTableDescriptor, BinaryPracticalFormat, fetchModuleDetail(), fetchStudentPractical(), FILE_UPLOAD_FORMAT_META, FileUploadFormatMeta, FORMAT_BADGE_LABELS (+21 more)
 
-### Community 46 - "export_service.py"
-Cohesion: 0.11
-Nodes (18): Base, Course, CourseSlug, _enum_values(), Module, Practical, QuizQuestion, QuizAttempt (+10 more)
+### Community 46 - "build_seed_bundle"
+Cohesion: 0.16
+Nodes (7): QuizQuestion, build_seed_bundle(), _load_course_from_json(), seed_database(), SeedBundle, summarize_bundle(), test_full_course_json_bundle_validation()
+
+### Community 47 - "db_session"
+Cohesion: 0.13
+Nodes (5): async_client(), _create_sqlite_test_engine(), _set_sqlite_pragma(), db_session(), _fast_seed_hash_password()
 
 ### Community 49 - "html_grader.py"
-Cohesion: 0.10
-Nodes (7): _attribute_value_matches(), _find_tag_attr_key(), _get_tag_attribute_str(), _normalize_selector(), _parse_text_match_expected(), _strip_quotes(), _tag_has_attribute()
-
-### Community 50 - "ExportService"
-Cohesion: 0.07
-Nodes (10): export_group_journal(), get_group_journal(), list_academic_groups(), _parse_export_format(), ExportFormat, build_content_disposition(), ExportedDocument, ExportService (+2 more)
-
-### Community 51 - "student_import_service.py"
 Cohesion: 0.06
-Nodes (25): ImportedStudentItem, ImportSkippedItem, StudentImportResponse, calculate_variant_index(), build_generated_email(), _classify_header_cell(), _clean_whitespace(), _detect_docx_header_columns() (+17 more)
+Nodes (13): _attribute_value_matches(), _find_tag_attr_key(), _get_tag_attribute_str(), HtmlGrader, _is_doctype_target(), _normalize_selector(), _normalize_text(), _parse_text_match_expected() (+5 more)
+
+### Community 50 - "export_group_journal"
+Cohesion: 0.23
+Nodes (3): export_group_journal(), get_group_journal(), list_academic_groups()
+
+### Community 51 - "parse_docx_students"
+Cohesion: 0.07
+Nodes (18): _classify_header_cell(), _clean_whitespace(), _detect_docx_header_columns(), _DocxColumnMap, _encode_ukrainian_word(), _get_cell_value(), _infer_default_docx_columns(), _is_txt_header_line() (+10 more)
 
 ### Community 52 - "get_db"
-Cohesion: 0.08
-Nodes (21): create_course(), create_module(), create_quiz_question(), delete_quiz_question(), _fetch_user_progress_maps(), get_course(), get_module(), get_practical_for_student() (+13 more)
+Cohesion: 0.11
+Nodes (20): create_course(), create_module(), create_quiz_question(), _fetch_user_progress_maps(), get_course(), get_module(), get_practical_for_teacher(), list_courses() (+12 more)
+
+### Community 53 - "User"
+Cohesion: 0.17
+Nodes (8): Base, CourseSlug, _enum_values(), Practical, QuizAttempt, Submission, AcademicGroup, User
+
+### Community 54 - "xlsx_grader.py"
+Cohesion: 0.20
+Nodes (3): _canonicalize_formula(), _format_cell_value(), _is_wrapped_in_parens()
+
+### Community 56 - "seed.py"
+Cohesion: 0.25
+Nodes (4): hash_password(), main(), run_seed(), SeedSummary
 
 ### Community 63 - "env.py"
-Cohesion: 0.07
-Nodes (7): do_run_migrations(), run_async_migrations(), run_migrations_offline(), run_migrations_online(), get_settings(), Settings, create_application()
+Cohesion: 0.14
+Nodes (5): do_run_migrations(), run_async_migrations(), run_migrations_offline(), run_migrations_online(), test_media_courses_static_serving()
+
+### Community 67 - "DomainError"
+Cohesion: 0.12
+Nodes (9): require_role(), role_checker(), _parse_export_format(), ExtractedSubmissionPayload, DomainError, QuizNotPassedError, _enum_values(), UserRole (+1 more)
 
 ## Knowledge Gaps
 - **1 isolated node(s):** `edu-auto-grader-backend`
-  These have ≤1 connection - possible missing edges. (Counts symbols only; 639 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **41 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges. (Counts symbols only; 643 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **24 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `GradingRule` connect `XlsxGrader` to `AccdbGrader`, `InvalidFileFormatError`, `submission_service.py`, `InvalidFileFormatError`, `schemas/__init__.py`, `html_grader.py`, `InvalidFileFormatError`, `DocxGrader`?**
-  _High betweenness centrality (0.056) - this node is a cross-community bridge._
-- **Are the 10 inferred relationships involving `GradingRule` (e.g. with `AccdbGrader` and `BaseGrader`) actually correct?**
-  _`GradingRule` has 10 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `GradingRule` connect `XlsxGrader` to `.evaluate`, `test_docx_grader_supports_uniform_single_number_margin`, `InvalidFileFormatError`, `accdb_grader.py`, `SubmissionService`, `InvalidFileFormatError`, `BaseGrader`, `build_seed_bundle`, `schemas/__init__.py`, `html_grader.py`, `User`, `xlsx_grader.py`, `seed.py`, `.evaluate`, `.build_criterion_result`?**
+  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Are the 13 inferred relationships involving `DomainError` (e.g. with `delete_admin_user()` and `update_admin_user()`) actually correct?**
+  _`DomainError` has 13 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `edu-auto-grader-backend` to the rest of the system?**
   _1 weakly-connected nodes found - possible missing edges._
-- **Should `v1/auth.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.06818181818181818 - nodes in this community are weakly interconnected._
-- **Why does `DomainError` connect `DomainError` to `v1/auth.py`, `QuizService`, `InvalidFileFormatError`, `submission_service.py`, `get_current_user`, `.__init__`, `submit_practical_work`, `export_service.py`, `schemas/__init__.py`, `ExportService`, `student_import_service.py`, `get_db`, `env.py`?**
-  _High betweenness centrality (0.049) - this node is a cross-community bridge._
-- **Are the 7 inferred relationships involving `DomainError` (e.g. with `login()` and `refresh_tokens()`) actually correct?**
-  _`DomainError` has 7 INFERRED edges - model-reasoned connections that need verification._
+- **Should `UserRole` be split into smaller, more focused modules?**
+  _Cohesion score 0.06352087114337568 - nodes in this community are weakly interconnected._
+- **Why does `User` connect `User` to `UserRole`, `QuizService`, `DomainError`, `SubmissionService`, `get_current_user`, `student_import_service.py`, `test_admin_api.py`, `export_service.py`, `SqliteAsyncSessionAdapter`, `build_seed_bundle`, `test_submissions_api.py`, `schemas/__init__.py`, `get_db`, `seed.py`, `DomainError`?**
+  _High betweenness centrality (0.038) - this node is a cross-community bridge._
+- **Are the 20 inferred relationships involving `User` (e.g. with `get_current_user()` and `require_role()`) actually correct?**
+  _`User` has 20 INFERRED edges - model-reasoned connections that need verification._
 - **Should `postgres` be split into smaller, more focused modules?**
   _Cohesion score 0.09523809523809523 - nodes in this community are weakly interconnected._

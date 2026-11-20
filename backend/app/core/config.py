@@ -1,8 +1,26 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BACKEND_ROOT: Path = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT: Path = _BACKEND_ROOT.parent
+
+
+def _resolve_backend_path(raw_path: Path) -> Path:
+    """Безпечно резолвить відносний шлях контенту/медіа відносно кореня `backend/`."""
+    if raw_path.is_absolute():
+        return raw_path
+
+    if raw_path.parts and raw_path.parts[0] == _BACKEND_ROOT.name:
+        stripped = Path(*raw_path.parts[1:]) if len(raw_path.parts) > 1 else Path()
+        candidate_from_backend = (_BACKEND_ROOT / stripped).resolve()
+        if candidate_from_backend.exists():
+            return candidate_from_backend
+        return (_PROJECT_ROOT / raw_path).resolve()
+
+    return (_BACKEND_ROOT / raw_path).resolve()
 
 
 class Settings(BaseSettings):
@@ -39,7 +57,14 @@ class Settings(BaseSettings):
     )
 
     UPLOADS_DIR: Path = Path("uploads")
+    COURSE_CONTENT_DIR: Path = _BACKEND_ROOT / "content" / "courses"
+    COURSE_MEDIA_DIR: Path = _BACKEND_ROOT / "content" / "media"
     QUIZ_PASS_THRESHOLD_PERCENT: float = 70.0
+
+    @field_validator("COURSE_CONTENT_DIR", "COURSE_MEDIA_DIR", mode="after")
+    @classmethod
+    def _validate_content_paths(cls, value: Path) -> Path:
+        return _resolve_backend_path(value)
 
     @property
     def async_database_url(self) -> str:

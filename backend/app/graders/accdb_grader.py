@@ -214,6 +214,8 @@ _CANONICAL_TYPE_ALIASES: dict[str, frozenset[str]] = {
             "text",
             "string",
             "довгий текст",
+            "hyperlink",
+            "гіперпосилання",
         }
     ),
     "GUID": frozenset(
@@ -275,6 +277,7 @@ _NAME_TO_TYPE_CODE: dict[str, tuple[int, bool, bool, int]] = {
     "STRING": (int(TYPE_TEXT), False, False, 255),
     "MEMO": (int(TYPE_MEMO), False, False, 0),
     "LONG TEXT": (int(TYPE_MEMO), False, False, 0),
+    "HYPERLINK": (int(TYPE_MEMO), False, False, 0),
     "OLE": (int(TYPE_OLE), False, False, 0),
     "GUID": (int(TYPE_GUID), True, False, 16),
     "UUID": (int(TYPE_GUID), True, False, 16),

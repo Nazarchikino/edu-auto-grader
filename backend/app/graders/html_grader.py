@@ -619,8 +619,44 @@ class HtmlGrader(BaseGrader):
             inline_op = bracket_match.group(3)
             inline_val = bracket_match.group(5)
             if inline_op is not None and inline_val is not None:
+                if not is_bool_or_num_expected:
+                    if "=" in expected_clean:
+                        attr_key, attr_val = expected_clean.split("=", 1)
+                        key_clean = attr_key.strip().lower()
+                        if key_clean and re.match(
+                            r"^[a-zA-Z_:][a-zA-Z0-9_.:-]*$",
+                            key_clean,
+                        ):
+                            return (
+                                _normalize_selector(target_clean),
+                                [key_clean],
+                                _strip_quotes(attr_val),
+                            )
+                    expected_attrs = [
+                        _strip_quotes(token).lower()
+                        for token in re.split(r"[,;]", expected_clean)
+                        if _strip_quotes(token)
+                    ]
+                    if (
+                        expected_attrs
+                        and all(
+                            re.match(r"^[a-zA-Z_:][a-zA-Z0-9_.:-]*$", attr) is not None
+                            for attr in expected_attrs
+                        )
+                        and not (
+                            len(expected_attrs) == 1
+                            and expected_attrs[0] == inline_val.strip().lower()
+                            and expected_attrs[0] not in _KNOWN_HTML_ATTRIBUTES
+                        )
+                    ):
+                        return _normalize_selector(target_clean), expected_attrs, None
                 return base_sel, [attr_name], inline_val.strip()
-            value_check = None if is_bool_or_num_expected else _strip_quotes(expected_clean)
+            expected_unquoted = _strip_quotes(expected_clean)
+            value_check = (
+                None
+                if is_bool_or_num_expected or expected_unquoted.lower() == attr_name
+                else expected_unquoted
+            )
             return base_sel, [attr_name], value_check
 
         # Формат 3: target='img', expected='alt=Logo' або expected='lang=uk'

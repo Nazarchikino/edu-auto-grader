@@ -522,7 +522,7 @@ async def test_admin_bulk_import_docx_sorts_ukrainian_alphabet_and_assigns_varia
 
     assert payload["group_id"] == group_id
     assert payload["group_code"] == "ПЗ-21"
-    assert payload["total_variants"] == 3
+    assert payload["total_variants"] == 15
     assert payload["created_count"] == 6
     assert payload["skipped_count"] == 2
 
@@ -539,7 +539,7 @@ async def test_admin_bulk_import_docx_sorts_ukrainian_alphabet_and_assigns_varia
     # Перевіряємо присвоєні list_number (без прогалин) і розраховані variant_number
     assert [item["list_number"] for item in created] == [1, 2, 3, 4, 5, 6]
     assert [item["variant_number"] for item in created] == [
-        calculate_variant_index(n, 3) + 1 for n in range(1, 7)
+        calculate_variant_index(n, 15) + 1 for n in range(1, 7)
     ]
     # Перевіряємо формування {login}@kpefk.com.ua для рядка без заповненої колонки E-mail
     assert created[4]["email"] == "yizhak.o@kpefk.com.ua"
@@ -630,7 +630,9 @@ async def test_admin_bulk_import_txt_formats_continuing_list_number_and_duplicat
     ]
     # Продовження нумерації після існуючого max(list_number) = 3 -> 4, 5, 6, 7, 8
     assert [item["list_number"] for item in created] == [4, 5, 6, 7, 8]
-    assert [item["variant_number"] for item in created] == [1, 2, 3, 1, 2]
+    assert [item["variant_number"] for item in created] == [
+        calculate_variant_index(n, payload["total_variants"]) + 1 for n in range(4, 9)
+    ]
 
     # Автогенерація унікальних транслітерованих email і 8-символьних паролів
     assert created[0]["email"] == "gudz.i@kpefk.com.ua"

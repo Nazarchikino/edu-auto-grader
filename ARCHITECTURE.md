@@ -14,8 +14,19 @@ edu-auto-grader/
 │   ├── alembic.ini
 │   ├── alembic/
 │   │   └── versions/
+│   ├── content/                     # Статичний контент 4 навчальних курсів
+│   │   ├── courses/                 # Валідовані JSON-пакети курсів (word, excel, access, html)
+│   │   │   ├── word.json
+│   │   │   ├── excel.json
+│   │   │   ├── access.json
+│   │   │   └── html.json
+│   │   └── media/                   # Медіафайли лекцій і практичних (роздача через /media/courses)
+│   │       ├── word/
+│   │       ├── excel/
+│   │       └── access/
 │   ├── app/
-│   │   ├── main.py                  # Точка входу FastAPI, CORS, exception handlers
+│   │   ├── main.py                  # Точка входу FastAPI, CORS, StaticFiles (/media/courses), exception handlers
+│   │   ├── seed.py                  # CLI-імпорт 4 курсів із JSON (--dry-run, --sync-courses)
 │   │   ├── core/
 │   │   │   ├── config.py            # Налаштування середовища (Pydantic BaseSettings)
 │   │   │   ├── database.py          # AsyncEngine, AsyncSessionLocal
@@ -56,6 +67,7 @@ edu-auto-grader/
 │   └── tests/
 │       ├── conftest.py
 │       ├── test_admin_api.py
+│       ├── test_course_content.py
 │       ├── test_graders.py
 │       └── test_submissions_api.py
 └── frontend/
@@ -231,6 +243,7 @@ class BaseGrader(ABC):
 | `PATCH` | `/submissions/{submission_id}/grade` | Teacher | Ручне коригування оцінки та додавання коментаря викладача |
 | `GET` | `/analytics/groups/{group_id}/export` | Teacher | Генерація відомості успішності у форматі `.xlsx` або `.pdf` |
 | `POST` | `/admin/users/import` | Admin | Масовий імпорт студентів із `.docx` або `.txt` з українським алфавітним сортуванням та звітом |
+| `GET` | `/media/courses/{path}` | Public | Статична роздача медіафайлів навчальних курсів (`.png`, `.webp`, `.jpg`, `.pdf`) із `COURSE_MEDIA_DIR` через `StaticFiles` |
 
 ### 3.4. Контракт масового імпорту студентів (`POST /api/v1/admin/users/import`)
 * **Запит (`multipart/form-data`):**
