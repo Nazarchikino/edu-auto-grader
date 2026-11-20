@@ -7,7 +7,6 @@ import {
   type DragEvent,
   type FormEvent,
   type ReactElement,
-  type ReactNode,
 } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -18,14 +17,18 @@ import {
   ArrowRight,
   Award,
   BookOpen,
+  Check,
   CheckCircle2,
   ClipboardCheck,
+  Copy,
+  Database,
   FileCheck2,
   FileCode2,
   FileSpreadsheet,
   FileText,
   HardDriveUpload,
   HelpCircle,
+  KeyRound,
   Loader2,
   Lock,
   RefreshCw,
@@ -34,12 +37,17 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Table2,
   Trash2,
   Unlock,
   UploadCloud,
   XCircle,
 } from "lucide-react";
 import apiClient from "../../api/client";
+import {
+  MarkdownRenderer,
+  renderInlineMarkdown,
+} from "../../components/common/MarkdownRenderer";
 import { HtmlSandbox } from "../../components/sandbox/HtmlSandbox";
 import { extractApiErrorMessage, useAuth } from "../../context/AuthContext";
 import type { HtmlSubmissionRequest, SubmissionRead } from "../../types/api";
@@ -166,182 +174,497 @@ async function submitFilePractical(
   return response.data;
 }
 
-/**
- * Безпечний парсер інлайн-розмітки Markdown (**жирний текст** та `код`) у React-вузли.
- */
-function renderInlineMarkdown(text: string): ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
-  return tokens
-    .filter((token) => token.length > 0)
-    .map((token, index): ReactNode => {
-      if (token.startsWith("`") && token.endsWith("`") && token.length >= 2) {
-        return (
-          <code
-            key={`code-${index}`}
-            className="rounded-md border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] font-medium text-blue-800"
-          >
-            {token.slice(1, -1)}
-          </code>
-        );
-      }
-      if (
-        token.startsWith("**") &&
-        token.endsWith("**") &&
-        token.length >= 4
-      ) {
-        return (
-          <strong
-            key={`bold-${index}`}
-            className="font-semibold text-slate-900"
-          >
-            {token.slice(2, -2)}
-          </strong>
-        );
-      }
-      return <span key={`txt-${index}`}>{token}</span>;
-    });
+const HIDDEN_WORD_PARAMETER_KEYS = new Set<string>([
+  "topic",
+  "level_1_task",
+  "level_2_task",
+  "level_3_task",
+  "raw_text_to_use",
+]);
+
+const PARAMETER_DISPLAY_LABELS: Record<string, string> = {
+  database_file: "Файл БД",
+  tables: "Структура таблиць БД",
+  focus: "Фокус роботи",
+  tasks: "Завдання",
+  difficulty_level: "Рівень складності",
+  tasks_count: "Кількість завдань",
+  task_titles: "Перелік завдань",
+  sheets_count: "Кількість аркушів",
+  images: "Ілюстрації-зразки",
+};
+
+interface AccessFieldDescriptor {
+  name: string;
+  rawType: string | null;
+  canonicalType: string | null;
+  note: string | null;
 }
 
-/**
- * Структурований рендерер тексту лекції (Markdown -> React JSX) без dangerouslySetInnerHTML.
- */
-function LectureMarkdownRenderer({
-  content,
-}: {
-  content: string;
-}): ReactElement {
-  const blocks = useMemo(() => {
-    const normalized = content.replace(/\r\n/g, "\n").trim();
-    if (normalized.length === 0) {
-      return [];
-    }
-    return normalized.split(/\n{2,}/);
-  }, [content]);
+interface AccessTableDescriptor {
+  name: string;
+  primaryKeys: string[];
+  fields: AccessFieldDescriptor[];
+}
 
-  if (blocks.length === 0) {
-    return (
-      <p className="text-sm italic text-slate-500">
-        Текст лекції для цього модуля ще не додано.
-      </p>
-    );
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPrimitiveValue(
+  value: unknown
+): value is string | number | boolean | null {
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
+function formatParameterLabel(paramKey: string): string {
+  return PARAMETER_DISPLAY_LABELS[paramKey] ?? paramKey;
+}
+
+function formatScalarValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Так" : "Ні";
+  }
+  if (typeof value === "number" || typeof value === "string") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatScalarValue(item)).join(", ");
+  }
+  if (isPlainRecord(value)) {
+    return Object.entries(value)
+      .map(([k, v]) => `${k}: ${formatScalarValue(v)}`)
+      .join("; ");
+  }
+  return String(value);
+}
+
+function parseAccessTableDescriptor(
+  candidate: unknown
+): AccessTableDescriptor | null {
+  if (!isPlainRecord(candidate)) {
+    return null;
+  }
+  if (typeof candidate.name !== "string" || candidate.name.trim().length === 0) {
+    return null;
+  }
+  if (!Array.isArray(candidate.fields)) {
+    return null;
+  }
+
+  const primaryKeys: string[] = [];
+  if (Array.isArray(candidate.primary_keys)) {
+    for (const pk of candidate.primary_keys) {
+      if (typeof pk === "string" && pk.trim().length > 0) {
+        primaryKeys.push(pk.trim());
+      }
+    }
+  }
+
+  const fields: AccessFieldDescriptor[] = [];
+  for (const rawField of candidate.fields) {
+    if (typeof rawField === "string") {
+      const trimmed = rawField.trim();
+      if (trimmed.length > 0) {
+        fields.push({
+          name: trimmed,
+          rawType: null,
+          canonicalType: null,
+          note: null,
+        });
+      }
+      continue;
+    }
+
+    if (isPlainRecord(rawField) && typeof rawField.name === "string") {
+      const fieldName = rawField.name.trim();
+      if (fieldName.length === 0) {
+        continue;
+      }
+      const rawType =
+        typeof rawField.raw_type === "string" &&
+        rawField.raw_type.trim().length > 0
+          ? rawField.raw_type.trim()
+          : null;
+      const canonicalType =
+        typeof rawField.type === "string" && rawField.type.trim().length > 0
+          ? rawField.type.trim()
+          : null;
+      const note =
+        typeof rawField.note === "string" && rawField.note.trim().length > 0
+          ? rawField.note.trim()
+          : null;
+
+      if (
+        note !== null &&
+        note.toLowerCase().includes("первинний ключ") &&
+        !primaryKeys.includes(fieldName)
+      ) {
+        primaryKeys.push(fieldName);
+      }
+
+      fields.push({
+        name: fieldName,
+        rawType,
+        canonicalType,
+        note,
+      });
+    }
+  }
+
+  return {
+    name: candidate.name.trim(),
+    primaryKeys,
+    fields,
+  };
+}
+
+function parseAccessTablesList(value: unknown): AccessTableDescriptor[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  const parsed: AccessTableDescriptor[] = [];
+  for (const item of value) {
+    const table = parseAccessTableDescriptor(item);
+    if (table === null) {
+      return null;
+    }
+    parsed.push(table);
+  }
+  return parsed;
+}
+
+function isLongStringArray(value: unknown): value is string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return false;
+  }
+  if (!value.every((item): item is string => typeof item === "string")) {
+    return false;
+  }
+  return value.some((item) => item.length > 42) || value.length >= 6;
+}
+
+function isInlineChipValue(value: unknown): boolean {
+  if (isPrimitiveValue(value)) {
+    return true;
+  }
+  if (
+    Array.isArray(value) &&
+    value.every((item) => isPrimitiveValue(item)) &&
+    !isLongStringArray(value)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function formatInlineChipDisplay(paramKey: string, value: unknown): string {
+  if (Array.isArray(value)) {
+    if (paramKey === "images") {
+      return value
+        .map((item) => {
+          const text = formatScalarValue(item);
+          const parts = text.split("/");
+          return parts[parts.length - 1] ?? text;
+        })
+        .join(", ");
+    }
+    return value.map((item) => formatScalarValue(item)).join(", ");
+  }
+  return formatScalarValue(value);
+}
+
+function renderGenericObjectCard(
+  record: Record<string, unknown>,
+  cardKey: string
+): ReactElement {
+  return (
+    <div
+      key={cardKey}
+      className="rounded-lg border border-indigo-200/80 bg-white p-3 text-xs shadow-2xs"
+    >
+      <dl className="space-y-1.5">
+        {Object.entries(record).map(([nestedKey, nestedVal]) => (
+          <div
+            key={`${cardKey}-${nestedKey}`}
+            className="flex flex-col gap-0.5 sm:flex-row sm:gap-2"
+          >
+            <dt className="shrink-0 font-semibold text-indigo-800">
+              {formatParameterLabel(nestedKey)}:
+            </dt>
+            <dd className="min-w-0 text-slate-700">
+              {formatScalarValue(nestedVal)}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+interface VariantParametersSectionProps {
+  parameters: Record<string, unknown>;
+  copiedRawText: boolean;
+  onCopyRawText: (text: string) => void;
+}
+
+function VariantParametersSection({
+  parameters,
+  copiedRawText,
+  onCopyRawText,
+}: VariantParametersSectionProps): ReactElement | null {
+  const rawTextCandidate = parameters.raw_text_to_use;
+  const rawTextToUse =
+    typeof rawTextCandidate === "string" && rawTextCandidate.trim().length > 0
+      ? rawTextCandidate
+      : null;
+
+  const visibleEntries = Object.entries(parameters).filter(
+    ([paramKey]) => !HIDDEN_WORD_PARAMETER_KEYS.has(paramKey)
+  );
+
+  const inlineChipEntries = visibleEntries.filter(([, value]) =>
+    isInlineChipValue(value)
+  );
+  const structuredEntries = visibleEntries.filter(
+    ([, value]) => !isInlineChipValue(value)
+  );
+
+  if (rawTextToUse === null && visibleEntries.length === 0) {
+    return null;
   }
 
   return (
-    <div className="space-y-4 text-slate-700">
-      {blocks.map((rawBlock, blockIndex) => {
-        const block = rawBlock.trim();
-
-        if (block.startsWith("```") && block.endsWith("```")) {
-          const lines = block.split("\n");
-          const codeBody = lines.slice(1, -1).join("\n");
-          return (
-            <pre
-              key={`pre-${blockIndex}`}
-              className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-100"
-            >
-              <code>{codeBody}</code>
-            </pre>
-          );
-        }
-
-        if (block.startsWith("# ")) {
-          return (
-            <h2
-              key={`h1-${blockIndex}`}
-              className="border-b border-slate-200 pb-2.5 text-xl font-bold text-slate-900 sm:text-2xl"
-            >
-              {renderInlineMarkdown(block.slice(2).trim())}
-            </h2>
-          );
-        }
-
-        if (block.startsWith("## ")) {
-          return (
-            <h3
-              key={`h2-${blockIndex}`}
-              className="pt-2 text-lg font-bold text-slate-900"
-            >
-              {renderInlineMarkdown(block.slice(3).trim())}
-            </h3>
-          );
-        }
-
-        if (block.startsWith("### ")) {
-          return (
-            <h4
-              key={`h3-${blockIndex}`}
-              className="pt-1 text-base font-semibold text-slate-900"
-            >
-              {renderInlineMarkdown(block.slice(4).trim())}
-            </h4>
-          );
-        }
-
-        const lines = block
-          .split("\n")
-          .map((line) => line.trim())
-          .filter((line) => line.length > 0);
-
-        const isUnorderedList =
-          lines.length > 0 &&
-          lines.every((line) => line.startsWith("- ") || line.startsWith("* "));
-
-        if (isUnorderedList) {
-          return (
-            <ul
-              key={`ul-${blockIndex}`}
-              className="list-disc space-y-1.5 pl-6 text-sm leading-relaxed text-slate-700"
-            >
-              {lines.map((line, itemIndex) => (
-                <li key={`li-${blockIndex}-${itemIndex}`}>
-                  {renderInlineMarkdown(line.slice(2).trim())}
-                </li>
-              ))}
-            </ul>
-          );
-        }
-
-        const isOrderedList =
-          lines.length > 0 && lines.every((line) => /^\d+\.\s+/.test(line));
-
-        if (isOrderedList) {
-          return (
-            <ol
-              key={`ol-${blockIndex}`}
-              className="list-decimal space-y-1.5 pl-6 text-sm leading-relaxed text-slate-700"
-            >
-              {lines.map((line, itemIndex) => (
-                <li key={`oli-${blockIndex}-${itemIndex}`}>
-                  {renderInlineMarkdown(line.replace(/^\d+\.\s+/, "").trim())}
-                </li>
-              ))}
-            </ol>
-          );
-        }
-
-        // Якщо блок починається з заголовка, за яким ідуть рядки тексту чи списку без порожнього рядка
-        if (lines.length > 1 && lines[0]?.startsWith("## ")) {
-          const headingLine = lines[0].slice(3).trim();
-          const restText = lines.slice(1).join("\n");
-          return (
-            <div key={`mixed-${blockIndex}`} className="space-y-2">
-              <h3 className="pt-2 text-lg font-bold text-slate-900">
-                {renderInlineMarkdown(headingLine)}
-              </h3>
-              <LectureMarkdownRenderer content={restText} />
+    <div className="mt-4 space-y-4 border-t border-indigo-200/70 pt-4">
+      {rawTextToUse !== null && (
+        <div className="rounded-xl border border-indigo-200 bg-white/90 p-4 shadow-2xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <FileText className="h-4 w-4 text-indigo-600" />
+              <p className="text-xs font-bold uppercase tracking-wider text-indigo-900">
+                Текст/Дані для копіювання
+              </p>
             </div>
-          );
-        }
+            <button
+              type="button"
+              onClick={() => onCopyRawText(rawTextToUse)}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                copiedRawText
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                  : "border-indigo-200 bg-indigo-50 text-indigo-800 hover:border-indigo-300 hover:bg-indigo-100"
+              }`}
+            >
+              {copiedRawText ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>Скопійовано!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3.5 w-3.5" />
+                  <span>Скопіювати текст у буфер</span>
+                </>
+              )}
+            </button>
+          </div>
+          <pre className="mt-2.5 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-slate-50/80 p-3.5 font-sans text-xs leading-relaxed text-slate-800 sm:text-sm">
+            {rawTextToUse}
+          </pre>
+        </div>
+      )}
 
-        return (
-          <p
-            key={`p-${blockIndex}`}
-            className="text-sm leading-relaxed text-slate-700 sm:text-base"
-          >
-            {renderInlineMarkdown(lines.join(" "))}
+      {visibleEntries.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-xs font-semibold text-indigo-900">
+            Контрольні параметри варіанта:
           </p>
-        );
-      })}
+
+          {inlineChipEntries.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {inlineChipEntries.map(([paramKey, paramValue]) => (
+                <span
+                  key={paramKey}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-2.5 py-1 font-mono text-xs text-slate-800"
+                >
+                  <span className="font-semibold text-indigo-700">
+                    {formatParameterLabel(paramKey)}:
+                  </span>
+                  <span>{formatInlineChipDisplay(paramKey, paramValue)}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {structuredEntries.map(([paramKey, paramValue]) => {
+            const accessTables = parseAccessTablesList(paramValue);
+            if (accessTables !== null) {
+              return (
+                <div key={paramKey} className="space-y-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-900">
+                    <Database className="h-3.5 w-3.5 text-indigo-600" />
+                    <span>{formatParameterLabel(paramKey)}:</span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {accessTables.map((table) => {
+                      const pkSet = new Set(
+                        table.primaryKeys.map((pk) => pk.toLowerCase())
+                      );
+                      return (
+                        <div
+                          key={table.name}
+                          className="rounded-xl border border-indigo-200/80 bg-white p-3.5 shadow-2xs"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                            <div className="flex items-center gap-1.5 text-sm font-bold text-slate-900">
+                              <Table2 className="h-4 w-4 text-indigo-600" />
+                              <span>{table.name}</span>
+                            </div>
+                            <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                              {table.fields.length} полів
+                            </span>
+                          </div>
+
+                          {table.primaryKeys.length > 0 && (
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-800">
+                                <KeyRound className="h-3 w-3 text-amber-600" />
+                                Ключові поля:
+                              </span>
+                              {table.primaryKeys.map((pk) => (
+                                <span
+                                  key={`${table.name}-pk-${pk}`}
+                                  className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900"
+                                >
+                                  {pk}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          <ul className="mt-2.5 space-y-1.5 text-xs text-slate-700">
+                            {table.fields.map((field, fieldIdx) => {
+                              const isPrimaryKey = pkSet.has(
+                                field.name.toLowerCase()
+                              );
+                              const typeLabel =
+                                field.rawType !== null &&
+                                field.canonicalType !== null
+                                  ? `${field.rawType} (${field.canonicalType})`
+                                  : (field.rawType ?? field.canonicalType);
+
+                              return (
+                                <li
+                                  key={`${table.name}-f-${fieldIdx}-${field.name}`}
+                                  className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 rounded-md bg-slate-50/80 px-2.5 py-1"
+                                >
+                                  <span className="inline-flex items-center gap-1.5 font-medium text-slate-800">
+                                    {isPrimaryKey && (
+                                      <KeyRound
+                                        className="h-3 w-3 shrink-0 text-amber-600"
+                                        aria-label="Ключове поле"
+                                      />
+                                    )}
+                                    <span>{field.name}</span>
+                                  </span>
+                                  {typeLabel !== null && (
+                                    <span className="font-mono text-[11px] text-indigo-700">
+                                      {typeLabel}
+                                    </span>
+                                  )}
+                                  {field.note !== null && (
+                                    <span className="w-full text-[11px] italic text-slate-500">
+                                      {field.note}
+                                    </span>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            }
+
+            if (isLongStringArray(paramValue)) {
+              return (
+                <div
+                  key={paramKey}
+                  className="rounded-xl border border-indigo-200/80 bg-white p-3.5 shadow-2xs"
+                >
+                  <p className="text-xs font-semibold text-indigo-900">
+                    {formatParameterLabel(paramKey)}:
+                  </p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-slate-700">
+                    {paramValue.map((entry, idx) => (
+                      <li key={`${paramKey}-item-${idx}`}>
+                        {renderInlineMarkdown(entry)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            }
+
+            if (Array.isArray(paramValue)) {
+              return (
+                <div key={paramKey} className="space-y-2">
+                  <p className="text-xs font-semibold text-indigo-900">
+                    {formatParameterLabel(paramKey)}:
+                  </p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {paramValue.map((item, idx) =>
+                      isPlainRecord(item) ? (
+                        renderGenericObjectCard(item, `${paramKey}-${idx}`)
+                      ) : (
+                        <div
+                          key={`${paramKey}-${idx}`}
+                          className="rounded-lg border border-indigo-200/80 bg-white px-3 py-2 text-xs text-slate-700"
+                        >
+                          {formatScalarValue(item)}
+                        </div>
+                      )
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
+            if (isPlainRecord(paramValue)) {
+              return (
+                <div key={paramKey} className="space-y-1.5">
+                  <p className="text-xs font-semibold text-indigo-900">
+                    {formatParameterLabel(paramKey)}:
+                  </p>
+                  {renderGenericObjectCard(paramValue, paramKey)}
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key={paramKey}
+                className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-xs text-slate-800"
+              >
+                <span className="font-semibold text-indigo-700">
+                  {formatParameterLabel(paramKey)}:{" "}
+                </span>
+                <span>{formatScalarValue(paramValue)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -351,6 +674,7 @@ export function ModuleViewPage(): ReactElement {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const copyResetTimerRef = useRef<number | null>(null);
 
   const [activeTab, setActiveTab] = useState<ModuleSectionTab>("lecture");
   const [selectedAnswers, setSelectedAnswers] = useState<
@@ -365,6 +689,7 @@ export function ModuleViewPage(): ReactElement {
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [lastSubmissionResult, setLastSubmissionResult] =
     useState<SubmissionRead | null>(null);
+  const [copiedRawText, setCopiedRawText] = useState<boolean>(false);
 
   const resolvedModuleId = moduleId ?? "";
 
@@ -405,8 +730,66 @@ export function ModuleViewPage(): ReactElement {
     setIsDragActive(false);
     setSubmissionError(null);
     setLastSubmissionResult(null);
+    setCopiedRawText(false);
     setActiveTab("lecture");
   }, [resolvedModuleId]);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopyRawText = (text: string): void => {
+    const triggerConfirmation = (): void => {
+      setCopiedRawText(true);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopiedRawText(false);
+        copyResetTimerRef.current = null;
+      }, 2500);
+    };
+
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.clipboard !== undefined &&
+      typeof navigator.clipboard.writeText === "function"
+    ) {
+      void navigator.clipboard
+        .writeText(text)
+        .then(() => {
+          triggerConfirmation();
+        })
+        .catch(() => {
+          const fallbackTextarea = document.createElement("textarea");
+          fallbackTextarea.value = text;
+          fallbackTextarea.setAttribute("readonly", "true");
+          fallbackTextarea.style.position = "fixed";
+          fallbackTextarea.style.opacity = "0";
+          document.body.appendChild(fallbackTextarea);
+          fallbackTextarea.select();
+          document.execCommand("copy");
+          document.body.removeChild(fallbackTextarea);
+          triggerConfirmation();
+        });
+      return;
+    }
+
+    const fallbackTextarea = document.createElement("textarea");
+    fallbackTextarea.value = text;
+    fallbackTextarea.setAttribute("readonly", "true");
+    fallbackTextarea.style.position = "fixed";
+    fallbackTextarea.style.opacity = "0";
+    document.body.appendChild(fallbackTextarea);
+    fallbackTextarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(fallbackTextarea);
+    triggerConfirmation();
+  };
 
   const invalidateSubmissionRelatedQueries = async (): Promise<void> => {
     await Promise.all([
@@ -701,6 +1084,8 @@ export function ModuleViewPage(): ReactElement {
     );
   }
 
+  const hasPractical = module.practical !== null;
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       {/* Верхня навігація та статус модуля */}
@@ -718,7 +1103,9 @@ export function ModuleViewPage(): ReactElement {
             {module.quiz_passed ? (
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                Тест-допуск складено
+                {hasPractical
+                  ? "Тест-допуск складено"
+                  : "Тест самоперевірки пройдено"}
                 {module.best_quiz_score !== null
                   ? ` (${module.best_quiz_score.toFixed(0)}%)`
                   : ""}
@@ -726,22 +1113,31 @@ export function ModuleViewPage(): ReactElement {
             ) : (
               <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
                 <HelpCircle className="h-3.5 w-3.5" />
-                Тест-допуск: потрібен результат ≥ 70%
+                {hasPractical
+                  ? "Тест-допуск: потрібен результат ≥ 70%"
+                  : "Тест самоперевірки: рекомендовано ≥ 70%"}
                 {module.best_quiz_score !== null
                   ? ` (найкращий: ${module.best_quiz_score.toFixed(0)}%)`
                   : ""}
               </span>
             )}
 
-            {module.practical_unlocked ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                <Unlock className="h-3.5 w-3.5" />
-                Практична робота відкрита
-              </span>
+            {hasPractical ? (
+              module.practical_unlocked ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                  <Unlock className="h-3.5 w-3.5" />
+                  Практична робота відкрита
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                  <Lock className="h-3.5 w-3.5" />
+                  Практична заблокована
+                </span>
+              )
             ) : (
-              <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-                <Lock className="h-3.5 w-3.5" />
-                Практична заблокована
+              <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">
+                <BookOpen className="h-3.5 w-3.5" />
+                Теоретичний модуль
               </span>
             )}
           </div>
@@ -758,7 +1154,9 @@ export function ModuleViewPage(): ReactElement {
 
         {/* Перемикач вкладок модуля */}
         <div
-          className="mt-6 grid grid-cols-1 gap-2 border-t border-slate-100 pt-4 sm:grid-cols-3"
+          className={`mt-6 grid grid-cols-1 gap-2 border-t border-slate-100 pt-4 ${
+            hasPractical ? "sm:grid-cols-3" : "sm:grid-cols-2"
+          }`}
           role="tablist"
           aria-label="Етапи навчального модуля"
         >
@@ -819,45 +1217,49 @@ export function ModuleViewPage(): ReactElement {
                 Крок 2 • {totalQuestions} питань
               </p>
               <p className="truncate text-sm font-semibold">
-                Тест-допуск (≥ 70%)
+                {hasPractical ? "Тест-допуск (≥ 70%)" : "Тест самоперевірки"}
               </p>
             </div>
           </button>
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "practical"}
-            onClick={() => setActiveTab("practical")}
-            className={`flex items-center gap-3 rounded-xl border p-3.5 text-left transition-colors ${
-              activeTab === "practical"
-                ? "border-blue-600 bg-blue-50/70 text-blue-900"
-                : "border-slate-200 bg-slate-50/60 text-slate-700 hover:bg-slate-100"
-            }`}
-          >
-            <div
-              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+          {hasPractical && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "practical"}
+              onClick={() => setActiveTab("practical")}
+              className={`flex items-center gap-3 rounded-xl border p-3.5 text-left transition-colors ${
                 activeTab === "practical"
-                  ? "bg-blue-600 text-white"
-                  : module.practical_unlocked
-                    ? "bg-indigo-100 text-indigo-700"
-                    : "bg-slate-200 text-slate-500"
+                  ? "border-blue-600 bg-blue-50/70 text-blue-900"
+                  : "border-slate-200 bg-slate-50/60 text-slate-700 hover:bg-slate-100"
               }`}
             >
-              {module.practical_unlocked ? (
-                <FileCode2 className="h-4 w-4" />
-              ) : (
-                <Lock className="h-4 w-4" />
-              )}
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                Крок 3 •{" "}
-                {module.practical_unlocked ? "Розблоковано" : "Заблоковано"}
-              </p>
-              <p className="truncate text-sm font-semibold">Практична робота</p>
-            </div>
-          </button>
+              <div
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                  activeTab === "practical"
+                    ? "bg-blue-600 text-white"
+                    : module.practical_unlocked
+                      ? "bg-indigo-100 text-indigo-700"
+                      : "bg-slate-200 text-slate-500"
+                }`}
+              >
+                {module.practical_unlocked ? (
+                  <FileCode2 className="h-4 w-4" />
+                ) : (
+                  <Lock className="h-4 w-4" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Крок 3 •{" "}
+                  {module.practical_unlocked ? "Розблоковано" : "Заблоковано"}
+                </p>
+                <p className="truncate text-sm font-semibold">
+                  Практична робота
+                </p>
+              </div>
+            </button>
+          )}
         </div>
       </div>
 
@@ -870,11 +1272,16 @@ export function ModuleViewPage(): ReactElement {
               <span>Лекційний конспект модуля</span>
             </div>
             <span className="text-xs text-slate-500">
-              Ознайомтеся з матеріалом перед складанням тесту-допуску
+              {hasPractical
+                ? "Ознайомтеся з матеріалом перед складанням тесту-допуску"
+                : "Ознайомтеся з теоретичним матеріалом та перевірте знання у тесті самоперевірки"}
             </span>
           </div>
 
-          <LectureMarkdownRenderer content={module.lecture_content} />
+          <MarkdownRenderer
+            content={module.lecture_content}
+            emptyFallback="Текст лекції для цього модуля ще не додано."
+          />
 
           <div className="mt-8 flex flex-col items-start justify-between gap-4 rounded-xl border border-blue-200 bg-blue-50/60 p-5 sm:flex-row sm:items-center">
             <div>
@@ -882,8 +1289,9 @@ export function ModuleViewPage(): ReactElement {
                 Готові перевірити засвоєння теорії?
               </h3>
               <p className="mt-0.5 text-xs text-slate-600">
-                Для отримання індивідуального варіанта практичної роботи
-                необхідно набрати щонайменше 70% у тесті-допуску.
+                {hasPractical
+                  ? "Для отримання індивідуального варіанта практичної роботи необхідно набрати щонайменше 70% у тесті-допуску."
+                  : "Цей модуль є теоретичним і не передбачає практичної роботи. Пройдіть тест самоперевірки (рекомендовано ≥ 70%), щоб закріпити знання."}
               </p>
             </div>
             <button
@@ -891,14 +1299,18 @@ export function ModuleViewPage(): ReactElement {
               onClick={() => setActiveTab("quiz")}
               className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-semibold text-white shadow-2xs hover:bg-blue-700"
             >
-              <span>Перейти до тесту-допуску</span>
+              <span>
+                {hasPractical
+                  ? "Перейти до тесту-допуску"
+                  : "Перейти до тесту самоперевірки"}
+              </span>
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
         </section>
       )}
 
-      {/* Вкладка 2: Інтерактивний тест-допуск */}
+      {/* Вкладка 2: Інтерактивний тест-допуск / тест самоперевірки */}
       {activeTab === "quiz" && (
         <section className="space-y-6">
           {/* Картка результату останньої спроби (якщо щойно надіслано) */}
@@ -927,8 +1339,12 @@ export function ModuleViewPage(): ReactElement {
                       }`}
                     >
                       {lastQuizResult.passed
-                        ? "Тест-допуск успішно складено! Практичну роботу розблоковано."
-                        : "Прохідний поріг (70%) не досягнуто. Спробуйте ще раз."}
+                        ? hasPractical
+                          ? "Тест-допуск успішно складено! Практичну роботу розблоковано."
+                          : "Тест самоперевірки успішно пройдено!"
+                        : hasPractical
+                          ? "Прохідний поріг (70%) не досягнуто. Спробуйте ще раз."
+                          : "Результат нижче 70%. Рекомендуємо повторити лекцію та спробувати ще раз."}
                     </h3>
                     <p
                       className={`mt-1 text-sm ${
@@ -948,7 +1364,7 @@ export function ModuleViewPage(): ReactElement {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
-                  {lastQuizResult.passed && (
+                  {lastQuizResult.passed && hasPractical && (
                     <button
                       type="button"
                       onClick={() => setActiveTab("practical")}
@@ -957,6 +1373,15 @@ export function ModuleViewPage(): ReactElement {
                       <span>Відкрити практичну роботу</span>
                       <ArrowRight className="h-4 w-4" />
                     </button>
+                  )}
+                  {lastQuizResult.passed && !hasPractical && (
+                    <Link
+                      to="/student/courses"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-2xs hover:bg-emerald-700"
+                    >
+                      <span>Повернутися до курсів</span>
+                      <ArrowRight className="h-4 w-4" />
+                    </Link>
                   )}
                   <button
                     type="button"
@@ -975,12 +1400,31 @@ export function ModuleViewPage(): ReactElement {
             <div className="flex flex-col justify-between gap-4 border-b border-slate-100 pb-5 sm:flex-row sm:items-center">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
-                  Тест-допуск до практичної роботи
+                  {hasPractical
+                    ? "Тест-допуск до практичної роботи"
+                    : "Тест самоперевірки за матеріалами лекції"}
                 </h2>
                 <p className="mt-1 text-xs text-slate-600">
-                  Оберіть одну правильну відповідь для кожного питання. Прохідний
-                  бал для відкриття індивідуального варіанта —{" "}
-                  <span className="font-semibold text-slate-900">≥ 70%</span>.
+                  {hasPractical ? (
+                    <>
+                      Оберіть одну правильну відповідь для кожного питання.
+                      Прохідний бал для відкриття індивідуального варіанта —{" "}
+                      <span className="font-semibold text-slate-900">
+                        ≥ 70%
+                      </span>
+                      .
+                    </>
+                  ) : (
+                    <>
+                      Оберіть одну правильну відповідь для кожного питання, щоб
+                      перевірити засвоєння теоретичного матеріалу (цільовий
+                      рівень —{" "}
+                      <span className="font-semibold text-slate-900">
+                        ≥ 70%
+                      </span>
+                      ).
+                    </>
+                  )}
                 </p>
               </div>
 
@@ -1002,8 +1446,9 @@ export function ModuleViewPage(): ReactElement {
             {totalQuestions === 0 ? (
               <div className="py-8 text-center">
                 <p className="text-sm text-slate-600">
-                  Для цього модуля тестові питання не налаштовані. Практична
-                  робота доступна одразу.
+                  {hasPractical
+                    ? "Для цього модуля тестові питання не налаштовані. Практична робота доступна одразу."
+                    : "Для цього теоретичного модуля тестові питання ще не налаштовані."}
                 </p>
               </div>
             ) : (
@@ -1024,12 +1469,21 @@ export function ModuleViewPage(): ReactElement {
                         key={question.id}
                         className="rounded-xl border border-slate-200 bg-slate-50/50 p-5"
                       >
-                        <legend className="text-sm font-bold text-slate-900">
-                          <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+                        <legend className="sr-only">
+                          Питання {qIndex + 1}
+                        </legend>
+                        <div className="flex items-start gap-3">
+                          <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
                             {qIndex + 1}
                           </span>
-                          {question.question_text}
-                        </legend>
+                          <div className="min-w-0 flex-1 font-medium text-slate-900">
+                            <MarkdownRenderer
+                              content={question.question_text}
+                              compact
+                              className="text-slate-900"
+                            />
+                          </div>
+                        </div>
 
                         <div className="mt-3.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                           {question.options.map((optionText, optIndex) => {
@@ -1054,10 +1508,10 @@ export function ModuleViewPage(): ReactElement {
                                   onChange={() =>
                                     handleSelectOption(question.id, optIndex)
                                   }
-                                  className="h-4 w-4 border-slate-300 text-blue-600 focus:ring-blue-500"
+                                  className="h-4 w-4 shrink-0 border-slate-300 text-blue-600 focus:ring-blue-500"
                                 />
-                                <span className="leading-snug">
-                                  {optionText}
+                                <span className="min-w-0 leading-snug">
+                                  {renderInlineMarkdown(optionText)}
                                 </span>
                               </label>
                             );
@@ -1096,7 +1550,11 @@ export function ModuleViewPage(): ReactElement {
                     ) : (
                       <>
                         <Send className="h-4 w-4" />
-                        <span>Завершити тест та перевірити допуск</span>
+                        <span>
+                          {hasPractical
+                            ? "Завершити тест та перевірити допуск"
+                            : "Завершити тест самоперевірки"}
+                        </span>
                       </>
                     )}
                   </button>
@@ -1110,7 +1568,28 @@ export function ModuleViewPage(): ReactElement {
       {/* Вкладка 3: Статус практичної роботи та індивідуальний варіант */}
       {activeTab === "practical" && (
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs sm:p-8">
-          {!module.practical_unlocked ? (
+          {module.practical === null ? (
+            <div className="mx-auto max-w-lg py-8 text-center">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-indigo-200 bg-indigo-50 text-indigo-600">
+                <BookOpen className="h-7 w-7" />
+              </div>
+              <h2 className="mt-4 text-lg font-bold text-slate-900">
+                Теоретичний модуль без практичної роботи
+              </h2>
+              <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                До цього навчального модуля не прикріплено практичну роботу.
+                Опрацюйте лекційний матеріал та пройдіть тест самоперевірки.
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveTab("quiz")}
+                className="mt-6 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-xs font-semibold text-white shadow-2xs hover:bg-blue-700"
+              >
+                <ClipboardCheck className="h-4 w-4" />
+                <span>Перейти до тесту самоперевірки</span>
+              </button>
+            </div>
+          ) : !module.practical_unlocked ? (
             <div className="mx-auto max-w-lg py-8 text-center">
               <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-amber-50 text-amber-600 border border-amber-200">
                 <Lock className="h-7 w-7" />
@@ -1133,12 +1612,6 @@ export function ModuleViewPage(): ReactElement {
                 <ClipboardCheck className="h-4 w-4" />
                 <span>Перейти до складання тесту-допуску</span>
               </button>
-            </div>
-          ) : module.practical === null ? (
-            <div className="py-8 text-center">
-              <p className="text-sm text-slate-600">
-                До цього навчального модуля не прикріплено практичну роботу.
-              </p>
             </div>
           ) : (
             <div className="space-y-6">
@@ -1200,8 +1673,9 @@ export function ModuleViewPage(): ReactElement {
                       Методичні вказівки до виконання
                     </h3>
                     <div className="mt-2.5">
-                      <LectureMarkdownRenderer
+                      <MarkdownRenderer
                         content={practicalDetail.instructions}
+                        emptyFallback="Методичні вказівки для цієї практичної роботи ще не додано."
                       />
                     </div>
                   </div>
@@ -1218,39 +1692,20 @@ export function ModuleViewPage(): ReactElement {
                     </div>
 
                     <h3 className="mt-3 text-base font-bold text-slate-900">
-                      {practicalDetail.variant.title}
+                      {renderInlineMarkdown(practicalDetail.variant.title)}
                     </h3>
-                    <p className="mt-1.5 text-sm leading-relaxed text-slate-700">
-                      {practicalDetail.variant.task_description}
-                    </p>
+                    <div className="mt-2.5">
+                      <MarkdownRenderer
+                        content={practicalDetail.variant.task_description}
+                        compact
+                      />
+                    </div>
 
-                    {Object.keys(practicalDetail.variant.parameters).length >
-                      0 && (
-                      <div className="mt-4 border-t border-indigo-200/70 pt-3">
-                        <p className="text-xs font-semibold text-indigo-900">
-                          Контрольні параметри варіанта:
-                        </p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {Object.entries(
-                            practicalDetail.variant.parameters
-                          ).map(([paramKey, paramValue]) => (
-                            <span
-                              key={paramKey}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-2.5 py-1 font-mono text-xs text-slate-800"
-                            >
-                              <span className="font-semibold text-indigo-700">
-                                {paramKey}:
-                              </span>
-                              <span>
-                                {Array.isArray(paramValue)
-                                  ? paramValue.join(", ")
-                                  : String(paramValue)}
-                              </span>
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                    <VariantParametersSection
+                      parameters={practicalDetail.variant.parameters}
+                      copiedRawText={copiedRawText}
+                      onCopyRawText={handleCopyRawText}
+                    />
                   </div>
 
                   {/* Повідомлення про помилку здачі роботи */}
