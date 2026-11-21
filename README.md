@@ -7,422 +7,270 @@
 [![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
-**Edu Auto Grader** — це спеціалізована вебсистема електронних навчально-методичних посібників із вбудованим ядром **100% детермінованої автоматизованої перевірки практичних робіт** із дисциплін **Microsoft Word (`.docx`)**, **Microsoft Excel (`.xlsx`)**, **Microsoft Access (`.accdb`)** та **HTML5**.
+**Edu Auto Grader** — спеціалізована вебплатформа електронних навчально-методичних посібників із вбудованим ядром **100% детермінованої автоматизованої перевірки практичних робіт** із дисциплін **Microsoft Word (`.docx`)**, **Microsoft Excel (`.xlsx`)**, **Microsoft Access (`.accdb`)** та **HTML5**.
 
-Система розроблена як інтерактивний практикум, що доповнює базову навчальну платформу коледжу **`kpefk.lcloud.in.ua`**. Вона закриває нішу миттєвої валідації файлів та HTML-коду за декларативними правилами, автоматичного розподілу індивідуальних варіантів і контролю академічної доброчесності. Обмін даними з `kpefk.lcloud.in.ua` відбувається автономно й безпечно — через експорт зведених відомостей успішності групи у форматах `.xlsx` та `.pdf` (без прямої API-інтеграції та без суб'єктивного LLM-оцінювання).
+Система створена для коледжу як інтерактивне доповнення до базової платформи **`kpefk.lcloud.in.ua`**. Вона об'єднує структуровані лекції з тестами-допусками, автоматичний розподіл індивідуальних варіантів, миттєву перевірку файлів і HTML-коду, контроль академічної доброчесності та експорт зведених відомостей успішності у `.xlsx` та `.pdf`.
 
 ---
 
 ## Зміст
 
-- [Ключові можливості системи](#ключові-можливості-системи)
+- [Ключові можливості за ролями](#ключові-можливості-за-ролями)
+- [Ядро автоперевірки та зберігання робіт](#ядро-автоперевірки-та-зберігання-робіт)
 - [Технологічний стек та архітектура](#технологічний-стек-та-архітектура)
-- [Схема бази даних](#схема-бази-даних)
-- [Швидкий старт (локальне розгортання)](#швидкий-старт-локальне-розгортання)
-- [Демонстраційні облікові записи](#демонстраційні-облікові-записи)
-- [Структура проєкту](#структура-проєкту)
-- [Тестування та перевірка якості коду](#тестування-та-перевірка-якості-коду)
+- [Швидкий старт (локальний запуск)](#швидкий-старт-локальний-запуск)
+- [Перевірка якості та тести](#перевірка-якості-та-тести)
+- [Архітектурні обмеження (Out of Scope)](#архітектурні-обмеження-out-of-scope)
 
 ---
 
-## Ключові можливості системи
+## Ключові можливості за ролями
 
-### Рольова модель (JWT + RBAC)
+Система використовує JWT-автентифікацію (`access` + `refresh` токени) та рольове розмежування доступу (**RBAC**).
 
-#### Студент (`student`)
-- **Навчальний кабінет і прогрес:** перегляд доступних курсів (`word`, `excel`, `access`, `html`), модулів і відсотка виконання програми (`CoursesPage`).
-- **Теорія та тест-допуск:** вивчення Markdown/HTML-лекцій у `ModuleViewPage` та проходження тесту-допуску (прохідний поріг — **`>= 70%`**). Без успішного складання тесту доступ до ендпоінту здачі практичної роботи блокується на рівні бекенду (`HTTP 403`, код `QUIZ_NOT_PASSED`).
-- **Індивідуальний варіант:** після допуску система детерміновано закріплює варіант студента за порядковим номером у журналі групи:
-  `variant_index = ((student.list_number or 1) - 1) % total_variants` (в інтерфейсі відображається `variant_number = variant_index + 1`).
-- **Здача робіт у 2 режимах:**
-  - *Офісні файли (`.docx`, `.xlsx`, `.accdb`):* завантаження файлу через drag-and-drop форму (`multipart/form-data`).
-  - *HTML5-пісочниця (`HtmlSandbox`):* написання коду у вбудованому редакторі **Monaco Editor** із миттєвим рендерингом в ізольованому `<iframe sandbox>` та надсиланням коду на серверну DOM-перевірку (`application/json`).
-- **Електронна заліковка (`GradebookPage`):** історія всіх здач, деталізований розбір кожного критерію (`GradingReportCard`: очікуване vs фактичне значення, нараховані бали, текстове пояснення) та статус перевірки авторства.
+### Студент (`student`)
+- **Повний навчальний контент 4 дисциплін** (`word`, `excel`, `access`, `html`): **40 модулів**, **37 практичних робіт**, **254 індивідуальні варіанти**, **240 питань тестів-допусків** та **184 медіафайли** (ілюстрації й PDF-посібники, що роздаються через `/media/courses`).
+- **Інтерактивні Markdown-лекції (`MarkdownRenderer`):** рендеринг заголовків, таблиць, блоків коду, цитат, вкладених списків, ілюстрацій зі збільшенням та безпечних посилань із PDF-бейджами; підтримка теоретичних модулів без практичної роботи.
+- **Тест-допуск (поріг `>= 70%`):** до успішного складання тесту доступ до практичної роботи та ендпоінту здачі блокується на рівні бекенду (`HTTP 403`, код `QUIZ_NOT_PASSED`).
+- **Персональний варіант:** визначається детерміновано за порядковим номером студента у списку групи (`variant_index = ((list_number or 1) - 1) % total_variants`, у UI відображається `variant_number = variant_index + 1`), зі структурованим виведенням параметрів та швидким копіюванням вхідного тексту.
+- **Два режими здачі робіт:**
+  - *Офісні файли (`.docx`, `.xlsx`, `.accdb`):* drag-and-drop завантаження файлу (`multipart/form-data`).
+  - *Вбудована HTML5-пісочниця (`HtmlSandbox`):* редактор **Monaco Editor** із миттєвим рендерингом в ізольованому `<iframe sandbox>` та відправкою коду на серверну DOM-перевірку.
+- **Миттєвий звіт та електронна заліковка (`GradebookPage`, `GradingReportCard`):** покроковий розбір виконаних і провалених критеріїв (очікуване vs фактичне значення, бали, пояснення) та статус перевірки авторства.
 
-#### Викладач (`teacher`)
-- **Конструктор навчального контенту (`CourseEditorPage`):** створення й редагування курсів, модулів, текстів лекцій, питань тесту-допуску та методичних вказівок до практичних робіт.
-- **Візуальний конструктор правил (`RuleBuilderPage`):** гнучке налаштування декларативних `JSONB`-правил оцінювання та ваги кожного критерію в балах (`PUT /api/v1/practicals/{practical_id}/rules`).
-- **Електронний журнал групи (`GroupJournalPage`):** матриця оцінок студентів групи, аналітика типових помилок по критеріях, візуальні бейджі антиплагіату (`PlagiarismBadge`) і можливість ручного коригування `final_score` з коментарем викладача (`PATCH /api/v1/submissions/{submission_id}/grade`).
-- **Експорт звітності:** формування та завантаження зведеної відомості успішності групи у форматах **`.xlsx`** (`openpyxl`) та **`.pdf`** (`fpdf2` із підтримкою кирилиці) для перенесення оцінок у `kpefk.lcloud.in.ua`.
+### Викладач (`teacher`)
+- **Конструктор курсів і лекцій (`CourseEditorPage`):** створення та редагування курсів, модулів, Markdown-лекцій, питань тестів-допусків і методичних вказівок до практичних робіт.
+- **Візуальний редактор правил оцінювання (`RuleBuilderPage`):** налаштування декларативних `JSONB`-правил (`GradingRule`) і ваги кожного критерію в балах (`PUT /api/v1/practicals/{practical_id}/rules`).
+- **Електронний журнал групи (`GroupJournalPage`):** матриця успішності з двосторонньою прокруткою та закріпленими областями (колонка `№ / ПІБ студента`, шапка практичних робіт і підсумкова колонка `Сума балів`), а також аналітика типових помилок по критеріях.
+- **Контроль академічної доброчесності (`PlagiarismBadge`):** автоматична детекція плагіату за криптографічним хешем **`SHA-256`** (бінарного файлу або нормалізованого HTML-коду) та метаданими OpenXML **`docProps/core.xml`** (`creator`, `last_modified_by`, `created`, `modified`, `revision`).
+- **Інспекція та завантаження робіт:** у вікні інспекції здачі викладач курсу (або адміністратор) може **завантажити оригінальний файл** (`.docx`, `.xlsx`, `.accdb`) або згенерований `.html`-файл із `raw_code` (`GET /api/v1/submissions/{submission_id}/download`), бачить термін зберігання файлу та може вручну скоригувати `final_score` і залишити коментар.
+- **Експорт відомостей:** генерація зведених відомостей успішності групи у форматах **`.xlsx`** (`openpyxl`) та **`.pdf`** (`fpdf2` із підтримкою кирилиці) для перенесення оцінок у `kpefk.lcloud.in.ua`.
 
-#### Адміністратор (`admin`)
-- **Керування користувачами (`AdminUsersPage`):** CRUD-операції над обліковими записами, призначення ролей (`student`, `teacher`, `admin`), пошук і фільтрація користувачів.
-- **Довідник академічних груп:** створення, редагування та видалення груп (шифр, спеціальність, курс), а також керування порядковими номерами студентів у списку (`list_number`).
+### Адміністратор (`admin`)
+- **Керування користувачами та групами (`AdminUsersPage`):** CRUD-операції над обліковими записами, призначення ролей (`student`, `teacher`, `admin`), довідник академічних груп із бізнес-обмеженням курсів навчання **`1..4`** (`CHECK`-обмеження БД, Pydantic та UI).
+- **Масовий імпорт студентів (`POST /api/v1/admin/users/import`):** імпорт із офіційних відомостей коледжу (`.docx`) та текстових списків (`.txt`) з обов'язковим сортуванням за **українською абеткою**, автоприсвоєнням порядкових номерів (`list_number`), розрахунком варіантів (`variant_number`), пропуском дублікатів `email` та вивантаженням звіту облікових даних (`.txt`).
+- **Каскадне очищення файлів:** при видаленні облікового запису студента (`DELETE /api/v1/admin/users/{user_id}`) усі пов'язані фізичні файли його здач безпечно видаляються з диска в межах `UPLOADS_DIR`.
 
-### Ядро детермінованої автоперевірки
+---
 
-Ядро перевірки реалізовано за патерном **Strategy**: усі парсери успадковують єдиний абстрактний клас `BaseGrader` (`backend/app/graders/base.py`), а фабрика `GraderFactory` (`backend/app/graders/factory.py`) обирає потрібну стратегію за форматом практичної роботи. Підтримуються числові умови (`>=`, `<=`, `==`, `!=`, `>`, `<`) та підстановка параметрів індивідуального варіанта `{param}` у полі `expected`.
+## Ядро автоперевірки та зберігання робіт
 
-| Формат | Парсер та бібліотека | Підтримувані типи правил (`GradingRuleType`) | Що перевіряється |
+Усі парсери реалізовані за патерном **Strategy** як спадкоємці єдиного абстрактного класу `BaseGrader` (`backend/app/graders/base.py`) і підключаються через `GraderFactory`. Ядро підтримує числові умови (`>=`, `<=`, `==`, `!=`, `>`, `<`) та підстановку параметрів індивідуального варіанта `{param}` у полі `expected`.
+
+| Формат | Парсер та бібліотека | Що перевіряється | Типи правил (`GradingRuleType`) |
 | :--- | :--- | :--- | :--- |
-| **Word (`.docx`)** | `DocxGrader` (`python-docx`) | `docx_page_margins`, `docx_font`, `docx_line_spacing`, `docx_alignment`, `docx_table_exists`, `docx_list_exists` | Поля сторінки (мм), гарнітура й кегль шрифту, міжрядковий інтервал, вирівнювання абзаців, наявність таблиць і маркованих/нумерованих списків |
-| **Excel (`.xlsx`)** | `XlsxGrader` (`openpyxl`) | `xlsx_formula`, `xlsx_value`, `xlsx_chart_exists` | Текст формул у цільових комірках (`data_only=False`), кешовані обчислені значення (`data_only=True`) та наявність діаграм на аркуші (`_charts`) |
-| **Access (`.accdb`)** | `AccdbGrader` (`access-parser`, fallback на `mdb-schema` / `mdbtools` у Linux) | `accdb_table_exists`, `accdb_column_exists`, `accdb_column_type` | Наявність і кількість таблиць, існування стовпців (`Table.Column`) та відповідність їхніх типів даних схемі БД |
-| **HTML5** | `HtmlGrader` (`beautifulsoup4` + `lxml`) | `html_tag_exists`, `html_tag_count`, `html_attribute_exists` | Валідація DOM-дерева за CSS-селекторами (`header > h1`, `table tr` тощо), підрахунок елементів та перевірка обов'язкових атрибутів |
+| **Word (`.docx`)** | `DocxGrader` (`python-docx`) | Поля сторінки (мм), гарнітура й кегль шрифту, міжрядковий інтервал, вирівнювання абзаців, наявність таблиць і маркованих/нумерованих списків | `docx_page_margins`, `docx_font`, `docx_line_spacing`, `docx_alignment`, `docx_table_exists`, `docx_list_exists` |
+| **Excel (`.xlsx`)** | `XlsxGrader` (`openpyxl`) | Формули у цільових комірках (`data_only=False`), кешовані обчислені значення (`data_only=True`), наявність і параметри діаграм (`_charts`) | `xlsx_formula`, `xlsx_value`, `xlsx_chart_exists` |
+| **Access (`.accdb`)** | `AccdbGrader` (`access-parser`, резервний `mdb-schema` / `mdbtools` на Linux) | Наявність і кількість таблиць, існування стовпців (`Table.Column`) та відповідність їхніх типів даних схемі БД (включно з `Hyperlink` → `MEMO`) | `accdb_table_exists`, `accdb_column_exists`, `accdb_column_type` |
+| **HTML5 (`.html`)** | `HtmlGrader` (`beautifulsoup4` + `lxml`) | Валідація DOM-дерева за CSS-селекторами, підрахунок елементів, перевірка обов'язкових атрибутів та їхніх значень | `html_tag_exists`, `html_tag_count`, `html_attribute_exists` |
 
-### Модуль академічної доброчесності (`docProps/core.xml` + SHA-256)
+### Політика зберігання та автоочищення файлів (90 днів)
 
-Модуль реалізовано в `backend/app/graders/metadata.py` і він виконується автоматично під час кожної здачі:
-
-1. **Криптографічний хеш SHA-256:**
-   - для бінарних файлів (`.docx`, `.xlsx`, `.accdb`) обчислюється поблочний SHA-256 хеш вмісту;
-   - для HTML5-коду виконується нормалізація пробільних символів перед обчисленням SHA-256.
-2. **Екстракція метаданих OpenXML (`docProps/core.xml`):**
-   - із ZIP-архівів `.docx` та `.xlsx` через `zipfile` та `xml.etree.ElementTree` вилучаються `creator`, `last_modified_by`, `created`, `modified` і `revision`.
-3. **Детерміноване маркування плагіату:**
-   - здача порівнюється з усіма попередніми роботами інших студентів за тією ж практичною роботою;
-   - при виявленні збігу **SHA-256**, мітки часу **`created`** або пари **`(creator, modified)`** система автоматично виставляє `is_plagiarism_flagged = True` та зберігає обґрунтування у `plagiarism_reason`.
+- Завантажені файли (`.docx`, `.xlsx`, `.accdb` у `UPLOADS_DIR`) та вихідний HTML-код (`raw_code`) зберігаються протягом **90 днів** (налаштовується змінною `SUBMISSION_FILE_RETENTION_DAYS`). У відповіді `SubmissionRead` повертаються обчислювані поля `is_file_available` та `file_expires_at`, а скачування захищене від Path Traversal.
+- Після завершення терміну зберігання фізичні файли з диска та значення `raw_code` автоматично очищуються фоновим `asyncio`-воркером у `lifespan` (`backend/app/main.py` — при старті сервера та кожні 24 години, якщо `ENABLE_RETENTION_CLEANUP_TASK=true`) або вручну/через cron за допомогою CLI-скрипта `backend/app/services/retention_service.py`.
+- **Історія оцінок та антиплагіату зберігається:** очищення не видаляє записи `submissions` — поля `auto_score`, `final_score`, `grading_report`, `teacher_comment`, `extracted_metadata` та `file_hash` залишаються в PostgreSQL.
 
 ---
 
 ## Технологічний стек та архітектура
 
-### Таблиця технологій
+### Технології
 
-| Шар | Технології та версії | Призначення |
-| :--- | :--- | :--- |
-| **Backend API** | Python `3.12+`, FastAPI `0.115.6`, Uvicorn `0.32.1`, Pydantic `2.10.3`, `pydantic-settings` `2.6.1` | Асинхронний REST API (`/api/v1`), OpenAPI-документація, сувора валідація контрактів |
-| **ORM та БД** | PostgreSQL `16` (`postgres:16-alpine`), SQLAlchemy `2.0.36` (async), `asyncpg` `0.30.0`, Alembic `1.13.3` | Реляційне зберігання даних, декларативні `JSONB`-структури, версіоновані міграції |
-| **Безпека** | PyJWT `2.10.1`, `bcrypt` `4.2.0` | JWT-автентифікація (`access` + `refresh`), хешування паролів, RBAC-залежності |
-| **Ядро парсерів** | `python-docx` `1.1.2`, `openpyxl` `3.1.5`, `access-parser` `0.0.6`, `beautifulsoup4` `4.12.3`, `lxml` `5.3.0` | Детермінований розбір `.docx`, `.xlsx`, `.accdb` та HTML5 DOM |
-| **Експорт звітів** | `openpyxl` `3.1.5`, `fpdf2` `2.8.1` | Генерація відомостей успішності груп у `.xlsx` та `.pdf` |
-| **Frontend** | Node.js `20 LTS`, React `18.3.1`, TypeScript `~5.6.3` (`strict: true`), Vite `5.4.11`, Tailwind CSS `3.4.15` | SPA-інтерфейс із рольовою навігацією та адаптивним UI |
-| **UI та стан** | `@monaco-editor/react` `4.6.0`, TanStack Query `^5.60.0`, React Router `^6.28.0`, Axios `^1.7.7`, Lucide React `^0.460.0` | HTML5-пісочниця, кешування серверного стану, маршрутизація, JWT-інтерсептори |
-| **Інфраструктура та QA** | Docker & Docker Compose, Ruff, Mypy (`--strict`), Pytest + `pytest-asyncio` + `httpx`, ESLint, `tsc --noEmit` | Контейнеризація БД, статичний аналіз, модульне та інтеграційне тестування |
+| Категорія | Технології та версії |
+| :--- | :--- |
+| **Backend** | Python `3.12+`, FastAPI `0.115.6`, Uvicorn `0.32.1`, SQLAlchemy `2.0.36` (async), `asyncpg` `0.30.0`, Alembic `1.13.3`, Pydantic `2.10.3`, `pydantic-settings` `2.6.1`, PyJWT `2.10.1`, `bcrypt` `4.2.0`, `python-multipart` `0.0.19` |
+| **Parsers & Export** | `python-docx` `1.1.2`, `openpyxl` `3.1.5`, `access-parser` `0.0.6`, `beautifulsoup4` `4.12.3`, `lxml` `5.3.0`, `fpdf2` `2.8.1` |
+| **Frontend** | Node.js `20 LTS`, React `18.3.1`, TypeScript `~5.6.3` (`strict: true`), Vite `5.4.11`, Tailwind CSS `3.4.15`, `@monaco-editor/react` `4.6.0`, TanStack Query `^5.60.0`, React Router `^6.28.0`, Axios `^1.7.7`, Lucide React `^0.460.0` |
+| **DB & Infrastructure** | PostgreSQL `16` (`postgres:16-alpine`, 8 реляційних таблиць із `UUID`, `ENUM` і `JSONB`), Docker & Docker Compose |
+| **Quality Tools** | Ruff `0.8.3`, Mypy `1.13.0` (`--strict`), Pytest `8.3.4` + `pytest-asyncio` `0.24.0` + `httpx` `0.28.1`, ESLint `9.15+`, `tsc --noEmit` |
 
-### Потік здачі та автоматизованої перевірки роботи
-
-```mermaid
-flowchart TD
-    A["Студент: файл (.docx / .xlsx / .accdb) або HTML5-код"] --> B["POST /api/v1/practicals/{id}/submit"]
-    B --> C{"Тест-допуск >= 70%?"}
-    C -- "Ні" --> C1["HTTP 403 (QUIZ_NOT_PASSED)"]
-    C -- "Так" --> D["SubmissionService: розрахунок варіанта студента"]
-    D --> E["GraderFactory -> Docx / Xlsx / Accdb / HtmlGrader"]
-    D --> F["Модуль доброчесності: SHA-256 + docProps/core.xml"]
-    E --> G["GradingReport (деталізація критеріїв і auto_score)"]
-    F --> H["Перевірка збігів серед здач інших студентів"]
-    G --> I[("PostgreSQL 16: submissions (JSONB)")]
-    H --> I
-    I --> J["Результат у GradebookPage та GroupJournalPage"]
-```
-
-### Ключові REST API маршрути (`/api/v1`)
-
-Усі доменні помилки перехоплюються глобальним exception handler (`DomainError`) і повертають уніфікований JSON: `{"detail": str, "code": str, "context": dict}`.
-
-| Метод | Маршрут | Доступ | Призначення |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/auth/login`, `/api/v1/auth/refresh` | Public | Отримання та оновлення JWT access/refresh токенів |
-| `GET` | `/api/v1/auth/me` | Authenticated | Профіль поточного користувача |
-| `GET` | `/api/v1/courses`, `/api/v1/modules/{module_id}` | Authenticated | Перелік курсів із прогресом, текст лекції та статус тесту-допуску |
-| `POST` | `/api/v1/modules/{module_id}/quiz/submit` | Student | Перевірка відповідей тесту-допуску та розблокування практичної |
-| `GET` | `/api/v1/practicals/{practical_id}` | Student | Умова та персональний варіант студента |
-| `POST` | `/api/v1/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML (`application/json`) і миттєва перевірка |
-| `GET` | `/api/v1/submissions/me`, `/api/v1/submissions` | Student / Teacher | Заліковка студента та фільтрований список здач групи |
-| `PUT` | `/api/v1/practicals/{practical_id}/rules` | Teacher / Admin | Оновлення `JSONB`-правил автоперевірки |
-| `PATCH` | `/api/v1/submissions/{submission_id}/grade` | Teacher / Admin | Ручне коригування фінального бала та коментаря викладача |
-| `GET` | `/api/v1/analytics/groups/{group_id}/journal` | Teacher / Admin | Зведений журнал групи та статистика помилок по критеріях |
-| `GET` | `/api/v1/analytics/groups/{group_id}/export` | Teacher / Admin | Експорт відомості групи (`?format=xlsx` або `?format=pdf`) |
-| `CRUD` | `/api/v1/admin/groups`, `/api/v1/admin/users` | Admin | Керування академічними групами та обліковими записами |
-
----
-
-## Схема бази даних
-
-База даних **PostgreSQL 16** складається з **8 реляційних таблиць** із `UUID` первинними ключами, типізованими `ENUM` (`user_role`, `course_slug`, `practical_format`) та полями `JSONB` для гнучкого зберігання варіантів, правил перевірки й звітів:
-
-| № | Таблиця | Ключові стовпці та зв'язки | Призначення |
-| :-: | :--- | :--- | :--- |
-| 1 | `academic_groups` | `id`, `code` (UNIQUE), `specialty`, `course_year` | Довідник академічних груп коледжу (напр. `КН-31`) |
-| 2 | `users` | `id`, `email` (UNIQUE), `password_hash`, `full_name`, `role` (ENUM), `group_id` (FK -> `academic_groups`, `SET NULL`), `list_number`, `created_at` | Облікові записи студентів, викладачів і адміністраторів |
-| 3 | `courses` | `id`, `title`, `slug` (ENUM, UNIQUE), `description`, `teacher_id` (FK -> `users`) | Навчальні дисципліни (`word`, `excel`, `access`, `html`) |
-| 4 | `modules` | `id`, `course_id` (FK -> `courses`, `CASCADE`), `order_index`, `title`, `lecture_content` | Тематичні модулі курсу з Markdown/HTML-лекціями |
-| 5 | `quiz_questions` | `id`, `module_id` (FK -> `modules`, `CASCADE`), `question_text`, `options` (`JSONB`), `correct_option_index` | Питання тесту-допуску для кожного модуля |
-| 6 | `quiz_attempts` | `id`, `student_id` (FK -> `users`, `CASCADE`), `module_id` (FK -> `modules`, `CASCADE`), `score_percent`, `passed`, `attempted_at` | Історія спроб складання тесту-допуску студентами |
-| 7 | `practicals` | `id`, `module_id` (UNIQUE FK -> `modules`, `CASCADE`), `title`, `instructions`, `format_type` (ENUM), `max_score`, `variants` (`JSONB`), `grading_rules` (`JSONB`) | Практичні роботи, індивідуальні варіанти та декларативні правила |
-| 8 | `submissions` | `id`, `practical_id` (FK), `student_id` (FK), `variant_index`, `file_path`, `raw_code`, `file_hash` (SHA-256, indexed), `extracted_metadata` (`JSONB`), `is_plagiarism_flagged`, `plagiarism_reason`, `auto_score`, `final_score`, `grading_report` (`JSONB`), `teacher_comment`, `submitted_at` | Здачі робіт, метадані антиплагіату, автоматичні й скориговані оцінки та звіти перевірки |
-
-### Принцип декларативних `JSONB`-правил оцінювання
-
-Критерії перевірки не зашиті в коді, а зберігаються у `practicals.grading_rules` як масив JSON-об'єктів, суворо валідований Pydantic-схемою `GradingRule` (`extra="forbid"`). Викладач може змінювати набір критеріїв і їхню вагу без перезбірки сервера, а ядро `BaseGrader` автоматично підставляє параметри варіанта (`{param}`) з `practicals.variants` і формує деталізований `GradingReport` у `submissions.grading_report`.
-
-```json
-[
-  {
-    "id": "excel_rule_1",
-    "type": "xlsx_formula",
-    "target": "D12",
-    "expected": "SUM(D2:D11)",
-    "points": 3.5,
-    "description": "Використано функцію SUM для підрахунку підсумку в комірці D12"
-  },
-  {
-    "id": "excel_rule_4",
-    "type": "xlsx_chart_exists",
-    "target": "Sheet1",
-    "expected": "true",
-    "points": 2.0,
-    "description": "На аркуші Sheet1 побудовано діаграму"
-  },
-  {
-    "id": "html_rule_3",
-    "type": "html_tag_count",
-    "target": "table tr",
-    "expected": ">=4",
-    "points": 3.0,
-    "description": "Таблиця містить щонайменше 4 рядки (<tr>)"
-  }
-]
-```
-
----
-
-## Швидкий старт (локальне розгортання)
-
-### Передумови
-- **Python 3.12+**
-- **Node.js 20 LTS** та **npm**
-- **Docker** та **Docker Compose**
-- *(Опційно, для Linux)* `mdbtools` як резервний CLI-парсер `.accdb` (основний кросплатформний парсер `access-parser` встановлюється автоматично з Python-залежностями)
-
-### 1. Клонування репозиторію
-
-```bash
-git clone <URL_РЕПОЗИТОРІЮ> edu-auto-grader
-cd edu-auto-grader
-```
-
-### 2. Налаштування змінних середовища (`.env`)
-
-Створіть файл `.env` у корені проєкту (його використовують `docker-compose.yml` та `backend/app/core/config.py`):
-
-```env
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=edu_auto_grader
-
-JWT_SECRET_KEY=change-me-in-production-super-secret-jwt-key-32b
-JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-REFRESH_TOKEN_EXPIRE_DAYS=7
-
-CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
-UPLOADS_DIR=uploads
-QUIZ_PASS_THRESHOLD_PERCENT=70.0
-```
-
-### 3. Запуск PostgreSQL 16 через Docker Compose
-
-```bash
-docker compose up -d
-docker compose ps
-```
-
-Зачекайте, доки контейнер `edu_auto_grader_db` перейде у статус `healthy` (перевіряється через `pg_isready`).
-
-### 4. Налаштування Python-середовища та встановлення залежностей бекенду
-
-**Windows (PowerShell):**
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e "./backend[dev]"
-```
-
-**Linux / macOS:**
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e "./backend[dev]"
-```
-
-### 5. Застосування міграцій бази даних (Alembic)
-
-```bash
-alembic -c backend/alembic.ini upgrade head
-```
-
-### 6. Початкове наповнення бази даних (`seed.py`)
-
-Скрипт `backend/app/seed.py` є ідемпотентним — створює академічну групу `КН-31`, 5 облікових записів та 4 готові курси (`word`, `excel`, `access`, `html`). Для попередньої перевірки без запису в БД підтримується прапорець `--dry-run`.
-
-**Windows (PowerShell):**
-```powershell
-$env:PYTHONPATH="backend"
-python -m app.seed
-```
-
-**Linux / macOS:**
-```bash
-PYTHONPATH=backend python -m app.seed
-```
-
-### 7. Запуск Backend (FastAPI + Uvicorn)
-
-```bash
-uvicorn app.main:app --app-dir backend --reload --host 0.0.0.0 --port 8000
-```
-
-- Інтерактивна Swagger-документація: `http://localhost:8000/docs`
-- Перевірка стану сервісу: `http://localhost:8000/health`
-
-### 8. Запуск Frontend (React + Vite)
-
-В окремому вікні терміналу виконайте:
-
-```bash
-npm --prefix frontend install
-npm --prefix frontend run dev
-```
-
-- Вебінтерфейс доступний за адресою: `http://localhost:5173`
-- Vite автоматично проксує запити `/api/*` на `http://localhost:8000` (налаштовано у `frontend/vite.config.ts`).
-
----
-
-## Демонстраційні облікові записи
-
-Після виконання `python -m app.seed` у базі даних створюється група **`КН-31`** (*спеціальність «122 Комп'ютерні науки», 3 курс*), 4 курси (4 модулі, 20 тестових питань, 4 практичні роботи по 3 варіанти) та такі облікові записи:
-
-| Роль | Email | Пароль | ПІБ | Група | Номер у списку / Варіант |
-| :--- | :--- | :--- | :--- | :---: | :---: |
-| `admin` | `admin@kpefk.lcloud.in.ua` | `Admin123!` | Адміністратор Системи | — | — |
-| `teacher` | `teacher@kpefk.lcloud.in.ua` | `Teacher123!` | Коваленко Олександр Петрович | — | — |
-| `student` | `student1@kpefk.lcloud.in.ua` | `Student123!` | Бондаренко Ірина Василівна | `КН-31` | №1 (Варіант 1) |
-| `student` | `student2@kpefk.lcloud.in.ua` | `Student123!` | Мельник Дмитро Сергійович | `КН-31` | №2 (Варіант 2) |
-| `student` | `student3@kpefk.lcloud.in.ua` | `Student123!` | Шевченко Максим Андрійович | `КН-31` | №3 (Варіант 3) |
-
----
-
-## Структура проєкту
+### Структура репозиторію
 
 ```text
 edu-auto-grader/
-├── AGENTS.md                           # Стандарти інженерної розробки (SDD)
-├── ARCHITECTURE.md                     # Технічна архітектура та контракти
-├── SPEC.md                             # Продуктова специфікація MVP
-├── TASKS.md                            # План та статус виконання задач
-├── docker-compose.yml                  # PostgreSQL 16 + volume uploads/
-├── uploads/                            # Сховище завантажених робіт студентів
+├── docker-compose.yml              # Контейнер PostgreSQL 16 + volume uploads/
+├── uploads/                        # Сховище файлів зданих робіт студентів
 ├── backend/
-│   ├── pyproject.toml                  # Залежності Python, конфіги ruff/mypy/pytest
-│   ├── alembic.ini                     # Конфігурація Alembic
-│   ├── alembic/
-│   │   ├── env.py                      # Асинхронний запуск міграцій
-│   │   └── versions/
-│   │       └── 0001_initial_schema.py  # Початкова міграція 8 таблиць БД
+│   ├── pyproject.toml              # Залежності Python і конфігурація ruff/mypy/pytest
+│   ├── alembic.ini                 # Конфігурація міграцій Alembic
+│   ├── alembic/versions/           # Міграції БД (схема 8 таблиць, обмеження курсів 1..4)
+│   ├── content/
+│   │   ├── courses/                # JSON-пакети 4 дисциплін (word, excel, access, html)
+│   │   └── media/                  # 184 медіафайли лекцій/тестів (word/, excel/, access/)
 │   ├── app/
-│   │   ├── main.py                     # Фабрика FastAPI, CORS, DomainError handler, /health
-│   │   ├── seed.py                     # CLI-ініціалізація демо-групи, акаунтів та 4 курсів
-│   │   ├── core/
-│   │   │   ├── config.py               # Налаштування середовища (Pydantic BaseSettings)
-│   │   │   ├── database.py             # AsyncEngine, AsyncSessionLocal, Base
-│   │   │   ├── exceptions.py           # DomainError, GradingError, InvalidFileFormatError, PlagiarismDetectedError, QuizNotPassedError
-│   │   │   └── security.py             # bcrypt-хешування паролів, PyJWT access/refresh
-│   │   ├── models/
-│   │   │   ├── user.py                 # AcademicGroup, User, UserRole
-│   │   │   ├── course.py               # Course, Module, QuizQuestion, Practical
-│   │   │   └── progress.py             # QuizAttempt, Submission
-│   │   ├── schemas/
-│   │   │   ├── auth.py                 # JWT, профілі користувачів та академічних груп
-│   │   │   ├── course.py               # Курси, модулі, тести-допуски, варіанти
-│   │   │   ├── grading.py              # GradingRuleType, GradingRule, CriterionResult, GradingReport
-│   │   │   └── submission.py           # Здачі, ручне оцінювання, журнал групи, аналітика
-│   │   ├── graders/
-│   │   │   ├── base.py                 # Абстрактна стратегія BaseGrader
-│   │   │   ├── factory.py              # GraderFactory (вибір парсера за форматом)
-│   │   │   ├── metadata.py             # SHA-256 хешування, docProps/core.xml, антиплагіат
-│   │   │   ├── docx_grader.py          # Парсер Microsoft Word (.docx)
-│   │   │   ├── xlsx_grader.py          # Парсер Microsoft Excel (.xlsx)
-│   │   │   ├── accdb_grader.py         # Парсер Microsoft Access (.accdb)
-│   │   │   └── html_grader.py          # Валідатор HTML5 DOM (BeautifulSoup4)
-│   │   ├── services/
-│   │   │   ├── quiz_service.py         # Оцінювання тесту-допуску та розрахунок варіанта
-│   │   │   ├── submission_service.py   # Оркестрація автоперевірки, антиплагіату та збереження
-│   │   │   └── export_service.py       # Формування журналу групи та експорт .xlsx / .pdf
-│   │   └── api/
-│   │       ├── deps.py                 # Залежності get_db, get_current_user, require_role
-│   │       └── v1/
-│   │           ├── router.py           # Агрегація маршрутів /api/v1
-│   │           ├── auth.py             # Автентифікація (/auth/*)
-│   │           ├── courses.py          # Курси, модулі, тести, практичні
-│   │           ├── practicals.py       # Здача робіт та оновлення правил оцінювання
-│   │           ├── submissions.py      # Історія здач та ручне коригування оцінки
-│   │           ├── analytics.py        # Журнал групи та експорт .xlsx / .pdf
-│   │           └── admin.py            # Адміністрування груп і користувачів (/admin/*)
-│   └── tests/
-│       ├── conftest.py                 # Фікстури FastAPI AsyncClient та in-memory SQLite-адаптер
-│       ├── test_graders.py             # Модульні тести Docx/Xlsx/Accdb/Html парсерів
-│       ├── test_submissions_api.py     # Інтеграційні тести допуску, автоперевірки, антиплагіату й експорту
-│       └── test_admin_api.py           # Тести RBAC та CRUD-операцій адміністратора
+│   │   ├── main.py                 # FastAPI, lifespan (автоочищення), CORS, /media/courses, /health
+│   │   ├── seed.py                 # CLI-ініціалізація та синхронізація курсів (--dry-run, --sync-courses)
+│   │   ├── core/                   # config.py, database.py, security.py, exceptions.py
+│   │   ├── models/                 # SQLAlchemy 2.0 моделі (user, course, progress)
+│   │   ├── schemas/                # Pydantic v2 контракти (auth, course, grading, submission)
+│   │   ├── graders/                # BaseGrader, GraderFactory, metadata.py, Docx/Xlsx/Accdb/Html парсери
+│   │   ├── services/               # quiz, submission, retention, export (.xlsx/.pdf), student_import
+│   │   └── api/v1/                 # REST-ендпоінти (auth, admin, courses, practicals, submissions, analytics)
+│   └── tests/                      # 36 модульних та інтеграційних тестів (in-memory SQLite адаптер)
 └── frontend/
-    ├── package.json
-    ├── tsconfig.json
-    ├── vite.config.ts
-    ├── tailwind.config.js
-    ├── eslint.config.js
+    ├── package.json                # Залежності та npm-скрипти
+    ├── vite.config.ts              # Dev-сервер (:5173) і проксі /api та /media -> :8000
     └── src/
-        ├── main.tsx
-        ├── App.tsx                     # Маршрутизація та RoleGuard для 3 ролей
-        ├── api/
-        │   └── client.ts               # Axios-клієнт із JWT-інтерсепторами
-        ├── context/
-        │   └── AuthContext.tsx         # Контекст автентифікації та оновлення токенів
-        ├── types/
-        │   ├── api.ts                  # TypeScript-контракти користувачів, здач, журналу
-        │   ├── course.ts               # Контракти курсів, модулів, тестів, практичних
-        │   └── grading.ts              # Контракти правил і звітів автоперевірки
-        ├── components/
-        │   ├── layout/                 # Sidebar.tsx, Navbar.tsx, RoleGuard.tsx
-        │   ├── sandbox/                # HtmlSandbox.tsx (Monaco Editor + iframe preview)
-        │   └── grading/                # GradingReportCard.tsx, PlagiarismBadge.tsx
-        └── pages/
-            ├── LoginPage.tsx
-            ├── student/                # CoursesPage.tsx, ModuleViewPage.tsx, GradebookPage.tsx
-            ├── teacher/                # CourseEditorPage.tsx, RuleBuilderPage.tsx, GroupJournalPage.tsx
-            └── admin/                  # AdminUsersPage.tsx
+        ├── api/                    # Axios-клієнт із JWT-інтерсепторами
+        ├── context/                # AuthContext (сесія та оновлення токенів)
+        ├── types/                  # TypeScript-контракти (синхронізовані з Pydantic)
+        ├── components/             # common (MarkdownRenderer), grading, layout, sandbox (HtmlSandbox)
+        └── pages/                  # LoginPage, student/, teacher/, admin/
 ```
 
 ---
 
-## Тестування та перевірка якості коду
+## Швидкий старт (локальний запуск)
 
-### Backend (Python)
+### Вимоги
+- **Docker Desktop** (або Docker Engine + Docker Compose)
+- **Python 3.12** *(рекомендовано саме **3.12** або **3.13** — для гарантованої наявності готових бінарних wheels `asyncpg`, `lxml` і `bcrypt` під Windows)*
+- **Node.js 20 LTS** та **npm**
+- *(Опційно, на Linux)* пакет `mdbtools` як резервний CLI-інструмент для читання `.accdb`
 
-Набір тестів (18 модульних та інтеграційних тестів у `backend/tests/`) використовує in-memory SQLite-адаптер для `JSONB` у `conftest.py`, тому запускається автономно без вимоги до активного контейнера PostgreSQL.
+### Покроковий запуск (Windows PowerShell)
 
-```bash
-# Лінтер та форматування (Ruff)
-ruff check backend
+Усі команди нижче виконуються з кореня репозиторію (щоб `.env` і директорія `uploads/` збігалися з `docker-compose.yml`).
 
-# Сувора статична перевірка типів (Mypy strict)
-mypy --strict backend/app
+#### 1. Клонування та запуск PostgreSQL 16
+```powershell
+git clone <URL_РЕПОЗИТОРІЮ> edu-auto-grader
+cd edu-auto-grader
+docker compose up -d
+docker compose ps
+```
+Дочекайтеся статусу `healthy` для контейнера `edu_auto_grader_db`.
 
-# Модульні та інтеграційні тести (Pytest)
-pytest -c backend/pyproject.toml
+#### 2. Створення `backend/.venv` та встановлення залежностей
+```powershell
+py -3.12 -m venv backend/.venv
+.\backend\.venv\Scripts\Activate.ps1
+pip install -e "./backend[dev]"
 ```
 
-### Frontend (TypeScript / React)
+<details>
+<summary>Аналог для Linux / macOS</summary>
 
 ```bash
-# Перевірка типів TypeScript (tsc --noEmit)
+python3.12 -m venv backend/.venv
+source backend/.venv/bin/activate
+pip install -e "./backend[dev]"
+```
+
+</details>
+
+#### 3. Застосування міграцій та наповнення БД
+```powershell
+alembic -c backend/alembic.ini upgrade head
+python -m app.seed --sync-courses
+```
+
+> [!TIP]
+> Скрипт `app.seed` підтримує прапорці:
+> - `--dry-run` — валідує JSON-пакети 4 курсів і правила `GradingRule` без підключення до PostgreSQL;
+> - `--sync-courses` — оновлює модулі, тести й практичні з `backend/content/courses/*.json`, зберігаючи існуючих користувачів та академічні групи.
+
+#### 4. Запуск Backend API (FastAPI + Uvicorn)
+```powershell
+uvicorn app.main:app --app-dir backend --reload --host 0.0.0.0 --port 8000
+```
+- OpenAPI / Swagger UI: `http://localhost:8000/docs`
+- Перевірка стану: `http://localhost:8000/health`
+
+#### 5. Запуск Frontend (React + Vite)
+В окремому вікні терміналу:
+```powershell
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
+- Вебінтерфейс: `http://localhost:5173` (Vite автоматично проксує `/api` та `/media` на `http://localhost:8000`).
+
+---
+
+### Ключові змінні середовища (`.env`)
+
+Файл `.env` у корені проєкту зчитується як `docker-compose.yml`, так і `backend/app/core/config.py` (`Settings`). За відсутності `.env` застосовуються наведені значення за замовчуванням:
+
+| Змінна | Значення за замовчуванням | Призначення |
+| :--- | :--- | :--- |
+| `POSTGRES_USER` | `postgres` | Користувач PostgreSQL |
+| `POSTGRES_PASSWORD` | `postgres` | Пароль PostgreSQL |
+| `POSTGRES_HOST` | `localhost` | Хост сервера БД |
+| `POSTGRES_PORT` | `5432` | Порт PostgreSQL |
+| `POSTGRES_DB` | `edu_auto_grader` | Назва бази даних |
+| `DATABASE_URL` | *(не задано)* | Опційний повний async DSN (`postgresql+asyncpg://...`), має пріоритет над `POSTGRES_*` |
+| `JWT_SECRET_KEY` | `change-me-in-production-super-secret-jwt-key-32b` | Секретний ключ підпису JWT (`HS256`) |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | Час життя access-токена (хвилини) |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Час життя refresh-токена (дні) |
+| `CORS_ORIGINS` | `["http://localhost:5173","http://127.0.0.1:5173"]` | Дозволені origin-адреси фронтенду (JSON-масив) |
+| `UPLOADS_DIR` | `uploads` | Каталог збереження завантажених файлів студентів |
+| `SUBMISSION_FILE_RETENTION_DAYS` | `90` | Термін зберігання файлів та `raw_code` робіт у днях (`>= 1`) |
+| `ENABLE_RETENTION_CLEANUP_TASK` | `true` | Автозапуск фонового воркера очищення файлів (кожні 24 год) |
+| `COURSE_CONTENT_DIR` | `backend/content/courses` | Шлях до JSON-файлів 4 навчальних курсів |
+| `COURSE_MEDIA_DIR` | `backend/content/media` | Шлях до статичних медіафайлів курсів (`/media/courses`) |
+| `QUIZ_PASS_THRESHOLD_PERCENT` | `70.0` | Мінімальний відсоток для проходження тесту-допуску |
+
+### Ручне очищення прострочених файлів робіт (CLI)
+
+Окрім фонового воркера в `main.py`, очищення можна запускати вручну або за розкладом (cron / Task Scheduler):
+
+```powershell
+# Безпечний попередній перегляд без видалення файлів та змін у БД
+python -m app.services.retention_service --dry-run
+
+# Фактичне очищення (можна додати --retention-days N для перевизначення терміну)
+python -m app.services.retention_service
+```
+
+### Початкові облікові записи (`seed.py`)
+
+Після виконання `python -m app.seed` створюється тестова академічна група **`КН-31`** (*«122 Комп'ютерні науки», 3 курс*) та 5 початкових облікових записів:
+
+| Роль | Email | Пароль | ПІБ | Група / Номер у списку |
+| :--- | :--- | :--- | :--- | :--- |
+| `admin` | `admin@kpefk.lcloud.in.ua` | `Admin123!` | Адміністратор Системи | — |
+| `teacher` | `teacher@kpefk.lcloud.in.ua` | `Teacher123!` | Коваленко Олександр Петрович | — |
+| `student` | `student1@kpefk.lcloud.in.ua` | `Student123!` | Бондаренко Ірина Василівна | `КН-31` / №1 |
+| `student` | `student2@kpefk.lcloud.in.ua` | `Student123!` | Мельник Дмитро Сергійович | `КН-31` / №2 |
+| `student` | `student3@kpefk.lcloud.in.ua` | `Student123!` | Шевченко Максим Андрійович | `КН-31` / №3 |
+
+> [!WARNING]
+> Наведені облікові дані призначені **лише для локальної розробки та первинного налаштування**. Перед розгортанням у продакшні обов'язково змініть паролі всіх облікових записів та встановіть криптостійкий `JWT_SECRET_KEY`.
+
+---
+
+## Перевірка якості та тести
+
+Тестовий набір бекенду (`backend/tests/`, 36 модульних та інтеграційних тестів) використовує in-memory SQLite-адаптер для `JSONB` у `conftest.py`, тому запускається автономно без активного контейнера PostgreSQL.
+
+```powershell
+# Backend (в активованому середовищі backend/.venv із dev-залежностями)
+ruff check backend
+mypy --strict backend/app
+pytest
+
+# Frontend
 npm --prefix frontend run typecheck
-
-# Статичний аналіз коду (ESLint)
 npm --prefix frontend run lint
-
-# Перевірка продакшен-збірки (TypeScript + Vite)
 npm --prefix frontend run build
 ```
 
+*(За потреби явного підключення параметрів `pytest` із кореня репозиторію використовуйте `pytest -c backend/pyproject.toml`.)*
+
 ---
 
-## Додаткова документація
+## Архітектурні обмеження (Out of Scope)
 
-- [SPEC.md](SPEC.md) — продуктова специфікація, ролі та функціональні вимоги MVP
-- [ARCHITECTURE.md](ARCHITECTURE.md) — технічна архітектура, схема БД і контракти модулів
-- [TASKS.md](TASKS.md) — покроковий журнал реалізації фаз проєкту
+- **100% детермінована перевірка без LLM/AI:** оцінювання здійснюється виключно за формальними декларативними правилами (`GradingRule`) без суб'єктивних AI-оцінок.
+- **Відсутність виконання довільного коду та макросів на сервері:** VBA-макроси у `.xlsx`/`.accdb` та зовнішній код (Python/JS/C++) ніколи не виконуються на сервері; прев'ю HTML5-робіт ізольоване на стороні браузера в `<iframe sandbox>`.
+- **Автономний обмін із `kpefk.lcloud.in.ua`:** пряма API-інтеграція чи парсинг облікових записів базової платформи відсутні — результати передаються через експорт відомостей у `.xlsx` та `.pdf`.
+- **Поза межами MVP:** офлайн-режим (PWA / IndexedDB), відеохостинг лекцій, чати в реальному часі (WebSockets) та зовнішні сповіщення (Telegram/Email).
+
+---
+
+## Документація проєкту
+
+- [SPEC.md](SPEC.md) — продуктова специфікація, ролі та функціональні вимоги
+- [ARCHITECTURE.md](ARCHITECTURE.md) — технічна архітектура, схема БД і контракти API
+- [TASKS.md](TASKS.md) — покроковий журнал реалізації фаз проєкту (SDD)
 - [AGENTS.md](AGENTS.md) — інженерні стандарти та робочий цикл розробки
