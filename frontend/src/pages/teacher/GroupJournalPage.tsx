@@ -5,16 +5,19 @@ import {
   type FormEvent,
   type ReactElement,
 } from "react";
+import axios from "axios";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   Award,
   BarChart3,
   CheckCircle2,
+  Clock,
   Download,
   Edit3,
   FileDown,
   FileSpreadsheet,
+  FileWarning,
   Loader2,
   MessageSquareQuote,
   RefreshCw,
@@ -127,6 +130,98 @@ function formatShortDate(isoString: string | null): string {
   });
 }
 
+function formatExpiryDate(isoString: string | null): string | null {
+  if (isoString === null) {
+    return null;
+  }
+  const parsed = new Date(isoString);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  const day = String(parsed.getDate()).padStart(2, "0");
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const year = parsed.getFullYear();
+  return `${day}.${month}.${year}`;
+}
+
+function sanitizeDownloadFilename(rawName: string): string {
+  const trimmed = rawName.trim().replace(/^["']|["']$/g, "");
+  const baseName = trimmed.split(/[/\\]/).pop() ?? "";
+  return baseName.trim();
+}
+
+function parseFilenameFromContentDisposition(
+  headerValue: unknown,
+  fallbackFilename: string
+): string {
+  if (typeof headerValue !== "string" || headerValue.trim().length === 0) {
+    return fallbackFilename;
+  }
+
+  const utf8Match = /filename\*\s*=\s*UTF-8''([^;\r\n]+)/i.exec(headerValue);
+  if (utf8Match?.[1] !== undefined) {
+    try {
+      const decoded = sanitizeDownloadFilename(
+        decodeURIComponent(utf8Match[1].trim())
+      );
+      if (decoded.length > 0) {
+        return decoded;
+      }
+    } catch {
+      // Якщо UTF-8 послідовність пошкоджена — переходимо до ASCII filename
+    }
+  }
+
+  const asciiMatch = /filename\s*=\s*(?:"([^"]+)"|([^;\r\n]+))/i.exec(
+    headerValue
+  );
+  const rawAscii = asciiMatch?.[1] ?? asciiMatch?.[2];
+  if (rawAscii !== undefined) {
+    const cleaned = sanitizeDownloadFilename(rawAscii);
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+  }
+
+  return fallbackFilename;
+}
+
+function hasStringDetail(value: unknown): value is { detail: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "detail" in value &&
+    typeof (value as Record<string, unknown>).detail === "string"
+  );
+}
+
+async function extractBlobApiErrorMessage(
+  error: unknown,
+  fallbackMessage: string
+): Promise<string> {
+  if (axios.isAxiosError(error)) {
+    const responseData: unknown = error.response?.data;
+    if (responseData instanceof Blob) {
+      try {
+        const rawText = await responseData.text();
+        const parsed: unknown = JSON.parse(rawText);
+        if (hasStringDetail(parsed) && parsed.detail.trim().length > 0) {
+          return parsed.detail.trim();
+        }
+      } catch {
+        // Тіло помилки не є валідним JSON — використовуємо резервний текст
+      }
+    }
+    if (error.response?.status === 403) {
+      return "Недостатньо прав для завантаження цієї роботи студента.";
+    }
+    if (error.response?.status === 404) {
+      return "Файл роботи видалено за терміном зберігання або відсутній на сервері.";
+    }
+  }
+  return extractApiErrorMessage(error, fallbackMessage);
+}
+
 export function GroupJournalPage(): ReactElement {
   const queryClient = useQueryClient();
 
@@ -144,6 +239,11 @@ export function GroupJournalPage(): ReactElement {
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(
     null
   );
+  const [isDownloadingSubmission, setIsDownloadingSubmission] =
+    useState<boolean>(false);
+  const [submissionDownloadError, setSubmissionDownloadError] = useState<
+    string | null
+  >(null);
   const [feedbackBanner, setFeedbackBanner] = useState<{
     type: "success" | "error";
     text: string;
@@ -217,6 +317,11 @@ export function GroupJournalPage(): ReactElement {
     setManualScoreInput(activeSubmission.final_score.toFixed(1));
     setTeacherCommentInput(activeSubmission.teacher_comment ?? "");
   }, [activeSubmission]);
+
+  // Скидання локальної помилки завантаження при зміні вибраної здачі
+  useEffect(() => {
+    setSubmissionDownloadError(null);
+  }, [selectedSubmissionId]);
 
   // Мапа practical_id -> метадані модуля та курсу для заголовків стовпців
   const practicalMetaMap = useMemo<Record<string, PracticalColumnMeta>>(() => {
@@ -383,6 +488,52 @@ export function GroupJournalPage(): ReactElement {
             : null,
       },
     });
+  };
+
+  // Завантаження файлу (.docx/.xlsx/.accdb/.html) обраної здачі студента
+  const handleDownloadSubmission = async (
+    submission: SubmissionRead
+  ): Promise<void> => {
+    const formatExt: PracticalFormat = submission.grading_report.format_type;
+    setIsDownloadingSubmission(true);
+    setSubmissionDownloadError(null);
+
+    try {
+      const response = await apiClient.get<Blob>(
+        `/submissions/${submission.id}/download`,
+        {
+          responseType: "blob",
+        }
+      );
+
+      const fallbackFilename = `submission_${submission.id.slice(0, 8)}.${formatExt}`;
+      const filename = parseFilenameFromContentDisposition(
+        response.headers["content-disposition"],
+        fallbackFilename
+      );
+
+      const blobUrl = window.URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err: unknown) {
+      const errorMessage = await extractBlobApiErrorMessage(
+        err,
+        "Не вдалося завантажити файл роботи студента."
+      );
+      setSubmissionDownloadError(errorMessage);
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        void queryClient.invalidateQueries({
+          queryKey: ["submission-detail", submission.id],
+        });
+      }
+    } finally {
+      setIsDownloadingSubmission(false);
+    }
   };
 
   // Експорт відомості групи у .xlsx або .pdf
@@ -1016,6 +1167,83 @@ export function GroupJournalPage(): ReactElement {
                 </div>
               ) : (
                 <div className="space-y-6">
+                  {/* Блок завантаження файлу зданої роботи та інформації про термін зберігання */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <p className="text-xs font-bold text-slate-900">
+                          Файл зданої роботи (
+                          <span className="font-mono lowercase">
+                            .{activeSubmission.grading_report.format_type}
+                          </span>
+                          )
+                        </p>
+                        {activeSubmission.is_file_available ? (
+                          <p className="inline-flex items-center gap-1.5 text-xs text-slate-600">
+                            <Clock className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                            <span>
+                              {formatExpiryDate(activeSubmission.file_expires_at) !==
+                              null
+                                ? `Зберігається на сервері до ${formatExpiryDate(activeSubmission.file_expires_at)}`
+                                : "Файл доступний для завантаження"}
+                            </span>
+                          </p>
+                        ) : (
+                          <div className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                            <FileWarning className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                            <span>
+                              Файл роботи видалено за терміном зберігання (90
+                              днів) або недоступний
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {activeSubmission.is_file_available && (
+                        <button
+                          type="button"
+                          disabled={isDownloadingSubmission}
+                          onClick={() =>
+                            void handleDownloadSubmission(activeSubmission)
+                          }
+                          className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold text-white shadow-2xs transition-colors hover:bg-slate-800 disabled:opacity-60"
+                        >
+                          {isDownloadingSubmission ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                          <span>
+                            {isDownloadingSubmission
+                              ? "Завантаження..."
+                              : `Завантажити роботу (.${activeSubmission.grading_report.format_type})`}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+
+                    {submissionDownloadError !== null && (
+                      <div
+                        className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-900"
+                        role="alert"
+                      >
+                        <div className="flex items-center gap-2">
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+                          <span className="font-semibold">
+                            {submissionDownloadError}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSubmissionDownloadError(null)}
+                          className="shrink-0 font-bold underline"
+                        >
+                          Закрити
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Банер антиплагіату PlagiarismBadge */}
                   <PlagiarismBadge
                     isFlagged={activeSubmission.is_plagiarism_flagged}

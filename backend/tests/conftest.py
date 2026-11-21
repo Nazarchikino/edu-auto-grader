@@ -38,6 +38,8 @@ from app.graders.accdb_grader import build_accdb_bytes  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from app.models.user import UserRole  # noqa: E402
 
+settings.ENABLE_RETENTION_CLEANUP_TASK = False
+
 
 @compiles(JSONB, "sqlite")
 def _compile_jsonb_for_sqlite(
@@ -155,6 +157,7 @@ async def db_session(
     uploads_dir = tmp_path / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(settings, "UPLOADS_DIR", uploads_dir)
+    monkeypatch.setattr(settings, "ENABLE_RETENTION_CLEANUP_TASK", False)
     monkeypatch.setattr(seed_module, "hash_password", _fast_seed_hash_password)
 
     engine = _create_sqlite_test_engine()

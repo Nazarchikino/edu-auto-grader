@@ -1,18 +1,26 @@
 import io
 import uuid
+from pathlib import Path
 
 import docx
+import openpyxl  # type: ignore[import-untyped]
 import pytest
 from httpx import AsyncClient
+from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.models.course import ALLOWED_COURSE_SLUGS, CourseSlug, Practical
+from app.models.course import ALLOWED_COURSE_SLUGS, Course, CourseSlug, Module, Practical
+from app.models.progress import QuizAttempt, Submission
 from app.models.user import AcademicGroup, User, UserRole
 from app.seed import build_seed_bundle
 from app.services.quiz_service import calculate_variant_index, resolve_student_variant
 from app.services.student_import_service import normalize_full_name, ukrainian_sort_key
-from tests.conftest import SqliteAsyncSessionAdapter, make_auth_headers
+from tests.conftest import (
+    SqliteAsyncSessionAdapter,
+    build_sample_docx,
+    make_auth_headers,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -729,3 +737,145 @@ async def test_admin_bulk_import_rbac_and_validation_errors(
     )
     assert empty_txt_resp.status_code == 422
     assert empty_txt_resp.json()["code"] == "EMPTY_IMPORT_FILE"
+
+
+async def test_delete_admin_user_removes_student_submissions_and_disk_files(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє, що видалення студента видаляє його Submission у БД та файли з диска."""
+    admin = await _get_user_by_email(db_session, "admin@kpefk.lcloud.in.ua")
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+
+    word_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    excel_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.EXCEL))
+    ).scalar_one()
+    assert isinstance(word_course, Course)
+    assert isinstance(excel_course, Course)
+
+    word_mod, word_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id)
+            .order_by(Module.order_index.asc())
+            .limit(1)
+        )
+    ).one()
+    excel_mod, excel_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == excel_course.id)
+            .order_by(Module.order_index.asc())
+            .limit(1)
+        )
+    ).one()
+
+    for student_id, module_id in (
+        (student1.id, word_mod.id),
+        (student1.id, excel_mod.id),
+        (student2.id, word_mod.id),
+    ):
+        db_session.add(
+            QuizAttempt(
+                student_id=student_id,
+                module_id=module_id,
+                score_percent=100.0,
+                passed=True,
+            )
+        )
+    await db_session.commit()
+
+    # Студент 1 здає .docx та .xlsx, Студент 2 здає .docx
+    st1_docx_bytes = build_sample_docx(tmp_path / "st1_del.docx").read_bytes()
+    st1_docx_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        files={
+            "file": (
+                "st1_del.docx",
+                st1_docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert st1_docx_resp.status_code == 201
+    st1_docx_path = Path(st1_docx_resp.json()["file_path"])
+
+    xlsx_tmp = tmp_path / "st1_del.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert isinstance(ws, Worksheet)
+    ws.title = "Іспити"
+    ws["A1"] = "Прізвище"
+    wb.create_sheet("Бюджет")["E10"] = "=SUM(E2:E9)"
+    wb.save(str(xlsx_tmp))
+    wb.close()
+    st1_xlsx_resp = await async_client.post(
+        f"/api/v1/practicals/{excel_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        files={
+            "file": (
+                "st1_del.xlsx",
+                xlsx_tmp.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert st1_xlsx_resp.status_code == 201
+    st1_xlsx_path = Path(st1_xlsx_resp.json()["file_path"])
+
+    st2_docx_bytes = build_sample_docx(
+        tmp_path / "st2_keep.docx",
+        creator="Student Two",
+        created_iso="2026-11-19T09:00:00Z",
+    ).read_bytes()
+    st2_docx_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student2.id, student2.role),
+        files={
+            "file": (
+                "st2_keep.docx",
+                st2_docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert st2_docx_resp.status_code == 201
+    st2_docx_path = Path(st2_docx_resp.json()["file_path"])
+
+    assert st1_docx_path.is_file()
+    assert st1_xlsx_path.is_file()
+    assert st2_docx_path.is_file()
+
+    # Видаляємо студента 1 через DELETE /api/v1/admin/users/{id}
+    delete_resp = await async_client.delete(
+        f"/api/v1/admin/users/{student1.id}",
+        headers=make_auth_headers(admin.id, admin.role),
+    )
+    assert delete_resp.status_code == 204
+
+    # Записи Submission студента 1 видалені каскадно, файли видалені з диска
+    st1_remaining = (
+        await db_session.execute(
+            select(Submission).where(Submission.student_id == student1.id)
+        )
+    ).scalars().all()
+    assert len(st1_remaining) == 0
+    assert not st1_docx_path.exists()
+    assert not st1_xlsx_path.exists()
+
+    # Запис і файл студента 2 не постраждали
+    st2_remaining = (
+        await db_session.execute(
+            select(Submission).where(Submission.student_id == student2.id)
+        )
+    ).scalars().all()
+    assert len(st2_remaining) == 1
+    assert st2_docx_path.is_file()
