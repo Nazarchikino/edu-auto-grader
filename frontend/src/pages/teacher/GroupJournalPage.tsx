@@ -771,13 +771,12 @@ export function GroupJournalPage(): ReactElement {
               </span>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-left text-xs">
+            <div className="relative isolate max-h-[70vh] overflow-auto">
+              <table className="w-full border-separate border-spacing-0 text-left text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-600">
-                    <th className="w-14 px-4 py-3 text-center">№</th>
-                    <th className="min-w-[210px] px-4 py-3">
-                      ПІБ студента
+                  <tr className="text-[11px] font-bold uppercase tracking-wider text-slate-600">
+                    <th className="sticky top-0 left-0 z-30 min-w-[230px] max-w-[280px] border-b border-r border-slate-200 bg-slate-50 px-4 py-3 text-left shadow-[4px_0_8px_-4px_rgba(0,0,0,0.08)]">
+                      № / ПІБ студента
                     </th>
                     {practicalColumnIds.map((pracId, idx) => {
                       const meta = practicalMetaMap[pracId];
@@ -789,7 +788,7 @@ export function GroupJournalPage(): ReactElement {
                       return (
                         <th
                           key={pracId}
-                          className="min-w-[160px] border-l border-slate-200 px-3.5 py-3"
+                          className="sticky top-0 z-20 min-w-[160px] border-b border-r border-slate-200 bg-slate-50 px-3.5 py-3 text-left"
                         >
                           <div className="flex items-center justify-between gap-1">
                             {slugBadge !== null ? (
@@ -816,21 +815,21 @@ export function GroupJournalPage(): ReactElement {
                         </th>
                       );
                     })}
-                    <th className="w-28 border-l border-slate-200 px-4 py-3 text-center">
-                      Сума балів
-                    </th>
-                    <th className="w-36 border-l border-slate-200 px-4 py-3 text-center">
+                    <th className="sticky top-0 z-20 w-36 min-w-[9rem] border-b border-slate-200 bg-slate-50 px-4 py-3 text-center">
                       Антиплагіат
+                    </th>
+                    <th className="sticky top-0 right-0 z-30 w-28 min-w-[7rem] border-b border-l border-slate-200 bg-slate-50 px-4 py-3 text-center shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.08)]">
+                      Сума балів
                     </th>
                   </tr>
                 </thead>
 
-                <tbody className="divide-y divide-slate-200">
+                <tbody>
                   {filteredRows.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={practicalColumnIds.length + 4}
-                        className="px-6 py-10 text-center text-xs text-slate-500"
+                        colSpan={practicalColumnIds.length + 3}
+                        className="bg-white px-6 py-10 text-center text-xs text-slate-500"
                       >
                         Студентів за обраними критеріями пошуку не знайдено.
                       </td>
@@ -840,31 +839,44 @@ export function GroupJournalPage(): ReactElement {
                       const rowFlaggedCell = row.cells.find(
                         (c) => c.is_plagiarism_flagged
                       );
+                      const isRowFlagged = rowFlaggedCell !== undefined;
                       const hasAnySubmission = row.cells.some(
                         (c) => c.submission_id !== null
                       );
+                      const rowSurfaceClass = isRowFlagged
+                        ? "bg-rose-50 group-hover:bg-rose-100"
+                        : "bg-white group-hover:bg-slate-50";
 
                       return (
                         <tr
                           key={row.student_id}
-                          className={`transition-colors hover:bg-slate-50/80 ${
-                            rowFlaggedCell !== undefined ? "bg-rose-50/20" : ""
+                          className={`group transition-colors ${
+                            isRowFlagged
+                              ? "bg-rose-50 hover:bg-rose-100"
+                              : "bg-white hover:bg-slate-50"
                           }`}
                         >
-                          <td className="px-4 py-3 text-center font-mono font-bold text-slate-600">
-                            {row.list_number ?? "—"}
+                          <td
+                            className={`sticky left-0 z-10 min-w-[230px] max-w-[280px] border-b border-r border-slate-200 px-4 py-3 align-middle shadow-[4px_0_8px_-4px_rgba(0,0,0,0.08)] transition-colors group-last:border-b-0 ${rowSurfaceClass}`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="inline-flex h-6 min-w-[1.75rem] shrink-0 items-center justify-center rounded-md border border-slate-200 bg-slate-100 px-1.5 font-mono text-[11px] font-bold text-slate-700">
+                                {row.list_number ?? "—"}
+                              </span>
+                              <div className="min-w-0">
+                                <p className="font-bold text-slate-900">
+                                  {row.student_full_name}
+                                </p>
+                                <p className="text-[11px] text-slate-400">
+                                  Варіант за списком: №{row.list_number ?? 1}
+                                </p>
+                              </div>
+                            </div>
                           </td>
 
-                          <td className="px-4 py-3">
-                            <p className="font-bold text-slate-900">
-                              {row.student_full_name}
-                            </p>
-                            <p className="text-[11px] text-slate-400">
-                              Варіант за списком: №{row.list_number ?? 1}
-                            </p>
-                          </td>
-
-                          {row.cells.map((cell) => {
+                          {row.cells.map((cell, cellIdx) => {
+                            const isLastPracticalCell =
+                              cellIdx === row.cells.length - 1;
                             const isSelectedCell =
                               cell.submission_id !== null &&
                               cell.submission_id === selectedSubmissionId;
@@ -877,7 +889,11 @@ export function GroupJournalPage(): ReactElement {
                             return (
                               <td
                                 key={cell.practical_id}
-                                className="border-l border-slate-100 px-3 py-2.5 align-middle"
+                                className={`border-b border-b-slate-200 border-r px-3 py-2.5 align-middle group-last:border-b-0 ${
+                                  isLastPracticalCell
+                                    ? "border-r-slate-200"
+                                    : "border-r-slate-100"
+                                }`}
                               >
                                 {cell.submission_id === null ? (
                                   <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-3 py-2 text-center text-[11px] text-slate-400">
@@ -931,13 +947,7 @@ export function GroupJournalPage(): ReactElement {
                             );
                           })}
 
-                          <td className="border-l border-slate-200 px-4 py-3 text-center">
-                            <span className="inline-flex items-center rounded-xl bg-slate-900 px-3 py-1 font-mono text-xs font-bold text-white">
-                              {row.total_score.toFixed(1)}
-                            </span>
-                          </td>
-
-                          <td className="border-l border-slate-200 px-4 py-3 text-center">
+                          <td className="w-36 min-w-[9rem] border-b border-slate-200 px-4 py-3 text-center align-middle group-last:border-b-0">
                             {rowFlaggedCell !== undefined ? (
                               <PlagiarismBadge
                                 isFlagged={true}
@@ -954,6 +964,14 @@ export function GroupJournalPage(): ReactElement {
                                 Немає здач
                               </span>
                             )}
+                          </td>
+
+                          <td
+                            className={`sticky right-0 z-10 w-28 min-w-[7rem] border-b border-l border-slate-200 px-4 py-3 text-center align-middle shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.08)] transition-colors group-last:border-b-0 ${rowSurfaceClass}`}
+                          >
+                            <span className="inline-flex items-center rounded-xl bg-slate-900 px-3 py-1 font-mono text-xs font-bold text-white">
+                              {row.total_score.toFixed(1)}
+                            </span>
                           </td>
                         </tr>
                       );
