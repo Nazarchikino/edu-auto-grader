@@ -237,8 +237,10 @@ class BaseGrader(ABC):
 | `POST` | `/auth/login` | Public | Отримання JWT access + refresh токенів |
 | `GET` | `/courses` | All Auth | Перелік курсів та прогрес поточного студента |
 | `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції та статусу доступу до практичної |
+| `DELETE` | `/modules/{module_id}` | Teacher / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач із диска |
 | `POST` | `/modules/{module_id}/quiz/submit` | Student | Відправка відповідей тесту-допуску та розблокування практичної |
 | `GET` | `/practicals/{practical_id}` | Student | Отримання умови та персонального варіанта студента |
+| `DELETE` | `/practicals/{practical_id}` | Teacher / Admin | Видалення практичної роботи та її здач (зі збереженням модуля, лекції й тесту) і безпечне видалення файлів здач із диска |
 | `POST` | `/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML-коду (`JSON`) та миттєва автоперевірка |
 | `PUT` | `/practicals/{practical_id}/rules` | Teacher | Оновлення JSONB правил автоперевірки |
 | `GET` | `/submissions/{submission_id}/download` | Teacher / Admin | Завантаження вихідного файлу (`.docx`/`.xlsx`/`.accdb`) або `.html` (з `raw_code`) здачі студента викладачем курсу або адміністратором |
@@ -295,4 +297,4 @@ class BaseGrader(ABC):
   * У контракті `SubmissionRead` передаються обчислювані поля `is_file_available: bool` та `file_expires_at: datetime | None` (`submitted_at + timedelta(days=SUBMISSION_FILE_RETENTION_DAYS)` за наявності файлу/коду).
   * `cleanup_expired_submissions()` у `backend/app/services/retention_service.py` видаляє фізичні файли з диска (у межах `UPLOADS_DIR`) та обнуляє `file_path` і `raw_code` для здач старших за 90 днів, **не видаляючи** записи `Submission` (оцінки, `grading_report`, `teacher_comment`, `extracted_metadata` і `file_hash` зберігаються).
   * Запускається автоматично у фоновій `asyncio`-задачі через `lifespan` у `backend/app/main.py` (при старті + кожні 24 години) або вручну/cron через `python -m app.services.retention_service [--dry-run]`.
-  * При видаленні користувача (`DELETE /api/v1/admin/users/{user_id}`) усі пов'язані фізичні файли здач студента безпечно видаляються з диска в межах `UPLOADS_DIR` після успішного `commit()`.
+  * При видаленні користувача (`DELETE /api/v1/admin/users/{user_id}`), модуля курсу (`DELETE /api/v1/modules/{module_id}`) або практичної роботи (`DELETE /api/v1/practicals/{practical_id}`) усі пов'язані фізичні файли здач студентів безпечно видаляються з диска в межах `UPLOADS_DIR` через `delete_submission_files_for_paths()` після успішного `commit()`.

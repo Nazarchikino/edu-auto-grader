@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_db, require_role
+from app.core.config import settings
 from app.core.exceptions import DomainError
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
@@ -42,6 +43,7 @@ from app.schemas.course import (
 )
 from app.schemas.grading import GradingRule
 from app.services.quiz_service import QuizService
+from app.services.retention_service import delete_submission_files_for_paths
 
 router = APIRouter(tags=["courses"])
 
@@ -275,6 +277,47 @@ async def _build_module_detail_read(
     )
 
 
+def _ensure_course_owner_or_admin(
+    course: Course,
+    current_user: User,
+    *,
+    detail: str,
+    context: dict[str, object],
+) -> None:
+    """Перевіряє, що користувач є адміністратором або викладачем відповідного курсу."""
+    if current_user.role == UserRole.ADMIN:
+        return
+    if current_user.role == UserRole.TEACHER and course.teacher_id == current_user.id:
+        return
+    raise DomainError(
+        detail,
+        code="FORBIDDEN_COURSE_MODIFICATION",
+        status_code=403,
+        context={
+            "course_id": str(course.id),
+            **context,
+        },
+    )
+
+
+async def _collect_practical_submission_file_paths(
+    db: AsyncSession,
+    practical_id: uuid.UUID,
+) -> list[str]:
+    """Збирає всі непорожні шляхи фізичних файлів здач практичної роботи."""
+    paths_result = await db.execute(
+        select(Submission.file_path).where(
+            Submission.practical_id == practical_id,
+            Submission.file_path.is_not(None),
+        )
+    )
+    return [
+        file_path
+        for file_path in paths_result.scalars().all()
+        if file_path is not None and file_path.strip()
+    ]
+
+
 def _serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
     """Перетворює ORM-модель Practical у повну схему PracticalTeacherRead для викладача."""
     variants = [
@@ -479,6 +522,82 @@ async def update_module(
     await db.commit()
     refreshed_module = await _load_module_or_404(db, module.id)
     return await _build_module_detail_read(db, refreshed_module, current_user)
+
+
+@router.delete(
+    "/modules/{module_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_module(
+    module_id: uuid.UUID,
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Видаляє модуль курсу, перенумеровує решту тем 1..N та видаляє файли здач із диска."""
+    stmt = (
+        select(Module)
+        .execution_options(populate_existing=True)
+        .options(
+            selectinload(Module.course),
+            selectinload(Module.quiz_questions),
+            selectinload(Module.quiz_attempts),
+            selectinload(Module.practical).selectinload(Practical.submissions),
+        )
+        .where(Module.id == module_id)
+    )
+    result = await db.execute(stmt)
+    module = result.scalar_one_or_none()
+    if module is None:
+        raise DomainError(
+            "Навчальний модуль не знайдено.",
+            code="MODULE_NOT_FOUND",
+            status_code=404,
+            context={"module_id": str(module_id)},
+        )
+
+    _ensure_course_owner_or_admin(
+        module.course,
+        current_user,
+        detail="Видаляти модулі дозволено лише викладачу цього курсу або адміністратору.",
+        context={"module_id": str(module_id)},
+    )
+
+    submission_file_paths: list[str] = []
+    if module.practical is not None:
+        submission_file_paths = await _collect_practical_submission_file_paths(
+            db,
+            module.practical.id,
+        )
+
+    course_id = module.course_id
+    if "modules" in module.course.__dict__ and module in module.course.modules:
+        module.course.modules.remove(module)
+    await db.delete(module)
+    await db.flush()
+
+    remaining_stmt = (
+        select(Module)
+        .where(Module.course_id == course_id, Module.id != module_id)
+        .order_by(Module.order_index.asc(), Module.id.asc())
+    )
+    remaining_result = await db.execute(remaining_stmt)
+    for new_order_index, remaining_module in enumerate(
+        remaining_result.scalars().all(),
+        start=1,
+    ):
+        if remaining_module.order_index != new_order_index:
+            remaining_module.order_index = new_order_index
+
+    await db.commit()
+
+    if submission_file_paths:
+        delete_submission_files_for_paths(
+            submission_file_paths,
+            upload_dir=settings.UPLOADS_DIR,
+        )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(
@@ -708,3 +827,59 @@ async def update_practical(
     await db.commit()
     await db.refresh(practical)
     return _serialize_practical_teacher(practical)
+
+
+@router.delete(
+    "/practicals/{practical_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_practical(
+    practical_id: uuid.UUID,
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Видаляє практичну роботу й її здачі, залишаючи модуль, лекцію та тест недоторканими."""
+    stmt = (
+        select(Practical)
+        .execution_options(populate_existing=True)
+        .options(
+            selectinload(Practical.module).selectinload(Module.course),
+            selectinload(Practical.submissions),
+        )
+        .where(Practical.id == practical_id)
+    )
+    result = await db.execute(stmt)
+    practical = result.scalar_one_or_none()
+    if practical is None:
+        raise DomainError(
+            "Практичну роботу не знайдено.",
+            code="PRACTICAL_NOT_FOUND",
+            status_code=404,
+            context={"practical_id": str(practical_id)},
+        )
+
+    _ensure_course_owner_or_admin(
+        practical.module.course,
+        current_user,
+        detail="Видаляти практичні роботи дозволено лише викладачу цього курсу або адміністратору.",
+        context={"practical_id": str(practical_id)},
+    )
+
+    submission_file_paths = await _collect_practical_submission_file_paths(
+        db,
+        practical.id,
+    )
+
+    if "practical" in practical.module.__dict__:
+        practical.module.practical = None
+    await db.delete(practical)
+    await db.commit()
+
+    if submission_file_paths:
+        delete_submission_files_for_paths(
+            submission_file_paths,
+            upload_dir=settings.UPLOADS_DIR,
+        )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
