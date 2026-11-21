@@ -149,6 +149,8 @@ export interface SubmissionRead {
   grading_report: GradingReport;
   teacher_comment: string | null;
   submitted_at: string;
+  is_file_available: boolean;
+  file_expires_at: string | null;
 }
 
 export interface CriterionErrorStat {

@@ -1,3 +1,8 @@
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,6 +12,25 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import DomainError
+from app.services.retention_service import run_periodic_retention_cleanup
+
+
+@asynccontextmanager
+async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+    """Життєвий цикл застосунку: запускає та коректно зупиняє фонове очищення файлів робіт."""
+    cleanup_task: asyncio.Task[None] | None = None
+    if settings.ENABLE_RETENTION_CLEANUP_TASK:
+        cleanup_task = asyncio.create_task(
+            run_periodic_retention_cleanup(),
+            name="submission-retention-cleanup",
+        )
+    try:
+        yield
+    finally:
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
 
 
 def create_application() -> FastAPI:
@@ -15,6 +39,7 @@ def create_application() -> FastAPI:
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
         openapi_url=f"{settings.API_V1_STR}/openapi.json",
+        lifespan=lifespan,
     )
 
     application.add_middleware(
@@ -23,6 +48,7 @@ def create_application() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 
     @application.exception_handler(DomainError)

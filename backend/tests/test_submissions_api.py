@@ -1,15 +1,22 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
 import openpyxl  # type: ignore[import-untyped]
 import pytest
 from httpx import AsyncClient
 from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
+from pydantic import ValidationError
 from sqlalchemy import select
 
+from app.core.config import Settings, settings
+from app.core.security import hash_password
 from app.models.course import Course, CourseSlug, Module, Practical
-from app.models.progress import QuizAttempt
-from app.models.user import AcademicGroup, User
+from app.models.progress import QuizAttempt, Submission
+from app.models.user import AcademicGroup, User, UserRole
+from app.services.retention_service import cleanup_expired_submissions
 from tests.conftest import (
     SqliteAsyncSessionAdapter,
     build_sample_accdb,
@@ -609,3 +616,530 @@ async def test_teacher_update_rules_manual_grade_and_group_export(
     assert pdf_export_resp.status_code == 200
     assert pdf_export_resp.headers["content-type"] == "application/pdf"
     assert pdf_export_resp.content.startswith(b"%PDF-")
+
+
+async def test_download_submissions_by_course_teacher_and_admin_with_headers_and_content(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє завантаження .docx/.xlsx/.html викладачем курсу та адміном (200 OK)."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    admin = await _get_user_by_email(db_session, "admin@kpefk.lcloud.in.ua")
+
+    student_headers = make_auth_headers(student1.id, student1.role)
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+    admin_headers = make_auth_headers(admin.id, admin.role)
+
+    # 1. Здача Word (.docx)
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_mod.id)
+    docx_bytes = build_sample_docx(
+        tmp_path / "download_test.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+    ).read_bytes()
+
+    word_submit = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=student_headers,
+        files={
+            "file": (
+                "download_test.docx",
+                docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert word_submit.status_code == 201
+    word_sub = word_submit.json()
+    assert word_sub["is_file_available"] is True
+    assert word_sub["file_expires_at"] is not None
+    submitted_dt = datetime.fromisoformat(word_sub["submitted_at"])
+    expires_dt = datetime.fromisoformat(word_sub["file_expires_at"])
+    assert expires_dt - submitted_dt == timedelta(
+        days=settings.SUBMISSION_FILE_RETENTION_DAYS
+    )
+
+    # 2. Здача Excel (.xlsx)
+    _, excel_mod, excel_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.EXCEL,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=excel_mod.id)
+    xlsx_path = tmp_path / "download_test.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert isinstance(ws, Worksheet)
+    ws.title = "Іспити"
+    ws["A1"] = "Прізвище"
+    ws_budget = wb.create_sheet("Бюджет")
+    ws_budget["E10"] = "=SUM(E2:E9)"
+    wb.save(str(xlsx_path))
+    wb.close()
+    xlsx_bytes = xlsx_path.read_bytes()
+
+    excel_submit = await async_client.post(
+        f"/api/v1/practicals/{excel_prac.id}/submit",
+        headers=student_headers,
+        files={
+            "file": (
+                "download_test.xlsx",
+                xlsx_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert excel_submit.status_code == 201
+    excel_sub = excel_submit.json()
+    assert excel_sub["is_file_available"] is True
+    assert excel_sub["file_expires_at"] is not None
+
+    # 3. Здача HTML5 (raw_code)
+    _, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
+    raw_html = "<!DOCTYPE html><html lang='uk'><body><h1>Звіт студента</h1></body></html>"
+    html_submit = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=student_headers,
+        json={"raw_code": raw_html},
+    )
+    assert html_submit.status_code == 201
+    html_sub = html_submit.json()
+    assert html_sub["is_file_available"] is True
+    assert html_sub["file_expires_at"] is not None
+
+    # 4. Викладач курсу завантажує .docx, .xlsx та .html
+    for sub_id, expected_bytes, expected_mime, expected_utf8_name, expected_ascii_name in (
+        (
+            word_sub["id"],
+            docx_bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "КН-31_Бондаренко_word_v1.docx",
+            "KN-31_Bondarenko_word_v1.docx",
+        ),
+        (
+            excel_sub["id"],
+            xlsx_bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "КН-31_Бондаренко_excel_v1.xlsx",
+            "KN-31_Bondarenko_excel_v1.xlsx",
+        ),
+        (
+            html_sub["id"],
+            raw_html.encode("utf-8"),
+            "text/html; charset=utf-8",
+            "КН-31_Бондаренко_html_v1.html",
+            "KN-31_Bondarenko_html_v1.html",
+        ),
+    ):
+        teacher_dl = await async_client.get(
+            f"/api/v1/submissions/{sub_id}/download",
+            headers=teacher_headers,
+        )
+        assert teacher_dl.status_code == 200
+        assert teacher_dl.headers["content-type"] == expected_mime
+        disposition = teacher_dl.headers["content-disposition"]
+        assert f'filename="{expected_ascii_name}"' in disposition
+        assert f"filename*=UTF-8''{quote(expected_utf8_name, safe='')}" in disposition
+        assert teacher_dl.content == expected_bytes
+
+        # Адміністратор має доступ до завантаження будь-якого курсу
+        admin_dl = await async_client.get(
+            f"/api/v1/submissions/{sub_id}/download",
+            headers=admin_headers,
+        )
+        assert admin_dl.status_code == 200
+        assert admin_dl.content == expected_bytes
+
+    # 5. Безпечний fallback імені файлу, якщо у студента не вказана академічна група
+    student1.group_id = None
+    await db_session.commit()
+    no_group_dl = await async_client.get(
+        f"/api/v1/submissions/{word_sub['id']}/download",
+        headers=teacher_headers,
+    )
+    assert no_group_dl.status_code == 200
+    assert 'filename="no_group_Bondarenko_word_v1.docx"' in no_group_dl.headers[
+        "content-disposition"
+    ]
+
+
+async def test_download_submission_forbidden_for_other_teacher_and_students(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє заборону завантаження (403) чужому викладачу та студентам."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+
+    other_teacher = User(
+        email="other.teacher@kpefk.lcloud.in.ua",
+        password_hash=hash_password("Teacher123!"),
+        full_name="Інший Викладач Петрович",
+        role=UserRole.TEACHER,
+    )
+    db_session.add(other_teacher)
+    await db_session.commit()
+
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_mod.id)
+    docx_bytes = build_sample_docx(tmp_path / "rbac_test.docx").read_bytes()
+
+    submit_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        files={
+            "file": (
+                "rbac_test.docx",
+                docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert submit_resp.status_code == 201
+    submission_id = submit_resp.json()["id"]
+
+    # Чужий викладач (не власник курсу) -> 403 FORBIDDEN_SUBMISSION_DOWNLOAD
+    other_teacher_resp = await async_client.get(
+        f"/api/v1/submissions/{submission_id}/download",
+        headers=make_auth_headers(other_teacher.id, other_teacher.role),
+    )
+    assert other_teacher_resp.status_code == 403
+    assert other_teacher_resp.json()["code"] == "FORBIDDEN_SUBMISSION_DOWNLOAD"
+
+    # Студент-автор та інший студент -> 403 FORBIDDEN
+    for student in (student1, student2):
+        student_resp = await async_client.get(
+            f"/api/v1/submissions/{submission_id}/download",
+            headers=make_auth_headers(student.id, student.role),
+        )
+        assert student_resp.status_code == 403
+        assert student_resp.json()["code"] == "FORBIDDEN"
+
+
+async def test_retention_cleanup_purges_expired_files_keeps_grades_and_ignores_fresh(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє 90-денне автоочищення, збереження оцінок/звітів/хешів і недоторканість свіжих."""
+    with pytest.raises(ValidationError):
+        Settings(SUBMISSION_FILE_RETENTION_DAYS=0)
+
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+    st1_headers = make_auth_headers(student1.id, student1.role)
+    st2_headers = make_auth_headers(student2.id, student2.role)
+
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    _, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    for st in (student1, student2):
+        await _grant_quiz_pass(db_session, student_id=st.id, module_id=word_mod.id)
+        await _grant_quiz_pass(db_session, student_id=st.id, module_id=html_mod.id)
+
+    # 1. Створюємо здачі, які стануть простроченими (91 день) — .docx та .html
+    expired_docx_bytes = build_sample_docx(
+        tmp_path / "expired.docx",
+        creator="Expired Author",
+        created_iso="2026-08-01T10:00:00Z",
+    ).read_bytes()
+    exp_docx_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=st1_headers,
+        files={
+            "file": (
+                "expired.docx",
+                expired_docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert exp_docx_resp.status_code == 201
+    exp_docx_data = exp_docx_resp.json()
+    exp_docx_id = uuid.UUID(exp_docx_data["id"])
+    exp_docx_disk_path = Path(exp_docx_data["file_path"])
+    assert exp_docx_disk_path.is_file()
+
+    # Викладач додає ручну оцінку та коментар, щоб переконатися у їх збереженні
+    grade_patch = await async_client.patch(
+        f"/api/v1/submissions/{exp_docx_id}/grade",
+        headers=teacher_headers,
+        json={"final_score": 9.5, "teacher_comment": "Оцінка має зберегтися після 90 днів"},
+    )
+    assert grade_patch.status_code == 200
+    expected_docx_hash = exp_docx_data["file_hash"]
+    expected_docx_report = exp_docx_data["grading_report"]
+
+    exp_html_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=st1_headers,
+        json={"raw_code": "<!DOCTYPE html><body><h1>Стара HTML-робота</h1></body>"},
+    )
+    assert exp_html_resp.status_code == 201
+    exp_html_data = exp_html_resp.json()
+    exp_html_id = uuid.UUID(exp_html_data["id"])
+    expected_html_hash = exp_html_data["file_hash"]
+
+    # 2. Створюємо свіжі здачі (10 днів тому) — .docx та .html
+    fresh_docx_bytes = build_sample_docx(
+        tmp_path / "fresh.docx",
+        creator="Fresh Author",
+        created_iso="2026-11-10T10:00:00Z",
+    ).read_bytes()
+    fresh_docx_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=st2_headers,
+        files={
+            "file": (
+                "fresh.docx",
+                fresh_docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert fresh_docx_resp.status_code == 201
+    fresh_docx_data = fresh_docx_resp.json()
+    fresh_docx_id = uuid.UUID(fresh_docx_data["id"])
+    fresh_docx_disk_path = Path(fresh_docx_data["file_path"])
+    assert fresh_docx_disk_path.is_file()
+
+    fresh_html_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=st2_headers,
+        json={"raw_code": "<!DOCTYPE html><body><h1>Свіжа HTML-робота</h1></body>"},
+    )
+    assert fresh_html_resp.status_code == 201
+    fresh_html_id = uuid.UUID(fresh_html_resp.json()["id"])
+
+    # Зміщуємо submitted_at: 91 день тому для прострочених, 10 днів тому для свіжих
+    now_utc = datetime.now(UTC)
+    expired_time = now_utc - timedelta(days=91)
+    fresh_time = now_utc - timedelta(days=10)
+
+    for sub_id, target_dt in (
+        (exp_docx_id, expired_time),
+        (exp_html_id, expired_time),
+        (fresh_docx_id, fresh_time),
+        (fresh_html_id, fresh_time),
+    ):
+        sub_obj = (
+            await db_session.execute(select(Submission).where(Submission.id == sub_id))
+        ).scalar_one()
+        assert isinstance(sub_obj, Submission)
+        sub_obj.submitted_at = target_dt
+    await db_session.commit()
+
+    # justified Any: SqliteAsyncSessionAdapter duck-typing for AsyncSession in tests
+    typed_session: Any = db_session
+
+    # 3. Перевіряємо dry_run: нічого не видаляє і не змінює БД
+    dry_summary = await cleanup_expired_submissions(
+        typed_session,
+        retention_days=90,
+        upload_dir=settings.UPLOADS_DIR,
+        dry_run=True,
+        now=now_utc,
+    )
+    assert dry_summary.dry_run is True
+    assert dry_summary.inspected_submissions == 2
+    assert dry_summary.cleaned_submissions == 2
+    assert dry_summary.deleted_files == 1
+    assert dry_summary.cleared_raw_code == 1
+    assert exp_docx_disk_path.is_file()
+
+    # 4. Реальний запуск автоочищення (90 днів)
+    summary = await cleanup_expired_submissions(
+        typed_session,
+        retention_days=90,
+        upload_dir=settings.UPLOADS_DIR,
+        dry_run=False,
+        now=now_utc,
+    )
+    assert summary.dry_run is False
+    assert summary.inspected_submissions == 2
+    assert summary.cleaned_submissions == 2
+    assert summary.deleted_files == 1
+    assert summary.missing_files == 0
+    assert summary.cleared_raw_code == 1
+    assert summary.skipped_unsafe_paths == 0
+
+    # 5. Прострочені здачі: файл і raw_code очищено, але запис, оцінки, звіт і хеш збережені
+    assert not exp_docx_disk_path.exists()
+
+    exp_docx_detail = await async_client.get(
+        f"/api/v1/submissions/{exp_docx_id}",
+        headers=teacher_headers,
+    )
+    assert exp_docx_detail.status_code == 200
+    exp_docx_after = exp_docx_detail.json()
+    assert exp_docx_after["file_path"] is None
+    assert exp_docx_after["raw_code"] is None
+    assert exp_docx_after["is_file_available"] is False
+    assert exp_docx_after["file_expires_at"] is None
+    assert exp_docx_after["final_score"] == 9.5
+    assert exp_docx_after["teacher_comment"] == "Оцінка має зберегтися після 90 днів"
+    assert exp_docx_after["file_hash"] == expected_docx_hash
+    assert exp_docx_after["grading_report"] == expected_docx_report
+
+    exp_html_detail = await async_client.get(
+        f"/api/v1/submissions/{exp_html_id}",
+        headers=teacher_headers,
+    )
+    assert exp_html_detail.status_code == 200
+    exp_html_after = exp_html_detail.json()
+    assert exp_html_after["raw_code"] is None
+    assert exp_html_after["is_file_available"] is False
+    assert exp_html_after["file_expires_at"] is None
+    assert exp_html_after["file_hash"] == expected_html_hash
+
+    # Завантаження очищених робіт повертає 404 зі зрозумілим українським повідомленням
+    for purged_id in (exp_docx_id, exp_html_id):
+        purged_dl = await async_client.get(
+            f"/api/v1/submissions/{purged_id}/download",
+            headers=teacher_headers,
+        )
+        assert purged_dl.status_code == 404
+        assert purged_dl.json()["code"] == "SUBMISSION_FILE_NOT_FOUND"
+        assert "видалено за терміном зберігання" in purged_dl.json()["detail"]
+
+    # 6. Свіжі здачі (< 90 днів) залишилися повністю недоторканими
+    assert fresh_docx_disk_path.is_file()
+    for fresh_id in (fresh_docx_id, fresh_html_id):
+        fresh_detail = await async_client.get(
+            f"/api/v1/submissions/{fresh_id}",
+            headers=teacher_headers,
+        )
+        assert fresh_detail.status_code == 200
+        assert fresh_detail.json()["is_file_available"] is True
+        assert fresh_detail.json()["file_expires_at"] is not None
+
+        fresh_dl = await async_client.get(
+            f"/api/v1/submissions/{fresh_id}/download",
+            headers=teacher_headers,
+        )
+        assert fresh_dl.status_code == 200
+
+
+async def test_submission_download_and_retention_block_path_traversal(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє захист від Path Traversal при завантаженні та автоочищенні файлів."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_mod.id)
+    docx_bytes = build_sample_docx(tmp_path / "legit.docx").read_bytes()
+
+    submit_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        files={
+            "file": (
+                "legit.docx",
+                docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert submit_resp.status_code == 201
+    sub_id = uuid.UUID(submit_resp.json()["id"])
+
+    # Створюємо файл поза UPLOADS_DIR і підміняємо file_path на шлях поза межами
+    outside_secret = tmp_path / "secret_outside_uploads.docx"
+    outside_secret.write_bytes(b"sensitive-data")
+
+    sub_row = (
+        await db_session.execute(select(Submission).where(Submission.id == sub_id))
+    ).scalar_one()
+    assert isinstance(sub_row, Submission)
+    sub_row.file_path = str(outside_secret)
+    sub_row.submitted_at = datetime.now(UTC) - timedelta(days=95)
+    await db_session.commit()
+
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+    detail_resp = await async_client.get(
+        f"/api/v1/submissions/{sub_id}",
+        headers=teacher_headers,
+    )
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["is_file_available"] is False
+    assert detail_resp.json()["file_expires_at"] is None
+
+    dl_resp = await async_client.get(
+        f"/api/v1/submissions/{sub_id}/download",
+        headers=teacher_headers,
+    )
+    assert dl_resp.status_code == 404
+    assert dl_resp.json()["code"] == "SUBMISSION_FILE_NOT_FOUND"
+
+    # Автоочищення обнуляє небезпечний file_path у БД, але НЕ видаляє сторонній файл
+    typed_session: Any = db_session
+    cleanup_summary = await cleanup_expired_submissions(
+        typed_session,
+        retention_days=90,
+        upload_dir=settings.UPLOADS_DIR,
+    )
+    assert cleanup_summary.skipped_unsafe_paths == 1
+    assert outside_secret.is_file()
+
+
+async def test_lifespan_starts_and_cancels_retention_background_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє коректний старт і зупинку фонової задачі автоочищення у lifespan."""
+    import asyncio
+
+    from app import main as main_module
+
+    started_event = asyncio.Event()
+    cancelled_flag = False
+
+    async def _fake_periodic_cleanup() -> None:
+        nonlocal cancelled_flag
+        started_event.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled_flag = True
+            raise
+
+    monkeypatch.setattr(settings, "ENABLE_RETENTION_CLEANUP_TASK", True)
+    monkeypatch.setattr(
+        main_module,
+        "run_periodic_retention_cleanup",
+        _fake_periodic_cleanup,
+    )
+
+    async with main_module.lifespan(main_module.app):
+        await asyncio.wait_for(started_event.wait(), timeout=2.0)
+
+    assert cancelled_flag is True

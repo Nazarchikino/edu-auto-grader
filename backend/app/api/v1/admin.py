@@ -8,9 +8,11 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, require_role
 from app.api.v1.auth import serialize_user
+from app.core.config import settings
 from app.core.exceptions import DomainError
 from app.core.security import hash_password
 from app.models.course import Course
+from app.models.progress import Submission
 from app.models.user import AcademicGroup, User, UserRole
 from app.schemas.auth import (
     AcademicGroupCreate,
@@ -21,6 +23,7 @@ from app.schemas.auth import (
     UserRead,
     UserUpdate,
 )
+from app.services.retention_service import delete_submission_files_for_paths
 from app.services.student_import_service import StudentImportService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -466,6 +469,25 @@ async def delete_admin_user(
             },
         )
 
+    submission_paths_result = await db.execute(
+        select(Submission.file_path).where(
+            Submission.student_id == user.id,
+            Submission.file_path.is_not(None),
+        )
+    )
+    submission_file_paths = [
+        file_path
+        for file_path in submission_paths_result.scalars().all()
+        if file_path is not None
+    ]
+
     await db.delete(user)
     await db.commit()
+
+    if submission_file_paths:
+        delete_submission_files_for_paths(
+            submission_file_paths,
+            upload_dir=settings.UPLOADS_DIR,
+        )
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)

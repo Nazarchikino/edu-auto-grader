@@ -25,7 +25,7 @@ edu-auto-grader/
 │   │       ├── excel/
 │   │       └── access/
 │   ├── app/
-│   │   ├── main.py                  # Точка входу FastAPI, CORS, StaticFiles (/media/courses), exception handlers
+│   │   ├── main.py                  # Точка входу FastAPI, lifespan (автоочищення файлів), CORS, StaticFiles (/media/courses), exception handlers
 │   │   ├── seed.py                  # CLI-імпорт 4 курсів із JSON (--dry-run, --sync-courses)
 │   │   ├── core/
 │   │   │   ├── config.py            # Налаштування середовища (Pydantic BaseSettings)
@@ -51,7 +51,8 @@ edu-auto-grader/
 │   │   │   └── factory.py           # GraderFactory.get_grader(format_type)
 │   │   ├── services/                # Бізнес-логіка
 │   │   │   ├── quiz_service.py      # Перевірка тесту-допуску
-│   │   │   ├── submission_service.py# Оркестрація перевірки та збереження результату
+│   │   │   ├── submission_service.py# Оркестрація перевірки, завантаження робіт і збереження результату
+│   │   │   ├── retention_service.py # Автоочищення файлів/raw_code через 90 днів (lifespan + CLI) та при видаленні студента
 │   │   │   ├── export_service.py    # Генерація .xlsx та .pdf відомостей
 │   │   │   └── student_import_service.py # Масовий імпорт студентів (.docx/.txt)
 │   │   └── api/
@@ -240,6 +241,7 @@ class BaseGrader(ABC):
 | `GET` | `/practicals/{practical_id}` | Student | Отримання умови та персонального варіанта студента |
 | `POST` | `/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML-коду (`JSON`) та миттєва автоперевірка |
 | `PUT` | `/practicals/{practical_id}/rules` | Teacher | Оновлення JSONB правил автоперевірки |
+| `GET` | `/submissions/{submission_id}/download` | Teacher / Admin | Завантаження вихідного файлу (`.docx`/`.xlsx`/`.accdb`) або `.html` (з `raw_code`) здачі студента викладачем курсу або адміністратором |
 | `PATCH` | `/submissions/{submission_id}/grade` | Teacher | Ручне коригування оцінки та додавання коментаря викладача |
 | `GET` | `/analytics/groups/{group_id}/export` | Teacher | Генерація відомості успішності у форматі `.xlsx` або `.pdf` |
 | `POST` | `/admin/users/import` | Admin | Масовий імпорт студентів із `.docx` або `.txt` з українським алфавітним сортуванням та звітом |
@@ -281,3 +283,16 @@ class BaseGrader(ABC):
   ]
 }
 ```
+
+### 3.5. Завантаження робіт студентів і політика зберігання (`retention_service.py`)
+* **Ендпоінт завантаження (`GET /api/v1/submissions/{submission_id}/download`):**
+  * **RBAC:** доступ лише для `admin` та `teacher` (для `teacher` перевіряється `submission.practical.module.course.teacher_id == current_user.id`, інакше `403 Forbidden`).
+  * **Бінарні формати (`.docx`, `.xlsx`, `.accdb`):** перевірка наявності файлу та захист від Path Traversal (`resolved_path.is_relative_to(UPLOADS_DIR.resolve())`); віддача через `FileResponse` із коректним `media_type` і заголовком RFC 5987 `Content-Disposition` (`{group_code}_{student_surname}_{course_slug}_v{variant_number}.{ext}`).
+  * **HTML (`raw_code`):** генерація `.html` на льоту (`text/html; charset=utf-8`) із тим самим `Content-Disposition`.
+  * **Відсутній або очищений файл:** повертає `404 Not Found` (`code="SUBMISSION_FILE_NOT_FOUND"`).
+* **Політика 90-денного зберігання та очищення:**
+  * Параметри конфігурації в `backend/app/core/config.py`: `SUBMISSION_FILE_RETENTION_DAYS: int = 90` (`>= 1`) та `ENABLE_RETENTION_CLEANUP_TASK: bool = True`.
+  * У контракті `SubmissionRead` передаються обчислювані поля `is_file_available: bool` та `file_expires_at: datetime | None` (`submitted_at + timedelta(days=SUBMISSION_FILE_RETENTION_DAYS)` за наявності файлу/коду).
+  * `cleanup_expired_submissions()` у `backend/app/services/retention_service.py` видаляє фізичні файли з диска (у межах `UPLOADS_DIR`) та обнуляє `file_path` і `raw_code` для здач старших за 90 днів, **не видаляючи** записи `Submission` (оцінки, `grading_report`, `teacher_comment`, `extracted_metadata` і `file_hash` зберігаються).
+  * Запускається автоматично у фоновій `asyncio`-задачі через `lifespan` у `backend/app/main.py` (при старті + кожні 24 години) або вручну/cron через `python -m app.services.retention_service [--dry-run]`.
+  * При видаленні користувача (`DELETE /api/v1/admin/users/{user_id}`) усі пов'язані фізичні файли здач студента безпечно видаляються з диска в межах `UPLOADS_DIR` після успішного `commit()`.

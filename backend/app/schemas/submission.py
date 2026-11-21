@@ -69,6 +69,8 @@ class SubmissionRead(BaseModel):
     grading_report: GradingReport
     teacher_comment: str | None = None
     submitted_at: datetime
+    is_file_available: bool = False
+    file_expires_at: datetime | None = None
 
 
 class CriterionErrorStat(BaseModel):

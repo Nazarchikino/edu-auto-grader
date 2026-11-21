@@ -1,4 +1,7 @@
+import re
 import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
@@ -20,7 +23,7 @@ from app.graders.metadata import (
 )
 from app.models.course import CourseSlug, Module, Practical, PracticalFormat
 from app.models.progress import Submission
-from app.models.user import User, UserRole
+from app.models.user import AcademicGroup, User, UserRole
 from app.schemas.course import PracticalTeacherRead, PracticalVariant
 from app.schemas.grading import (
     ExtractedMetadata,
@@ -29,9 +32,192 @@ from app.schemas.grading import (
     GradingRulesUpdateRequest,
 )
 from app.schemas.submission import ManualGradeUpdateRequest, SubmissionRead
+from app.services.export_service import XLSX_MEDIA_TYPE, build_content_disposition
 from app.services.quiz_service import QuizService, resolve_student_variant
+from app.services.retention_service import resolve_submission_file_path
 
 _HTML_EXTENSIONS: frozenset[str] = frozenset({".html", ".htm"})
+
+DOCX_MEDIA_TYPE: str = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+ACCDB_MEDIA_TYPE: str = "application/vnd.ms-access"
+HTML_MEDIA_TYPE: str = "text/html; charset=utf-8"
+
+_PRACTICAL_MEDIA_TYPES: dict[PracticalFormat, str] = {
+    PracticalFormat.DOCX: DOCX_MEDIA_TYPE,
+    PracticalFormat.XLSX: XLSX_MEDIA_TYPE,
+    PracticalFormat.ACCDB: ACCDB_MEDIA_TYPE,
+    PracticalFormat.HTML: HTML_MEDIA_TYPE,
+}
+
+_APOSTROPHE_CHARS: tuple[str, ...] = ("'", "’", "‘", "ʼ", "`", "´")
+
+_UKRAINIAN_FILENAME_TRANSLIT: dict[str, str] = {
+    "А": "A",
+    "Б": "B",
+    "В": "V",
+    "Г": "H",
+    "Ґ": "G",
+    "Д": "D",
+    "Е": "E",
+    "Є": "Ye",
+    "Ж": "Zh",
+    "З": "Z",
+    "И": "Y",
+    "І": "I",
+    "Ї": "Yi",
+    "Й": "Y",
+    "К": "K",
+    "Л": "L",
+    "М": "M",
+    "Н": "N",
+    "О": "O",
+    "П": "P",
+    "Р": "R",
+    "С": "S",
+    "Т": "T",
+    "У": "U",
+    "Ф": "F",
+    "Х": "Kh",
+    "Ц": "Ts",
+    "Ч": "Ch",
+    "Ш": "Sh",
+    "Щ": "Shch",
+    "Ь": "",
+    "Ю": "Yu",
+    "Я": "Ya",
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "h",
+    "ґ": "g",
+    "д": "d",
+    "е": "e",
+    "є": "ie",
+    "ж": "zh",
+    "з": "z",
+    "и": "y",
+    "і": "i",
+    "ї": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ь": "",
+    "ю": "iu",
+    "я": "ia",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionDownloadPayload:
+    """Підготовлений файл або HTML-вміст практичної роботи студента для завантаження."""
+
+    media_type: str
+    filename_ascii: str
+    filename_utf8: str
+    content_disposition: str
+    file_path: Path | None = None
+    content: bytes | None = None
+
+
+def _strip_apostrophes(value: str) -> str:
+    """Прибирає символи апострофа для формування безпечної назви файлу."""
+    cleaned = value
+    for char in _APOSTROPHE_CHARS:
+        cleaned = cleaned.replace(char, "")
+    return cleaned
+
+
+def _sanitize_utf8_token(raw_value: str, *, fallback: str) -> str:
+    """Очищує токен назви файлу, зберігаючи кирилицю/латиницю, цифри та дефіс."""
+    cleaned = _strip_apostrophes(raw_value.strip())
+    sanitized = re.sub(r"[^\w\-]+", "_", cleaned, flags=re.UNICODE).strip("_")
+    return sanitized or fallback
+
+
+def _sanitize_ascii_token(raw_value: str, *, fallback: str) -> str:
+    """Транслітерує та очищує токен назви файлу до безпечного ASCII-рядка."""
+    cleaned = _strip_apostrophes(raw_value.strip())
+    transliterated = "".join(
+        _UKRAINIAN_FILENAME_TRANSLIT.get(ch, ch if ord(ch) < 128 else "_")
+        for ch in cleaned
+    )
+    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", transliterated).strip("_")
+    return sanitized or fallback
+
+
+def _build_submission_download_names(submission: Submission) -> tuple[str, str, str]:
+    """Формує ASCII/UTF-8 імена та заголовок Content-Disposition для файлу роботи студента."""
+    student: User | None = submission.__dict__.get("student")
+    group: AcademicGroup | None = (
+        student.__dict__.get("group")
+        if student is not None and student.group_id is not None
+        else None
+    )
+    practical: Practical | None = submission.__dict__.get("practical")
+    module: Module | None = (
+        practical.__dict__.get("module") if practical is not None else None
+    )
+    course = module.__dict__.get("course") if module is not None else None
+
+    if group is not None and group.code.strip():
+        group_utf8 = _sanitize_utf8_token(group.code, fallback="без_групи")
+        group_ascii = _sanitize_ascii_token(group.code, fallback="no_group")
+    else:
+        group_utf8 = "без_групи"
+        group_ascii = "no_group"
+
+    raw_surname = ""
+    if student is not None and student.full_name.strip():
+        raw_surname = student.full_name.strip().split()[0]
+    surname_utf8 = _sanitize_utf8_token(raw_surname, fallback="студент")
+    surname_ascii = _sanitize_ascii_token(raw_surname, fallback="student")
+
+    ext = practical.format_type.value if practical is not None else "bin"
+    raw_slug = course.slug.value if course is not None else ext
+    slug_token = _sanitize_ascii_token(raw_slug, fallback=ext).lower()
+    variant_number = submission.variant_index + 1
+
+    filename_utf8 = f"{group_utf8}_{surname_utf8}_{slug_token}_v{variant_number}.{ext}"
+    filename_ascii = f"{group_ascii}_{surname_ascii}_{slug_token}_v{variant_number}.{ext}"
+    content_disposition = build_content_disposition(
+        filename_ascii=filename_ascii,
+        filename_utf8=filename_utf8,
+    )
+    return filename_ascii, filename_utf8, content_disposition
+
+
+def _is_submission_file_available(
+    submission: Submission,
+    *,
+    format_type: PracticalFormat | None,
+    uploads_dir: Path,
+) -> bool:
+    """Перевіряє фізичну наявність файлу здачі в UPLOADS_DIR або непорожнього raw_code."""
+    if format_type == PracticalFormat.HTML:
+        return bool(submission.raw_code and submission.raw_code.strip())
+    if format_type is not None:
+        resolved = resolve_submission_file_path(submission.file_path, uploads_dir)
+        return resolved is not None and resolved.is_file()
+    if submission.file_path is not None:
+        resolved = resolve_submission_file_path(submission.file_path, uploads_dir)
+        return resolved is not None and resolved.is_file()
+    return bool(submission.raw_code and submission.raw_code.strip())
 
 
 def serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
@@ -50,17 +236,24 @@ def serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
     )
 
 
-def serialize_submission(submission: Submission) -> SubmissionRead:
+def serialize_submission(
+    submission: Submission,
+    *,
+    uploads_dir: Path | None = None,
+    retention_days: int | None = None,
+) -> SubmissionRead:
     """Перетворює ORM-модель Submission зі зв'язаними сутностями у контракт SubmissionRead."""
     practical: Practical | None = submission.__dict__.get("practical")
     student: User | None = submission.__dict__.get("student")
 
     practical_title: str | None = None
     course_slug: CourseSlug | None = None
+    format_type: PracticalFormat | None = None
     max_score: float = 10.0
 
     if practical is not None:
         practical_title = practical.title
+        format_type = practical.format_type
         max_score = float(practical.max_score)
         module: Module | None = practical.__dict__.get("module")
         if module is not None:
@@ -71,6 +264,25 @@ def serialize_submission(submission: Submission) -> SubmissionRead:
     student_full_name: str | None = student.full_name if student is not None else None
     extracted_metadata = ExtractedMetadata.model_validate(submission.extracted_metadata)
     grading_report = GradingReport.model_validate(submission.grading_report)
+
+    effective_uploads_dir = (
+        uploads_dir if uploads_dir is not None else settings.UPLOADS_DIR
+    )
+    effective_retention_days = (
+        retention_days
+        if retention_days is not None
+        else settings.SUBMISSION_FILE_RETENTION_DAYS
+    )
+    is_file_available = _is_submission_file_available(
+        submission,
+        format_type=format_type,
+        uploads_dir=effective_uploads_dir,
+    )
+    file_expires_at: datetime | None = (
+        submission.submitted_at + timedelta(days=effective_retention_days)
+        if is_file_available
+        else None
+    )
 
     return SubmissionRead(
         id=submission.id,
@@ -93,6 +305,8 @@ def serialize_submission(submission: Submission) -> SubmissionRead:
         grading_report=grading_report,
         teacher_comment=submission.teacher_comment,
         submitted_at=submission.submitted_at,
+        is_file_available=is_file_available,
+        file_expires_at=file_expires_at,
     )
 
 
@@ -137,9 +351,10 @@ class SubmissionService:
                 selectinload(Submission.practical)
                 .selectinload(Practical.module)
                 .selectinload(Module.course),
-                selectinload(Submission.student),
+                selectinload(Submission.student).selectinload(User.group),
             )
             .where(Submission.id == submission_id)
+            .execution_options(populate_existing=True)
         )
         result = await self._db.execute(stmt)
         submission = result.scalar_one_or_none()
@@ -391,7 +606,7 @@ class SubmissionService:
         await self._db.commit()
 
         loaded_submission = await self._load_submission_or_404(submission.id)
-        return serialize_submission(loaded_submission)
+        return serialize_submission(loaded_submission, uploads_dir=self._uploads_dir)
 
     async def update_grading_rules(
         self,
@@ -472,7 +687,78 @@ class SubmissionService:
 
         await self._db.commit()
         refreshed = await self._load_submission_or_404(submission.id)
-        return serialize_submission(refreshed)
+        return serialize_submission(refreshed, uploads_dir=self._uploads_dir)
+
+    async def prepare_submission_download(
+        self,
+        *,
+        submission_id: uuid.UUID,
+        requester: User,
+    ) -> SubmissionDownloadPayload:
+        """Перевіряє права доступу та готує файл або HTML-код здачі для завантаження викладачем."""
+        if requester.role not in (UserRole.ADMIN, UserRole.TEACHER):
+            raise DomainError(
+                "Завантаження робіт студентів дозволено лише викладачам та адміністраторам.",
+                code="FORBIDDEN_SUBMISSION_DOWNLOAD",
+                status_code=403,
+                context={"submission_id": str(submission_id)},
+            )
+
+        submission = await self._load_submission_or_404(submission_id)
+        practical = submission.practical
+        course = practical.module.course
+
+        if requester.role == UserRole.TEACHER and course.teacher_id != requester.id:
+            raise DomainError(
+                "Доступ до завантаження робіт іншого курсу заборонено.",
+                code="FORBIDDEN_SUBMISSION_DOWNLOAD",
+                status_code=403,
+                context={
+                    "submission_id": str(submission_id),
+                    "course_id": str(course.id),
+                },
+            )
+
+        filename_ascii, filename_utf8, content_disposition = (
+            _build_submission_download_names(submission)
+        )
+        media_type = _PRACTICAL_MEDIA_TYPES[practical.format_type]
+
+        if practical.format_type == PracticalFormat.HTML:
+            if submission.raw_code is None or not submission.raw_code.strip():
+                raise DomainError(
+                    "Файл роботи видалено за терміном зберігання або відсутній на сервері.",
+                    code="SUBMISSION_FILE_NOT_FOUND",
+                    status_code=404,
+                    context={"submission_id": str(submission_id)},
+                )
+            return SubmissionDownloadPayload(
+                media_type=media_type,
+                filename_ascii=filename_ascii,
+                filename_utf8=filename_utf8,
+                content_disposition=content_disposition,
+                content=submission.raw_code.encode("utf-8"),
+            )
+
+        resolved_path = resolve_submission_file_path(
+            submission.file_path,
+            self._uploads_dir,
+        )
+        if resolved_path is None or not resolved_path.is_file():
+            raise DomainError(
+                "Файл роботи видалено за терміном зберігання або відсутній на сервері.",
+                code="SUBMISSION_FILE_NOT_FOUND",
+                status_code=404,
+                context={"submission_id": str(submission_id)},
+            )
+
+        return SubmissionDownloadPayload(
+            media_type=media_type,
+            filename_ascii=filename_ascii,
+            filename_utf8=filename_utf8,
+            content_disposition=content_disposition,
+            file_path=resolved_path,
+        )
 
     async def get_submission(
         self,
@@ -492,7 +778,7 @@ class SubmissionService:
                 status_code=403,
                 context={"submission_id": str(submission_id)},
             )
-        return serialize_submission(submission)
+        return serialize_submission(submission, uploads_dir=self._uploads_dir)
 
     async def list_submissions(
         self,
@@ -532,10 +818,17 @@ class SubmissionService:
 
         result = await self._db.execute(stmt)
         submissions = list(result.scalars().all())
-        return [serialize_submission(item) for item in submissions]
+        return [
+            serialize_submission(item, uploads_dir=self._uploads_dir)
+            for item in submissions
+        ]
 
 
 __all__ = [
+    "ACCDB_MEDIA_TYPE",
+    "DOCX_MEDIA_TYPE",
+    "HTML_MEDIA_TYPE",
+    "SubmissionDownloadPayload",
     "SubmissionService",
     "serialize_practical_teacher",
     "serialize_submission",

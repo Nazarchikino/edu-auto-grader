@@ -1,13 +1,20 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, require_role
 from app.models.user import User, UserRole
 from app.schemas.submission import ManualGradeUpdateRequest, SubmissionRead
-from app.services.submission_service import SubmissionService
+from app.services.export_service import XLSX_MEDIA_TYPE
+from app.services.submission_service import (
+    ACCDB_MEDIA_TYPE,
+    DOCX_MEDIA_TYPE,
+    HTML_MEDIA_TYPE,
+    SubmissionService,
+)
 
 router = APIRouter(tags=["submissions"])
 
@@ -64,6 +71,48 @@ async def get_submission_detail(
     return await service.get_submission(
         submission_id=submission_id,
         requester=current_user,
+    )
+
+
+@router.get(
+    "/submissions/{submission_id}/download",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "Файл практичної роботи студента (.docx/.xlsx/.accdb/.html)",
+            "content": {
+                DOCX_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}},
+                XLSX_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}},
+                ACCDB_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}},
+                HTML_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}},
+            },
+        },
+        403: {"description": "Доступ до завантаження роботи заборонено"},
+        404: {"description": "Здачу або файл роботи не знайдено"},
+    },
+)
+async def download_submission_file(
+    submission_id: uuid.UUID,
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Віддає викладачу курсу або адміну файл (.docx/.xlsx/.accdb) чи HTML-код роботи."""
+    service = SubmissionService(db)
+    payload = await service.prepare_submission_download(
+        submission_id=submission_id,
+        requester=current_user,
+    )
+    headers = {"Content-Disposition": payload.content_disposition}
+    if payload.file_path is not None:
+        return FileResponse(
+            path=payload.file_path,
+            media_type=payload.media_type,
+            headers=headers,
+        )
+    return Response(
+        content=payload.content or b"",
+        media_type=payload.media_type,
+        headers=headers,
     )
 
 
