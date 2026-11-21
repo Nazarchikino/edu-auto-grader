@@ -10,6 +10,7 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  AlertTriangle,
   BookOpen,
   BookOpenCheck,
   CheckCircle2,
@@ -29,6 +30,7 @@ import {
   Sparkles,
   Trash2,
   Wrench,
+  X,
 } from "lucide-react";
 import apiClient from "../../api/client";
 import { extractApiErrorMessage } from "../../context/AuthContext";
@@ -107,6 +109,25 @@ interface VariantDraft {
   parametersJson: string;
 }
 
+type DeleteTarget =
+  | {
+      kind: "module";
+      courseId: string;
+      moduleId: string;
+      orderIndex: number;
+      title: string;
+      practicalId: string | null;
+      hasPractical: boolean;
+    }
+  | {
+      kind: "practical";
+      courseId: string;
+      moduleId: string;
+      practicalId: string;
+      title: string;
+      moduleTitle: string;
+    };
+
 async function fetchCourses(): Promise<CourseRead[]> {
   const response = await apiClient.get<CourseRead[]>("/courses");
   return response.data;
@@ -135,6 +156,14 @@ async function fetchPracticalTeacher(
     `/practicals/${practicalId}/teacher`
   );
   return response.data;
+}
+
+async function deleteModuleById(moduleId: string): Promise<void> {
+  await apiClient.delete(`/modules/${moduleId}`);
+}
+
+async function deletePracticalById(practicalId: string): Promise<void> {
+  await apiClient.delete(`/practicals/${practicalId}`);
 }
 
 function SimpleMarkdownPreview({ content }: { content: string }): ReactElement {
@@ -222,6 +251,8 @@ export function CourseEditorPage(): ReactElement {
     type: "success" | "error";
     text: string;
   } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteModalError, setDeleteModalError] = useState<string | null>(null);
 
   // Стан редагування поточного курсу
   const [courseTitle, setCourseTitle] = useState<string>("");
@@ -636,6 +667,260 @@ export function CourseEditorPage(): ReactElement {
       });
     },
   });
+
+  // Мутація видалення модуля курсу
+  const deleteModuleMutation = useMutation<
+    void,
+    unknown,
+    Extract<DeleteTarget, { kind: "module" }>
+  >({
+    mutationFn: async (target) => {
+      await deleteModuleById(target.moduleId);
+    },
+    onSuccess: (_data, target) => {
+      const currentCourses =
+        queryClient.getQueryData<CourseRead[]>(["courses"]) ?? [];
+      const targetCourse = currentCourses.find(
+        (course) => course.id === target.courseId
+      );
+
+      if (selectedModuleId === target.moduleId) {
+        const currentModules = targetCourse?.modules ?? [];
+        const deletedIndex = currentModules.findIndex(
+          (item) => item.id === target.moduleId
+        );
+        const remainingModules = currentModules.filter(
+          (item) => item.id !== target.moduleId
+        );
+        if (remainingModules.length === 0) {
+          setSelectedModuleId(null);
+        } else {
+          const nextIndex = Math.min(
+            Math.max(deletedIndex, 0),
+            remainingModules.length - 1
+          );
+          setSelectedModuleId(remainingModules[nextIndex]?.id ?? null);
+        }
+      }
+
+      queryClient.setQueryData<CourseRead[]>(["courses"], (previous) => {
+        if (previous === undefined) {
+          return previous;
+        }
+        return previous.map((course) => {
+          if (course.id !== target.courseId) {
+            return course;
+          }
+          const renumberedModules = course.modules
+            .filter((item) => item.id !== target.moduleId)
+            .map((item, index) => ({
+              ...item,
+              order_index: index + 1,
+            }));
+          return {
+            ...course,
+            total_modules: renumberedModules.length,
+            modules: renumberedModules,
+          };
+        });
+      });
+
+      queryClient.removeQueries({
+        queryKey: ["module-detail", target.moduleId],
+        exact: true,
+      });
+      queryClient.removeQueries({
+        queryKey: ["module-quiz-teacher", target.moduleId],
+        exact: true,
+      });
+      queryClient.removeQueries({
+        queryKey: ["module", target.moduleId],
+        exact: true,
+      });
+      if (target.practicalId !== null) {
+        queryClient.removeQueries({
+          queryKey: ["practical-teacher", target.practicalId],
+          exact: true,
+        });
+        queryClient.removeQueries({
+          queryKey: ["practical-student", target.practicalId],
+          exact: true,
+        });
+      }
+
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["module"],
+        predicate: (query) => query.queryKey[1] !== target.moduleId,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["module-detail"],
+        predicate: (query) => query.queryKey[1] !== target.moduleId,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["module-quiz-teacher"],
+        predicate: (query) => query.queryKey[1] !== target.moduleId,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-teacher"],
+        predicate: (query) =>
+          target.practicalId === null ||
+          query.queryKey[1] !== target.practicalId,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-student"],
+        predicate: (query) =>
+          target.practicalId === null ||
+          query.queryKey[1] !== target.practicalId,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["group-journal"] });
+      void queryClient.invalidateQueries({ queryKey: ["submission-detail"] });
+      void queryClient.invalidateQueries({ queryKey: ["submissions-my"] });
+
+      setDeleteTarget(null);
+      setDeleteModalError(null);
+      setFeedbackBanner({
+        type: "success",
+        text: `Модуль «${target.title}» видалено, нумерацію решти тем оновлено.`,
+      });
+    },
+    onError: (err) => {
+      setDeleteModalError(
+        extractApiErrorMessage(err, "Не вдалося видалити модуль курсу.")
+      );
+    },
+  });
+
+  // Мутація видалення практичної роботи модуля
+  const deletePracticalMutation = useMutation<
+    void,
+    unknown,
+    Extract<DeleteTarget, { kind: "practical" }>
+  >({
+    mutationFn: async (target) => {
+      await deletePracticalById(target.practicalId);
+    },
+    onSuccess: (_data, target) => {
+      queryClient.setQueryData<CourseRead[]>(["courses"], (previous) => {
+        if (previous === undefined) {
+          return previous;
+        }
+        return previous.map((course) => {
+          if (course.id !== target.courseId) {
+            return course;
+          }
+          return {
+            ...course,
+            modules: course.modules.map((item) =>
+              item.id === target.moduleId
+                ? {
+                    ...item,
+                    practical_id: null,
+                    practical_format: null,
+                    practical_score: null,
+                  }
+                : item
+            ),
+          };
+        });
+      });
+
+      queryClient.setQueryData<ModuleDetailRead>(
+        ["module-detail", target.moduleId],
+        (previous) => {
+          if (previous === undefined) {
+            return previous;
+          }
+          return {
+            ...previous,
+            practical: null,
+          };
+        }
+      );
+
+      queryClient.removeQueries({
+        queryKey: ["practical-teacher", target.practicalId],
+        exact: true,
+      });
+      queryClient.removeQueries({
+        queryKey: ["practical-student", target.practicalId],
+        exact: true,
+      });
+
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
+      void queryClient.invalidateQueries({ queryKey: ["module"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["module-detail", target.moduleId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-teacher"],
+        predicate: (query) => query.queryKey[1] !== target.practicalId,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-student"],
+        predicate: (query) => query.queryKey[1] !== target.practicalId,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["group-journal"] });
+      void queryClient.invalidateQueries({ queryKey: ["submission-detail"] });
+      void queryClient.invalidateQueries({ queryKey: ["submissions-my"] });
+
+      setDeleteTarget(null);
+      setDeleteModalError(null);
+      setFeedbackBanner({
+        type: "success",
+        text: `Практичну роботу «${target.title}» видалено. Лекція та тест-допуск модуля збережені.`,
+      });
+    },
+    onError: (err) => {
+      setDeleteModalError(
+        extractApiErrorMessage(err, "Не вдалося видалити практичну роботу.")
+      );
+    },
+  });
+
+  const isDeleting =
+    deleteModuleMutation.isPending || deletePracticalMutation.isPending;
+
+  useEffect(() => {
+    if (deleteTarget === null) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && !isDeleting) {
+        setDeleteTarget(null);
+        setDeleteModalError(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [deleteTarget, isDeleting]);
+
+  const openDeleteModal = (target: DeleteTarget): void => {
+    setDeleteModalError(null);
+    setDeleteTarget(target);
+  };
+
+  const closeDeleteModal = (): void => {
+    if (isDeleting) {
+      return;
+    }
+    setDeleteTarget(null);
+    setDeleteModalError(null);
+  };
+
+  const handleConfirmDelete = (): void => {
+    if (deleteTarget === null || isDeleting) {
+      return;
+    }
+    setDeleteModalError(null);
+    if (deleteTarget.kind === "module") {
+      deleteModuleMutation.mutate(deleteTarget);
+    } else {
+      deletePracticalMutation.mutate(deleteTarget);
+    }
+  };
 
   const handleSaveCourse = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -1227,34 +1512,57 @@ export function CourseEditorPage(): ReactElement {
                 {activeCourse.modules.map((mod) => {
                   const isSelected = selectedModuleId === mod.id;
                   return (
-                    <button
+                    <div
                       key={mod.id}
-                      type="button"
-                      onClick={() => setSelectedModuleId(mod.id)}
-                      className={`w-full rounded-2xl border p-4 text-left transition-all ${
+                      className={`group relative rounded-2xl border transition-all ${
                         isSelected
                           ? "border-blue-600 bg-blue-50/40 shadow-xs ring-1 ring-blue-600"
                           : "border-slate-200 bg-white hover:border-blue-300"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700">
-                          Тема №{mod.order_index}
-                        </span>
-                        {mod.practical_format !== null ? (
-                          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-emerald-700">
-                            .{mod.practical_format}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedModuleId(mod.id)}
+                        className="w-full p-4 pr-11 text-left"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700">
+                            Тема №{mod.order_index}
                           </span>
-                        ) : (
-                          <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-                            Без практичної
-                          </span>
-                        )}
-                      </div>
-                      <h3 className="mt-2 text-sm font-bold text-slate-900">
-                        {mod.title}
-                      </h3>
-                    </button>
+                          {mod.practical_format !== null ? (
+                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-emerald-700">
+                              .{mod.practical_format}
+                            </span>
+                          ) : (
+                            <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                              Без практичної
+                            </span>
+                          )}
+                        </div>
+                        <h3 className="mt-2 text-sm font-bold text-slate-900">
+                          {mod.title}
+                        </h3>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openDeleteModal({
+                            kind: "module",
+                            courseId: activeCourse.id,
+                            moduleId: mod.id,
+                            orderIndex: mod.order_index,
+                            title: mod.title,
+                            practicalId: mod.practical_id,
+                            hasPractical: mod.practical_id !== null,
+                          })
+                        }
+                        title="Видалити модуль"
+                        aria-label={`Видалити модуль «${mod.title}»`}
+                        className="absolute right-2.5 top-3.5 inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 focus:border-rose-300 focus:bg-rose-50 focus:text-rose-600 focus:outline-none"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -1850,16 +2158,47 @@ export function CourseEditorPage(): ReactElement {
 
                           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-4">
                             {activePracticalId !== null ? (
-                              <Link
-                                to={`/teacher/rules?practicalId=${activePracticalId}`}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                              >
-                                <SlidersHorizontal className="h-3.5 w-3.5 text-blue-600" />
-                                <span>
-                                  Перейти до візуального редактора правил (
-                                  {practicalTeacher?.grading_rules.length ?? 0})
-                                </span>
-                              </Link>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Link
+                                  to={`/teacher/rules?practicalId=${activePracticalId}`}
+                                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                                >
+                                  <SlidersHorizontal className="h-3.5 w-3.5 text-blue-600" />
+                                  <span>
+                                    Перейти до візуального редактора правил (
+                                    {practicalTeacher?.grading_rules.length ?? 0})
+                                  </span>
+                                </Link>
+
+                                <button
+                                  type="button"
+                                  disabled={isDeleting}
+                                  onClick={() => {
+                                    if (
+                                      selectedModuleId === null ||
+                                      activeCourse === null
+                                    ) {
+                                      return;
+                                    }
+                                    openDeleteModal({
+                                      kind: "practical",
+                                      courseId: activeCourse.id,
+                                      moduleId: selectedModuleId,
+                                      practicalId: activePracticalId,
+                                      title:
+                                        practicalTeacher?.title ??
+                                        moduleDetail?.practical?.title ??
+                                        practicalTitle,
+                                      moduleTitle:
+                                        moduleDetail?.title ?? moduleTitle,
+                                    });
+                                  }}
+                                  className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:opacity-60"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  <span>Видалити практичну роботу</span>
+                                </button>
+                              </div>
                             ) : (
                               <span className="text-xs text-slate-500">
                                 Збережіть практичну роботу, щоб налаштувати
@@ -1889,6 +2228,112 @@ export function CourseEditorPage(): ReactElement {
             </div>
           </div>
         </>
+      )}
+
+      {/* Модальне вікно підтвердження видалення модуля або практичної роботи */}
+      {deleteTarget !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="course-delete-modal-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeDeleteModal();
+            }
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-600">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3
+                    id="course-delete-modal-title"
+                    className="text-base font-bold text-slate-900"
+                  >
+                    {deleteTarget.kind === "module"
+                      ? "Видалити модуль курсу?"
+                      : "Видалити практичну роботу?"}
+                  </h3>
+                  <p className="mt-1 text-sm font-semibold text-slate-800">
+                    {deleteTarget.kind === "module"
+                      ? `Тема №${deleteTarget.orderIndex}: «${deleteTarget.title}»`
+                      : `«${deleteTarget.title}»`}
+                  </p>
+                  {deleteTarget.kind === "practical" && (
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Модуль: {deleteTarget.moduleTitle}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                disabled={isDeleting}
+                aria-label="Закрити вікно підтвердження"
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs leading-relaxed text-amber-950">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <span>
+                {deleteTarget.kind === "module"
+                  ? `Дія незворотна. Буде остаточно видалено текст лекції, питання й спроби тесту-допуску${
+                      deleteTarget.hasPractical
+                        ? ", прикріплену практичну роботу"
+                        : ""
+                    }, а також усі пов'язані здачі, файли та оцінки студентів. Решта модулів курсу буде автоматично перенумерована.`
+                  : "Дія незворотна. Буде остаточно видалено практичну роботу, її варіанти, правила автоперевірки, а також усі пов'язані здачі, завантажені файли та оцінки студентів. Лекція та тест-допуск цього модуля залишаться недоторканими."}
+              </span>
+            </div>
+
+            {deleteModalError !== null && (
+              <div
+                role="alert"
+                className="mt-3 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-900"
+              >
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                <span className="font-medium">{deleteModalError}</span>
+              </div>
+            )}
+
+            <div className="mt-6 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                disabled={isDeleting}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              >
+                Скасувати
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={isDeleting}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-rose-700 disabled:opacity-60"
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Видалення...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Підтвердити видалення</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
