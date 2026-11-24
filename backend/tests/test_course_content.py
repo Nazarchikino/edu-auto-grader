@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.security import hash_password
+from app.graders.xlsx_grader import XlsxGrader, _canonicalize_formula
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
     Course,
@@ -21,7 +22,7 @@ from app.models.course import (
 )
 from app.models.progress import QuizAttempt, Submission
 from app.models.user import AcademicGroup, User, UserRole
-from app.schemas.grading import GradingRule
+from app.schemas.grading import GradingRule, GradingRuleType
 from app.seed import build_seed_bundle, seed_database, summarize_bundle
 from tests.conftest import (
     SqliteAsyncSessionAdapter,
@@ -86,6 +87,88 @@ def test_full_course_json_bundle_validation() -> None:
 
     disk_media_files = [path for path in media_root.rglob("*") if path.is_file()]
     assert len(disk_media_files) == 184
+
+
+def test_excel_course_formula_rules_have_valid_supported_expressions() -> None:
+    """Гарантує, що всі правила xlsx_formula у excel.json коректні, прохідні й підтримуються."""
+    bundle = build_seed_bundle()
+    excel_course = next(
+        course for course in bundle.courses if course.slug == CourseSlug.EXCEL
+    )
+    grader = XlsxGrader()
+    formula_rules_checked = 0
+
+    for module in excel_course.modules:
+        practical = module.practical
+        if practical is None:
+            continue
+
+        parsed_rules = [
+            GradingRule.model_validate(raw_rule)
+            for raw_rule in practical.grading_rules
+        ]
+        assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+            f"Модуль {module.order_index} ({module.title}) має суму балів != 10.0"
+        )
+
+        for rule in parsed_rules:
+            if rule.type != GradingRuleType.XLSX_FORMULA:
+                continue
+
+            formula_rules_checked += 1
+            expected_clean = rule.expected.strip()
+            expected_lower = expected_clean.lower()
+
+            # Забороняємо порожні вирази та legacy-записи голого '$' чи '=' у контенті курсу
+            assert expected_clean != "", f"Порожній expected у правилі {rule.id}"
+            assert expected_clean not in {"$", "="}, (
+                f"Непідтримуваний/застарілий вираз '{expected_clean}' у правилі {rule.id}"
+            )
+
+            if expected_lower in {"any", "true", "exists", "not_null"}:
+                assert grader._matches_expected_formula("=SUM(A1:A5)", expected_clean) is True
+                assert grader._matches_expected_formula("=", expected_clean) is False
+                continue
+
+            prefix_matched = False
+            for prefix in ("contains:", "func:", "function:"):
+                if expected_lower.startswith(prefix):
+                    prefix_matched = True
+                    token = expected_clean[len(prefix) :].strip()
+                    assert token != "", f"Порожній токен після '{prefix}' у правилі {rule.id}"
+                    canonical_token = _canonicalize_formula(
+                        token, strip_dollar="$" not in token
+                    )
+                    assert canonical_token != "", (
+                        f"Токен '{token}' у правилі {rule.id} канонізується у порожній рядок"
+                    )
+                    if token == "$":
+                        assert grader._matches_expected_formula("=B2/$B$10", expected_clean) is True
+                        assert grader._matches_expected_formula("=B2/B10", expected_clean) is False
+                    else:
+                        sample_formula = f"={token}"
+                        assert grader._matches_expected_formula(
+                            sample_formula, expected_clean
+                        ) is True
+                    break
+
+            if prefix_matched:
+                continue
+
+            canonical_expected = _canonicalize_formula(
+                expected_clean, strip_dollar="$" not in expected_clean
+            )
+            assert canonical_expected != "", (
+                f"Вираз '{expected_clean}' у правилі {rule.id} канонізується у порожній рядок"
+            )
+            sample_formula = (
+                f"={canonical_expected}(A1:A5)"
+                if re.fullmatch(r"[A-Z_][A-Z_.]*", canonical_expected) is not None
+                else f"={expected_clean.lstrip('=')}"
+            )
+            assert grader._matches_expected_formula(sample_formula, expected_clean) is True
+
+    assert formula_rules_checked >= 25
 
 
 @pytest.mark.asyncio

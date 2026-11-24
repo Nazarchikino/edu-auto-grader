@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import openpyxl  # type: ignore[import-untyped]
 import pytest
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
@@ -328,6 +329,129 @@ def test_xlsx_grader_rejects_static_value_instead_of_formula_and_missing_chart(
     corrupt_xlsx.write_bytes(b"corrupted-excel-payload")
     with pytest.raises(InvalidFileFormatError):
         grader.evaluate(file_path=corrupt_xlsx, rules=rules, variant_data={})
+
+
+def test_xlsx_grader_supports_dollar_reference_and_any_formula_expressions(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє підтримку 'contains:$', '$', 'any' та '=' у правилах формул XlsxGrader."""
+    xlsx_path = tmp_path / "formula_modes.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Sheet1"
+    sheet["A1"] = 10
+    sheet["A2"] = 20
+    sheet["B2"] = 50
+    sheet["B10"] = 100
+    sheet["C2"] = "=B2/$B$10"
+    sheet["C3"] = "=B2/B$10"
+    sheet["C4"] = "=B2/B10"
+    sheet["D2"] = "=SUM(A1:A5)"
+    sheet["D3"] = 42
+    sheet["D4"] = "="
+    workbook.save(str(xlsx_path))
+    workbook.close()
+
+    rules = [
+        GradingRule(
+            id="abs_contains_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C2",
+            expected="contains:$",
+            points=1.0,
+            description="Абсолютне посилання (=B2/$B$10) проходить contains:$",
+        ),
+        GradingRule(
+            id="abs_bare_dollar_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C2",
+            expected="$",
+            points=1.0,
+            description="Абсолютне посилання (=B2/$B$10) проходить одиничний $",
+        ),
+        GradingRule(
+            id="mixed_contains_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C3",
+            expected="contains:$",
+            points=1.0,
+            description="Змішане посилання (=B2/B$10) проходить contains:$",
+        ),
+        GradingRule(
+            id="rel_contains_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C4",
+            expected="contains:$",
+            points=1.0,
+            description="Відносне посилання (=B2/B10) не проходить contains:$",
+        ),
+        GradingRule(
+            id="rel_bare_dollar_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C4",
+            expected="$",
+            points=1.0,
+            description="Відносне посилання (=B2/B10) не проходить одиничний $",
+        ),
+        GradingRule(
+            id="any_formula_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D2",
+            expected="any",
+            points=1.0,
+            description="Реальна формула (=SUM(A1:A5)) проходить any",
+        ),
+        GradingRule(
+            id="eq_formula_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D2",
+            expected="=",
+            points=1.0,
+            description="Реальна формула (=SUM(A1:A5)) проходить =",
+        ),
+        GradingRule(
+            id="any_static_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D3",
+            expected="any",
+            points=1.0,
+            description="Статичне число (42) не проходить any",
+        ),
+        GradingRule(
+            id="eq_static_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D3",
+            expected="=",
+            points=1.0,
+            description="Статичне число (42) не проходить =",
+        ),
+        GradingRule(
+            id="eq_empty_body_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D4",
+            expected="=",
+            points=1.0,
+            description="Порожня формула ('=') не проходить =",
+        ),
+    ]
+
+    report = XlsxGrader().evaluate(file_path=xlsx_path, rules=rules, variant_data={})
+    results_by_id = {item.rule_id: item for item in report.results}
+
+    assert results_by_id["abs_contains_pass"].passed is True
+    assert results_by_id["abs_bare_dollar_pass"].passed is True
+    assert results_by_id["mixed_contains_pass"].passed is True
+    assert results_by_id["rel_contains_fail"].passed is False
+    assert results_by_id["rel_bare_dollar_fail"].passed is False
+    assert results_by_id["any_formula_pass"].passed is True
+    assert results_by_id["eq_formula_pass"].passed is True
+    assert results_by_id["any_static_fail"].passed is False
+    assert results_by_id["eq_static_fail"].passed is False
+    assert results_by_id["eq_empty_body_fail"].passed is False
+    assert report.passed_count == 5
+    assert report.failed_count == 5
+    assert report.total_points == 5.0
 
 
 def test_accdb_grader_evaluates_tables_columns_and_types(tmp_path: Path) -> None:

@@ -902,10 +902,15 @@ class XlsxGrader(BaseGrader):
         expected_clean = expected_expr.strip()
         expected_lower = expected_clean.lower()
 
-        if expected_lower in {"any", "true", "exists", "not_null"}:
-            return True
-
         canonical_actual = _canonicalize_formula(actual_formula, strip_dollar=False)
+        if expected_lower in {"any", "true", "exists", "not_null", "="}:
+            return bool(canonical_actual)
+
+        # Одиничний '$' трактуємо як вимогу наявності абсолютного/змішаного посилання ('contains:$')
+        if expected_clean == "$":
+            expected_clean = "contains:$"
+            expected_lower = "contains:$"
+
         canonical_actual_no_dollar = _canonicalize_formula(
             actual_formula, strip_dollar=True
         )

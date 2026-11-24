@@ -44,3 +44,4 @@
 
 ## Фаза 6: Аудит, стабілізація та підготовка до пілоту
 - [x] **T6.0:** Виправити базові помилки статичних аналізаторів `ruff` (`I001` у `backend/alembic/env.py` та `backend/alembic/versions/0001_initial_schema.py`, `known-third-party = ["alembic"]`) та `mypy --strict` (усунути конфлікт глобального `ignore_missing_imports` у `backend/pyproject.toml` і помилки типізації `SqliteAsyncSessionAdapter.execute` у `backend/tests/`), забезпечивши проходження `ruff`, `mypy --strict` і `pytest` із 0 помилок.
+- [x] **T6.1:** Виправити непрохідні правила формул у `backend/content/courses/excel.json` (`expected: "$"` -> `"contains:$"` у Модулях 5 і 7; `expected: "="` -> `"any"` у Модулі 15), додати стійку підтримку `"="` та одиничного `"$"` у `XlsxGrader._matches_expected_formula` (`backend/app/graders/xlsx_grader.py`) і покрити регресійними й контентними тестами (`test_graders.py`, `test_course_content.py`).

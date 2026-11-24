@@ -623,7 +623,7 @@
             "id": "x_m05_reg_abs",
             "type": "xlsx_formula",
             "target": "Регіони!C2",
-            "expected": "$",
+            "expected": "contains:$",
             "points": 3.5,
             "description": "Перевірка використання абсолютного посилання ($) у формулі частки площі"
           },
@@ -631,7 +631,7 @@
             "id": "x_m05_mol_abs",
             "type": "xlsx_formula",
             "target": "Молокозавод!D2",
-            "expected": "$",
+            "expected": "contains:$",
             "points": 3.5,
             "description": "Перевірка абсолютного посилання у розрахунках аркуша «Молокозавод»"
           },
@@ -639,7 +639,7 @@
             "id": "x_m05_vtr_abs",
             "type": "xlsx_formula",
             "target": "Втрати!E2",
-            "expected": "$",
+            "expected": "contains:$",
             "points": 3.0,
             "description": "Перевірка формули з фіксацією клітинки на аркуші «Втрати»"
           }
@@ -891,7 +891,7 @@
             "id": "x_m07_dep_formula",
             "type": "xlsx_formula",
             "target": "Депозит!B5",
-            "expected": "$",
+            "expected": "contains:$",
             "points": 3.5,
             "description": "Перевірка змішаного посилання у формулі розрахунку депозиту"
           },
@@ -2137,7 +2137,7 @@
             "id": "x_m15_sheet1_formula",
             "type": "xlsx_formula",
             "target": "Аркуш1!D2",
-            "expected": "=",
+            "expected": "any",
             "points": 4.0,
             "description": "Перевірка наявності розрахункових формул у таблиці Завдання 1 (Аркуш 1)"
           },
@@ -2145,7 +2145,7 @@
             "id": "x_m15_sheet2_formula",
             "type": "xlsx_formula",
             "target": "Аркуш2!B2",
-            "expected": "=",
+            "expected": "any",
             "points": 3.0,
             "description": "Перевірка обчислення математичного виразу / рівняння у Завданні 2 (Аркуш 2)"
           },
