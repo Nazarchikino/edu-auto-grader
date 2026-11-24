@@ -11,6 +11,8 @@ from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.security import hash_password
+from app.graders.docx_grader import DocxGrader
+from app.graders.factory import GraderFactory
 from app.graders.xlsx_grader import XlsxGrader, _canonicalize_formula
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
@@ -31,6 +33,7 @@ from tests.conftest import (
 )
 
 _MEDIA_URL_PATTERN = re.compile(r"/media/courses/[^\s\"'\)>]+")
+_UNRESOLVED_PLACEHOLDER_PATTERN = re.compile(r"\{[^{}]*\}")
 
 
 def test_full_course_json_bundle_validation() -> None:
@@ -169,6 +172,114 @@ def test_excel_course_formula_rules_have_valid_supported_expressions() -> None:
             assert grader._matches_expected_formula(sample_formula, expected_clean) is True
 
     assert formula_rules_checked >= 25
+
+
+def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> None:
+    """Інваріант: усі 37 практичних і кожен варіант розкривають {placeholder} без залишків."""
+    bundle = build_seed_bundle()
+    docx_grader = DocxGrader()
+    practicals_checked = 0
+    variants_checked = 0
+    placeholders_resolved = 0
+
+    for course in bundle.courses:
+        for module in course.modules:
+            practical = module.practical
+            if practical is None:
+                continue
+
+            practicals_checked += 1
+            grader = GraderFactory.get_grader(practical.format_type)
+            parsed_rules = [
+                GradingRule.model_validate(raw_rule)
+                for raw_rule in practical.grading_rules
+            ]
+            assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+                f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
+            )
+            assert len(practical.variants) >= 1
+
+            for variant in practical.variants:
+                variants_checked += 1
+                v_num = variant.get("variant_number", "?")
+                raw_params = variant.get("parameters")
+                assert isinstance(raw_params, dict)
+
+                for rule in parsed_rules:
+                    had_placeholder = bool(
+                        _UNRESOLVED_PLACEHOLDER_PATTERN.search(rule.target)
+                        or _UNRESOLVED_PLACEHOLDER_PATTERN.search(rule.expected)
+                    )
+                    resolved_target = grader.resolve_expected(rule.target, variant)
+                    resolved_expected = grader.resolve_expected(rule.expected, variant)
+
+                    if had_placeholder:
+                        placeholders_resolved += 1
+
+                    assert not _UNRESOLVED_PLACEHOLDER_PATTERN.search(resolved_target), (
+                        f"Нерозкритий placeholder у target '{resolved_target}' "
+                        f"({course.slug.value} M{module.order_index:02d} V{v_num} {rule.id})"
+                    )
+                    assert not _UNRESOLVED_PLACEHOLDER_PATTERN.search(resolved_expected), (
+                        f"Нерозкритий placeholder у expected '{resolved_expected}' "
+                        f"({course.slug.value} M{module.order_index:02d} V{v_num} {rule.id})"
+                    )
+                    assert resolved_target.strip() != ""
+                    assert resolved_expected.strip() != ""
+
+                    # Додаткова перевірка синтаксису розкритих правил Word у DocxGrader
+                    if isinstance(grader, DocxGrader):
+                        if rule.type == GradingRuleType.DOCX_PAGE_MARGINS:
+                            parsed_margins = docx_grader._parse_expected_margins(resolved_expected)
+                            assert len(parsed_margins) >= 1
+                        elif rule.type == GradingRuleType.DOCX_FONT:
+                            font_name, font_size = docx_grader._parse_expected_font(
+                                resolved_expected
+                            )
+                            assert font_name is not None or font_size is not None
+                        elif rule.type == GradingRuleType.DOCX_LINE_SPACING:
+                            docx_grader.compare_numeric_condition(1.5, resolved_expected)
+                        elif rule.type == GradingRuleType.DOCX_ALIGNMENT:
+                            assert resolved_expected.strip().upper() in {
+                                "LEFT",
+                                "CENTER",
+                                "RIGHT",
+                                "JUSTIFY",
+                                "BOTH",
+                                "DISTRIBUTE",
+                            }
+                        elif rule.type in {
+                            GradingRuleType.DOCX_TABLE_EXISTS,
+                            GradingRuleType.DOCX_LIST_EXISTS,
+                        }:
+                            lowered = resolved_expected.strip().lower()
+                            if lowered in {"true", "false", "yes", "no"}:
+                                docx_grader.parse_bool_expected(resolved_expected)
+                            else:
+                                docx_grader.compare_numeric_condition(1, resolved_expected)
+
+                # Перевірка цілісності схеми Access M9 (tables збережено, а ключі відповідають їй)
+                if course.slug == CourseSlug.ACCESS and module.order_index == 9:
+                    raw_tables = raw_params.get("tables")
+                    assert isinstance(raw_tables, list) and len(raw_tables) >= 3
+                    tables_by_name = {
+                        str(tbl["name"]): tbl
+                        for tbl in raw_tables
+                        if isinstance(tbl, dict) and "name" in tbl
+                    }
+                    for key in ("table_1", "table_2", "table_3"):
+                        table_name = raw_params.get(key)
+                        assert isinstance(table_name, str) and table_name in tables_by_name
+                    pk_target = raw_params.get("pk_target")
+                    assert isinstance(pk_target, str) and "." in pk_target
+                    pk_tbl, pk_col = pk_target.split(".", maxsplit=1)
+                    assert pk_tbl in tables_by_name
+                    assert pk_col in tables_by_name[pk_tbl]["fields"]
+                    assert pk_col in tables_by_name[pk_tbl]["primary_keys"]
+
+    assert practicals_checked == 37
+    assert variants_checked == 254
+    assert placeholders_resolved >= 340
 
 
 @pytest.mark.asyncio

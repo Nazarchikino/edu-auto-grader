@@ -91,8 +91,10 @@ class DocxGrader(BaseGrader):
 
         results: list[CriterionResult] = []
         for rule in rules:
+            resolved_target = self.resolve_expected(rule.target, variant_data)
             resolved_expected = self.resolve_expected(rule.expected, variant_data)
-            result = self._evaluate_rule(document, rule, resolved_expected)
+            resolved_rule = rule.model_copy(update={"target": resolved_target})
+            result = self._evaluate_rule(document, resolved_rule, resolved_expected)
             results.append(result)
 
         return self.build_report(results)

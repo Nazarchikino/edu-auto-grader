@@ -7,7 +7,7 @@ import pytest
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.accdb_grader import AccdbGrader
+from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
 from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
 from app.graders.html_grader import HtmlGrader
@@ -18,8 +18,9 @@ from app.graders.metadata import (
     extract_document_metadata,
 )
 from app.graders.xlsx_grader import XlsxGrader
-from app.models.course import PracticalFormat
+from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import ExtractedMetadata, GradingRule, GradingRuleType
+from app.seed import build_seed_bundle
 from tests.conftest import (
     build_sample_accdb,
     build_sample_docx,
@@ -876,6 +877,213 @@ def test_docx_grader_supports_uniform_single_number_margin(tmp_path: Path) -> No
     report = DocxGrader().evaluate(file_path=docx_path, rules=[rule], variant_data={})
     assert report.passed_count == 1
     assert report.total_points == 2.0
+
+
+def test_docx_grader_resolves_placeholders_in_target_and_expected(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє підстановку {placeholder} одночасно у rule.target та rule.expected DocxGrader."""
+    docx_path = build_sample_docx(
+        tmp_path / "variant_placeholders.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=15.0,
+        bottom_mm=15.0,
+        font_name="Calibri",
+        font_size_pt=12.0,
+        line_spacing=1.5,
+        alignment=WD_ALIGN_PARAGRAPH.LEFT,
+        include_table=True,
+        table_rows=5,
+        table_cols=3,
+    )
+
+    rules = [
+        GradingRule(
+            id="w_ph_margins",
+            type=GradingRuleType.DOCX_PAGE_MARGINS,
+            target="{section_target}",
+            expected="{margins}",
+            points=2.0,
+            description="Поля цільової секції за параметром варіанта",
+        ),
+        GradingRule(
+            id="w_ph_font",
+            type=GradingRuleType.DOCX_FONT,
+            target="{text_target}",
+            expected="{body_font}:{body_size}",
+            points=2.5,
+            description="Шрифт і кегль цільових абзаців за варіантом",
+        ),
+        GradingRule(
+            id="w_ph_spacing",
+            type=GradingRuleType.DOCX_LINE_SPACING,
+            target="{text_target}",
+            expected="{line_spacing}",
+            points=2.0,
+            description="Міжрядковий інтервал за варіантом",
+        ),
+        GradingRule(
+            id="w_ph_align",
+            type=GradingRuleType.DOCX_ALIGNMENT,
+            target="{text_target}",
+            expected="{body_alignment}",
+            points=1.5,
+            description="Вирівнювання абзаців за варіантом",
+        ),
+        GradingRule(
+            id="w_ph_table",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="{table_target}",
+            expected=">={min_rows}",
+            points=2.0,
+            description="Кількість рядків цільової таблиці за варіантом",
+        ),
+    ]
+
+    variant_data: dict[str, object] = {
+        "variant_number": 2,
+        "parameters": {
+            "section_target": "section_0",
+            "text_target": "body",
+            "table_target": "table_0.rows",
+            "margins": "left=2cm,right=2cm,top=1.5cm,bottom=1.5cm",
+            "body_font": "Calibri",
+            "body_size": "12",
+            "line_spacing": "1.5",
+            "body_alignment": "left",
+            "min_rows": 5,
+        },
+    }
+
+    grader = DocxGrader()
+    report = grader.evaluate(file_path=docx_path, rules=rules, variant_data=variant_data)
+
+    assert report.total_points == 10.0
+    assert report.max_points == 10.0
+    assert report.passed_count == 5
+    assert report.failed_count == 0
+    results_by_id = {item.rule_id: item for item in report.results}
+    assert results_by_id["w_ph_margins"].target == "section_0"
+    assert results_by_id["w_ph_margins"].expected == "left=2cm,right=2cm,top=1.5cm,bottom=1.5cm"
+    assert results_by_id["w_ph_font"].target == "body"
+    assert results_by_id["w_ph_font"].expected == "Calibri:12"
+    assert results_by_id["w_ph_table"].target == "table_0.rows"
+    assert results_by_id["w_ph_table"].expected == ">=5"
+
+    # Перевірка реальних правил word.json для проблемних варіантів (М1 Вар. 2 та М3 Вар. 2)
+    bundle = build_seed_bundle()
+    word_course = next(course for course in bundle.courses if course.slug == CourseSlug.WORD)
+
+    m1_practical = next(m for m in word_course.modules if m.order_index == 1).practical
+    assert m1_practical is not None
+    m1_rules = [GradingRule.model_validate(r) for r in m1_practical.grading_rules]
+    m1_v2 = next(v for v in m1_practical.variants if v["variant_number"] == 2)
+    m1_v2_docx = build_sample_docx(
+        tmp_path / "word_m1_v2.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+        font_name="Calibri",
+        font_size_pt=12.0,
+        line_spacing=1.5,
+        alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
+    )
+    m1_v2_report = grader.evaluate(
+        file_path=m1_v2_docx,
+        rules=m1_rules,
+        variant_data=m1_v2,
+    )
+    assert m1_v2_report.total_points == 10.0
+    assert m1_v2_report.failed_count == 0
+
+    m3_practical = next(m for m in word_course.modules if m.order_index == 3).practical
+    assert m3_practical is not None
+    m3_rules = [GradingRule.model_validate(r) for r in m3_practical.grading_rules]
+    m3_v2 = next(v for v in m3_practical.variants if v["variant_number"] == 2)
+    m3_v2_docx = build_sample_docx(
+        tmp_path / "word_m3_v2.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=15.0,
+        bottom_mm=15.0,
+        font_name="Times New Roman",
+        font_size_pt=14.0,
+        line_spacing=1.15,
+        alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
+    )
+    m3_v2_report = grader.evaluate(
+        file_path=m3_v2_docx,
+        rules=m3_rules,
+        variant_data=m3_v2,
+    )
+    assert m3_v2_report.total_points == 10.0
+    assert m3_v2_report.failed_count == 0
+
+
+def test_accdb_grader_evaluates_access_module_9_multiple_variants(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє, що різні варіанти Модуля 9 Access (включно з 2, 4, 5) набирають 10/10 балів."""
+    bundle = build_seed_bundle()
+    access_course = next(course for course in bundle.courses if course.slug == CourseSlug.ACCESS)
+    m9_module = next(module for module in access_course.modules if module.order_index == 9)
+    assert m9_module.practical is not None
+
+    rules = [GradingRule.model_validate(raw) for raw in m9_module.practical.grading_rules]
+    grader = AccdbGrader()
+    built_paths: dict[int, Path] = {}
+
+    for target_variant_number in (1, 2, 4, 5):
+        variant = next(
+            v
+            for v in m9_module.practical.variants
+            if v["variant_number"] == target_variant_number
+        )
+        raw_params = variant.get("parameters")
+        assert isinstance(raw_params, dict)
+        raw_tables = raw_params.get("tables")
+        assert isinstance(raw_tables, list) and len(raw_tables) >= 3
+
+        accdb_tables: dict[str, list[tuple[str, str]]] = {}
+        for table_entry in raw_tables:
+            assert isinstance(table_entry, dict)
+            table_name = str(table_entry["name"])
+            raw_fields = table_entry["fields"]
+            raw_pks = set(table_entry.get("primary_keys", []))
+            assert isinstance(raw_fields, list)
+            accdb_tables[table_name] = [
+                (str(field), "AUTONUMBER" if field in raw_pks else "SHORT TEXT")
+                for field in raw_fields
+            ]
+
+        accdb_path = tmp_path / f"access_m09_v{target_variant_number}.accdb"
+        accdb_path.write_bytes(build_accdb_bytes(accdb_tables))
+        built_paths[target_variant_number] = accdb_path
+
+        report = grader.evaluate(
+            file_path=accdb_path,
+            rules=rules,
+            variant_data=variant,
+        )
+        assert report.total_points == 10.0, (
+            f"Варіант {target_variant_number} Модуля 9 Access набрав {report.total_points}/10.0"
+        )
+        assert report.max_points == 10.0
+        assert report.passed_count == 4
+        assert report.failed_count == 0
+
+    # База даних Варіанта 1 не повинна проходити перевірку для Варіанта 2
+    variant_2 = next(v for v in m9_module.practical.variants if v["variant_number"] == 2)
+    mismatch_report = grader.evaluate(
+        file_path=built_paths[1],
+        rules=rules,
+        variant_data=variant_2,
+    )
+    assert mismatch_report.total_points == 0.0
+    assert mismatch_report.passed_count == 0
+    assert mismatch_report.failed_count == 4
 
 
 def test_metadata_extraction_and_plagiarism_detection(tmp_path: Path) -> None:
