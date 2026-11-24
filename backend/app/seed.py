@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -32,6 +33,11 @@ from app.models.user import (
     UserRole,
 )
 from app.schemas.grading import GradingRule
+from app.services.retention_service import delete_submission_files_for_paths
+
+logger = logging.getLogger(__name__)
+
+_QuizQuestionSignature = tuple[str, tuple[str, ...], int]
 
 
 class _SeedQuizQuestionPayload(BaseModel):
@@ -88,6 +94,18 @@ class _SeedCoursePayload(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: str = Field(..., min_length=1)
     modules: list[_SeedModulePayload] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_unique_module_order_indices(self) -> "_SeedCoursePayload":
+        seen_indices: set[int] = set()
+        for module in self.modules:
+            if module.order_index in seen_indices:
+                raise ValueError(
+                    f"Курс '{self.slug.value}' містить дубльований "
+                    f"order_index={module.order_index}."
+                )
+            seen_indices.add(module.order_index)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,13 +316,240 @@ def summarize_bundle(bundle: SeedBundle) -> SeedSummary:
     )
 
 
+def _question_signature(question: QuizQuestion) -> _QuizQuestionSignature:
+    """Повертає нормалізовану сигнатуру питання тесту для порівняння змін."""
+    return (
+        question.question_text,
+        tuple(question.options),
+        question.correct_option_index,
+    )
+
+
+def _sync_quiz_questions_in_place(
+    existing_module: Module,
+    incoming_questions: Sequence[QuizQuestion],
+) -> None:
+    """Оновлює питання тесту модуля без перестворення ідентичних записів і втрати QuizAttempt."""
+    existing_questions = list(existing_module.quiz_questions)
+    existing_signatures = [_question_signature(item) for item in existing_questions]
+    incoming_signatures = [_question_signature(item) for item in incoming_questions]
+    if existing_signatures == incoming_signatures:
+        return
+
+    existing_by_sig: dict[_QuizQuestionSignature, list[QuizQuestion]] = {}
+    for question in existing_questions:
+        existing_by_sig.setdefault(_question_signature(question), []).append(question)
+
+    matched_existing_obj_ids: set[int] = set()
+    unmatched_incoming: list[QuizQuestion] = []
+    for incoming in incoming_questions:
+        bucket = existing_by_sig.get(_question_signature(incoming))
+        if bucket:
+            kept = bucket.pop(0)
+            matched_existing_obj_ids.add(id(kept))
+        else:
+            unmatched_incoming.append(incoming)
+
+    unmatched_existing = [
+        question
+        for question in existing_questions
+        if id(question) not in matched_existing_obj_ids
+    ]
+    if not unmatched_incoming and not unmatched_existing:
+        return
+
+    for target, source in zip(unmatched_existing, unmatched_incoming, strict=False):
+        target.question_text = source.question_text
+        target.options = list(source.options)
+        target.correct_option_index = source.correct_option_index
+
+    if len(unmatched_incoming) > len(unmatched_existing):
+        for source in unmatched_incoming[len(unmatched_existing) :]:
+            existing_module.quiz_questions.append(
+                QuizQuestion(
+                    question_text=source.question_text,
+                    options=list(source.options),
+                    correct_option_index=source.correct_option_index,
+                )
+            )
+    elif len(unmatched_existing) > len(unmatched_incoming):
+        for surplus in unmatched_existing[len(unmatched_incoming) :]:
+            existing_module.quiz_questions.remove(surplus)
+
+
+async def _sync_practical_in_place(
+    session: AsyncSession,
+    *,
+    course_slug: CourseSlug,
+    existing_module: Module,
+    incoming_practical: Practical | None,
+    allow_destructive_module_delete: bool,
+    submission_file_paths_to_delete: list[str],
+) -> None:
+    """Неруйнівно синхронізує практичну роботу модуля зі збереженням Practical.id та Submission."""
+    existing_practical = existing_module.practical
+
+    if incoming_practical is not None:
+        if existing_practical is None:
+            existing_module.practical = Practical(
+                title=incoming_practical.title,
+                instructions=incoming_practical.instructions,
+                format_type=incoming_practical.format_type,
+                max_score=incoming_practical.max_score,
+                variants=list(incoming_practical.variants),
+                grading_rules=list(incoming_practical.grading_rules),
+            )
+        else:
+            existing_practical.title = incoming_practical.title
+            existing_practical.instructions = incoming_practical.instructions
+            existing_practical.format_type = incoming_practical.format_type
+            existing_practical.max_score = incoming_practical.max_score
+            existing_practical.variants = list(incoming_practical.variants)
+            existing_practical.grading_rules = list(incoming_practical.grading_rules)
+        return
+
+    if existing_practical is None:
+        return
+
+    submissions = list(existing_practical.submissions)
+    if submissions and not allow_destructive_module_delete:
+        logger.warning(
+            "Пропущено видалення практичної роботи '%s' (курс='%s', модуль=%d): "
+            "знайдено %d здач студентів. Для примусового видалення передайте "
+            "--allow-destructive-module-delete.",
+            existing_practical.title,
+            course_slug.value,
+            existing_module.order_index,
+            len(submissions),
+        )
+        return
+
+    for submission in submissions:
+        if submission.file_path is not None and submission.file_path.strip():
+            submission_file_paths_to_delete.append(submission.file_path)
+
+    existing_module.practical = None
+    await session.delete(existing_practical)
+
+
+async def _sync_course_in_place(
+    session: AsyncSession,
+    *,
+    existing_course: Course,
+    incoming_course: Course,
+    allow_destructive_module_delete: bool,
+    submission_file_paths_to_delete: list[str],
+) -> None:
+    """Неруйнівно оновлює курс, модулі, тести й практичні in-place за (course_id, order_index)."""
+    existing_course.title = incoming_course.title
+    existing_course.description = incoming_course.description
+
+    existing_modules_by_order: dict[int, Module] = {}
+    duplicate_existing_modules: list[Module] = []
+    for existing_mod in sorted(
+        existing_course.modules,
+        key=lambda mod: (mod.order_index, str(mod.id)),
+    ):
+        if existing_mod.order_index not in existing_modules_by_order:
+            existing_modules_by_order[existing_mod.order_index] = existing_mod
+        else:
+            duplicate_existing_modules.append(existing_mod)
+
+    incoming_modules = sorted(
+        incoming_course.modules,
+        key=lambda mod: mod.order_index,
+    )
+    incoming_order_indices: set[int] = set()
+
+    for incoming_mod in incoming_modules:
+        incoming_order_indices.add(incoming_mod.order_index)
+        matched_mod = existing_modules_by_order.get(incoming_mod.order_index)
+        if matched_mod is None:
+            new_module = Module(
+                order_index=incoming_mod.order_index,
+                title=incoming_mod.title,
+                lecture_content=incoming_mod.lecture_content,
+            )
+            new_module.quiz_questions = [
+                QuizQuestion(
+                    question_text=question.question_text,
+                    options=list(question.options),
+                    correct_option_index=question.correct_option_index,
+                )
+                for question in incoming_mod.quiz_questions
+            ]
+            if incoming_mod.practical is not None:
+                new_module.practical = Practical(
+                    title=incoming_mod.practical.title,
+                    instructions=incoming_mod.practical.instructions,
+                    format_type=incoming_mod.practical.format_type,
+                    max_score=incoming_mod.practical.max_score,
+                    variants=list(incoming_mod.practical.variants),
+                    grading_rules=list(incoming_mod.practical.grading_rules),
+                )
+            existing_course.modules.append(new_module)
+            continue
+
+        matched_mod.title = incoming_mod.title
+        matched_mod.lecture_content = incoming_mod.lecture_content
+        _sync_quiz_questions_in_place(matched_mod, incoming_mod.quiz_questions)
+        await _sync_practical_in_place(
+            session,
+            course_slug=existing_course.slug,
+            existing_module=matched_mod,
+            incoming_practical=incoming_mod.practical,
+            allow_destructive_module_delete=allow_destructive_module_delete,
+            submission_file_paths_to_delete=submission_file_paths_to_delete,
+        )
+
+    extra_modules: list[Module] = [
+        mod
+        for order_idx, mod in existing_modules_by_order.items()
+        if order_idx not in incoming_order_indices
+    ]
+    extra_modules.extend(duplicate_existing_modules)
+
+    for extra_mod in extra_modules:
+        quiz_attempts_count = len(extra_mod.quiz_attempts)
+        submissions = (
+            list(extra_mod.practical.submissions)
+            if extra_mod.practical is not None
+            else []
+        )
+        submissions_count = len(submissions)
+        if (
+            quiz_attempts_count > 0 or submissions_count > 0
+        ) and not allow_destructive_module_delete:
+            logger.warning(
+                "Пропущено видалення зайвого модуля order_index=%d ('%s') курсу '%s': "
+                "знайдено прогрес студентів (quiz_attempts=%d, submissions=%d). "
+                "Для примусового видалення передайте --allow-destructive-module-delete.",
+                extra_mod.order_index,
+                extra_mod.title,
+                existing_course.slug.value,
+                quiz_attempts_count,
+                submissions_count,
+            )
+            continue
+
+        for submission in submissions:
+            if submission.file_path is not None and submission.file_path.strip():
+                submission_file_paths_to_delete.append(submission.file_path)
+
+        if extra_mod in existing_course.modules:
+            existing_course.modules.remove(extra_mod)
+        await session.delete(extra_mod)
+
+
 async def seed_database(
     session: AsyncSession,
     *,
     sync_courses: bool = False,
+    allow_destructive_module_delete: bool = False,
     content_dir: Path | None = None,
+    upload_dir: Path | None = None,
 ) -> SeedSummary:
-    """Ідемпотентно наповнює БД групою, користувачами та 4 курсами (або синхронізує курси)."""
+    """Ідемпотентно наповнює БД групою, користувачами та 4 курсами (або неруйнівно синхронізує)."""
     bundle = build_seed_bundle(content_dir=content_dir)
     summary = summarize_bundle(bundle)
 
@@ -338,10 +583,12 @@ async def seed_database(
     if persisted_teacher is None:
         raise RuntimeError("Не вдалося створити або знайти обліковий запис викладача.")
 
+    submission_file_paths_to_delete: list[str] = []
+
     for course in bundle.courses:
         stmt = select(Course).where(Course.slug == course.slug)
         if sync_courses:
-            stmt = stmt.options(
+            stmt = stmt.execution_options(populate_existing=True).options(
                 selectinload(Course.modules).selectinload(Module.quiz_questions),
                 selectinload(Course.modules)
                 .selectinload(Module.practical)
@@ -355,18 +602,25 @@ async def seed_database(
             course.teacher = persisted_teacher
             session.add(course)
         elif sync_courses:
-            existing_course.title = course.title
-            existing_course.description = course.description
-            existing_course.modules.clear()
-            await session.flush()
-
-            fresh_modules = list(course.modules)
-            course.modules.clear()
-            for module in fresh_modules:
-                module.course = existing_course
-                existing_course.modules.append(module)
+            await _sync_course_in_place(
+                session,
+                existing_course=existing_course,
+                incoming_course=course,
+                allow_destructive_module_delete=allow_destructive_module_delete,
+                submission_file_paths_to_delete=submission_file_paths_to_delete,
+            )
 
     await session.commit()
+
+    if submission_file_paths_to_delete:
+        effective_upload_dir = (
+            upload_dir if upload_dir is not None else settings.UPLOADS_DIR
+        )
+        delete_submission_files_for_paths(
+            submission_file_paths_to_delete,
+            upload_dir=effective_upload_dir,
+        )
+
     return summary
 
 
@@ -374,6 +628,7 @@ async def run_seed(
     *,
     dry_run: bool = False,
     sync_courses: bool = False,
+    allow_destructive_module_delete: bool = False,
 ) -> SeedSummary:
     """Запускає ініціалізацію даних у режимі запису/синхронізації БД або --dry-run."""
     if dry_run:
@@ -381,7 +636,11 @@ async def run_seed(
         return summarize_bundle(bundle)
 
     async with AsyncSessionLocal() as session:
-        return await seed_database(session, sync_courses=sync_courses)
+        return await seed_database(
+            session,
+            sync_courses=sync_courses,
+            allow_destructive_module_delete=allow_destructive_module_delete,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -398,8 +657,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--sync-courses",
         action="store_true",
         help=(
-            "Оновити існуючі курси в БД з актуального JSON (перезаписує модулі, "
-            "тести й практичні, зберігаючи користувачів та академічні групи)."
+            "Неруйнівно синхронізувати існуючі курси в БД з актуального JSON "
+            "(оновлює модулі, тести й практичні in-place зі збереженням користувачів, "
+            "груп, спроб тестів та здач з оцінками студентів)."
+        ),
+    )
+    parser.add_argument(
+        "--allow-destructive-module-delete",
+        action="store_true",
+        help=(
+            "Дозволити разом із --sync-courses видаляти зайві модулі або практичні, "
+            "вилучені з JSON, навіть якщо за ними є спроби тестів чи здачі студентів "
+            "(із безпечним очищенням пов'язаних файлів у uploads/)."
         ),
     )
     args = parser.parse_args(argv)
@@ -408,6 +677,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_seed(
             dry_run=bool(args.dry_run),
             sync_courses=bool(args.sync_courses),
+            allow_destructive_module_delete=bool(args.allow_destructive_module_delete),
         )
     )
     if args.dry_run:

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import uuid
 from decimal import Decimal
@@ -20,6 +21,7 @@ from app.models.course import (
     CourseSlug,
     Module,
     Practical,
+    PracticalFormat,
     QuizQuestion,
 )
 from app.models.progress import QuizAttempt, Submission
@@ -955,3 +957,438 @@ async def test_delete_module_and_practical_rbac_and_not_found(
         )
         assert prac_404.status_code == 404
         assert prac_404.json()["code"] == "PRACTICAL_NOT_FOUND"
+
+
+def _copy_course_content_dir(tmp_path: Path) -> Path:
+    """Копіює JSON-файли 4 курсів у тимчасову директорію для безпечного тестування sync."""
+    target_dir = tmp_path / "courses_content"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for slug in ALLOWED_COURSE_SLUGS:
+        src = settings.COURSE_CONTENT_DIR / f"{slug.value}.json"
+        (target_dir / src.name).write_text(
+            src.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    return target_dir
+
+
+@pytest.mark.asyncio
+async def test_seed_sync_courses_upserts_in_place_and_preserves_student_progress(
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє неруйнівний in-place upsert у --sync-courses зі збереженням оцінок і здач."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+
+    word_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    assert isinstance(word_course, Course)
+    original_course_id = word_course.id
+    original_teacher_id = word_course.teacher_id
+
+    first_mod, first_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id)
+            .order_by(Module.order_index.asc())
+            .limit(1)
+        )
+    ).one()
+    assert isinstance(first_mod, Module)
+    assert isinstance(first_prac, Practical)
+    original_module_id = first_mod.id
+    original_practical_id = first_prac.id
+
+    original_question_ids = [
+        row[0]
+        for row in (
+            await db_session.execute(
+                select(QuizQuestion.id).where(QuizQuestion.module_id == first_mod.id)
+            )
+        ).all()
+    ]
+    assert len(original_question_ids) >= 1
+
+    # Створюємо реальну спробу тесту та здачу практичної з ручною оцінкою й коментарем
+    attempt = QuizAttempt(
+        student_id=student1.id,
+        module_id=first_mod.id,
+        score_percent=Decimal("91.50"),
+        passed=True,
+    )
+    db_session.add(attempt)
+
+    uploaded_file = settings.UPLOADS_DIR / "student1_preserved_work.docx"
+    build_sample_docx(uploaded_file, creator="Student One")
+    submission = Submission(
+        practical_id=first_prac.id,
+        student_id=student1.id,
+        variant_index=0,
+        file_path=str(uploaded_file),
+        auto_score=Decimal("7.50"),
+        final_score=Decimal("9.25"),
+        grading_report={"score": 7.5, "max_score": 10.0, "criteria": []},
+        teacher_comment="Враховано додаткове форматування та охайність таблиці.",
+    )
+    db_session.add(submission)
+    await db_session.commit()
+
+    attempt_id = attempt.id
+    submission_id = submission.id
+
+    # Готуємо модифікований JSON курсу Word: новий заголовок, лекція та grading_rules
+    custom_content_dir = _copy_course_content_dir(tmp_path)
+    word_json_path = custom_content_dir / "word.json"
+    word_data: dict[str, Any] = json.loads(word_json_path.read_text(encoding="utf-8"))
+    word_data["title"] = "Microsoft Word — Оновлена редакція 2026"
+    word_data["description"] = "Оновлений опис навчальної дисципліни Word."
+
+    target_json_module = next(
+        mod for mod in word_data["modules"] if mod["order_index"] == first_mod.order_index
+    )
+    updated_module_title = "Оновлена тема 1: Форматування сторінки та тексту"
+    updated_lecture = "# Оновлена лекція\n\nРозширений методичний матеріал для першого модуля."
+    updated_practical_title = "Практична робота №1 (оновлена)"
+    updated_rules: list[dict[str, object]] = [
+        {
+            "id": "sync_updated_margins",
+            "type": "docx_page_margins",
+            "target": "section[0]",
+            "expected": "left=30,right=15,top=20,bottom=20",
+            "points": 5.0,
+            "description": "Оновлена перевірка полів сторінки",
+        },
+        {
+            "id": "sync_updated_font",
+            "type": "docx_font",
+            "target": "all_paragraphs",
+            "expected": "Times New Roman, 14pt",
+            "points": 5.0,
+            "description": "Оновлена перевірка шрифту",
+        },
+    ]
+    target_json_module["title"] = updated_module_title
+    target_json_module["lecture_content"] = updated_lecture
+    target_json_module["practical"]["title"] = updated_practical_title
+    target_json_module["practical"]["grading_rules"] = updated_rules
+    word_json_path.write_text(
+        json.dumps(word_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 1. Запускаємо неруйнівну синхронізацію з незмінними питаннями тесту
+    # justified Any: SqliteAsyncSessionAdapter structural duck-typing for AsyncSession
+    typed_db: Any = db_session
+    await seed_database(typed_db, sync_courses=True, content_dir=custom_content_dir)
+
+    synced_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    assert synced_course.id == original_course_id
+    assert synced_course.teacher_id == original_teacher_id
+    assert synced_course.title == "Microsoft Word — Оновлена редакція 2026"
+    assert synced_course.description == "Оновлений опис навчальної дисципліни Word."
+
+    synced_mod = (
+        await db_session.execute(
+            select(Module).where(
+                Module.course_id == original_course_id,
+                Module.order_index == first_mod.order_index,
+            )
+        )
+    ).scalar_one()
+    assert synced_mod.id == original_module_id
+    assert synced_mod.title == updated_module_title
+    assert synced_mod.lecture_content == updated_lecture
+
+    synced_prac = (
+        await db_session.execute(
+            select(Practical).where(Practical.module_id == original_module_id)
+        )
+    ).scalar_one()
+    assert synced_prac.id == original_practical_id
+    assert synced_prac.title == updated_practical_title
+    assert [rule["id"] for rule in synced_prac.grading_rules] == [
+        "sync_updated_margins",
+        "sync_updated_font",
+    ]
+
+    # Ідентичні питання тесту не перестворювалися (ID збереглися)
+    question_ids_after_unchanged_sync = [
+        row[0]
+        for row in (
+            await db_session.execute(
+                select(QuizQuestion.id).where(QuizQuestion.module_id == original_module_id)
+            )
+        ).all()
+    ]
+    assert set(question_ids_after_unchanged_sync) == set(original_question_ids)
+
+    # Усі спроби тесту, здачі, ручні оцінки, коментарі та файл на диску збереглися
+    preserved_attempt = (
+        await db_session.execute(select(QuizAttempt).where(QuizAttempt.id == attempt_id))
+    ).scalar_one_or_none()
+    assert preserved_attempt is not None
+    assert preserved_attempt.module_id == original_module_id
+    assert preserved_attempt.score_percent == Decimal("91.50")
+    assert preserved_attempt.passed is True
+
+    preserved_submission = (
+        await db_session.execute(select(Submission).where(Submission.id == submission_id))
+    ).scalar_one_or_none()
+    assert preserved_submission is not None
+    assert preserved_submission.practical_id == original_practical_id
+    assert preserved_submission.auto_score == Decimal("7.50")
+    assert preserved_submission.final_score == Decimal("9.25")
+    assert (
+        preserved_submission.teacher_comment
+        == "Враховано додаткове форматування та охайність таблиці."
+    )
+    assert preserved_submission.file_path == str(uploaded_file)
+    assert uploaded_file.is_file()
+
+    # 2. Змінюємо одне питання тесту й додаємо нове -> питання оновлюються, QuizAttempt зберігається
+    target_json_module["quiz_questions"][0]["question_text"] = "Оновлений текст першого питання?"
+    target_json_module["quiz_questions"].append(
+        {
+            "question_text": "Нове контрольне питання після sync?",
+            "options": ["Варіант А", "Варіант Б"],
+            "correct_option_index": 1,
+        }
+    )
+    word_json_path.write_text(
+        json.dumps(word_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    await seed_database(typed_db, sync_courses=True, content_dir=custom_content_dir)
+
+    updated_questions = list(
+        (
+            await db_session.execute(
+                select(QuizQuestion).where(QuizQuestion.module_id == original_module_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    question_texts = {question.question_text for question in updated_questions}
+    assert "Оновлений текст першого питання?" in question_texts
+    assert "Нове контрольне питання після sync?" in question_texts
+    assert len(updated_questions) == len(original_question_ids) + 1
+
+    attempt_after_quiz_update = (
+        await db_session.execute(select(QuizAttempt).where(QuizAttempt.id == attempt_id))
+    ).scalar_one_or_none()
+    assert attempt_after_quiz_update is not None
+    assert attempt_after_quiz_update.module_id == original_module_id
+
+
+@pytest.mark.asyncio
+async def test_seed_sync_courses_protects_extra_modules_and_practicals_with_student_progress(
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Перевіряє захист зайвих модулів/практичних зі здачами та прапорець примусового видалення."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    word_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    assert isinstance(word_course, Course)
+
+    # 1. Зайвий модуль #99 зі спробою тесту, практичною, файлом у UPLOADS_DIR та зовнішнім файлом
+    protected_extra_mod = Module(
+        course_id=word_course.id,
+        order_index=99,
+        title="Архівний модуль із роботами студентів",
+        lecture_content="Лекція архівного модуля",
+    )
+    protected_extra_prac = Practical(
+        title="Архівна практична",
+        instructions="Інструкція архівної практичної",
+        format_type=PracticalFormat.DOCX,
+        max_score=Decimal("10.00"),
+        variants=[],
+        grading_rules=[
+            {
+                "id": "archive_r1",
+                "type": "docx_table_exists",
+                "target": "document",
+                "expected": "true",
+                "points": 10.0,
+                "description": "Наявність таблиці",
+            }
+        ],
+    )
+    protected_extra_mod.practical = protected_extra_prac
+    db_session.add(protected_extra_mod)
+
+    # 2. Зайвий модуль #98 БЕЗ жодного прогресу студентів -> має безпечно видалитися
+    empty_extra_mod = Module(
+        course_id=word_course.id,
+        order_index=98,
+        title="Порожній зайвий модуль",
+        lecture_content="Лекція порожнього модуля",
+    )
+    db_session.add(empty_extra_mod)
+    await db_session.flush()
+
+    extra_mod_file = settings.UPLOADS_DIR / "extra_module_submission.docx"
+    build_sample_docx(extra_mod_file, creator="Student One")
+    outside_secret_file = tmp_path / "outside_seed_secret.docx"
+    outside_secret_file.write_bytes(b"keep-outside-file")
+
+    extra_attempt = QuizAttempt(
+        student_id=student1.id,
+        module_id=protected_extra_mod.id,
+        score_percent=Decimal("85.00"),
+        passed=True,
+    )
+    extra_submission = Submission(
+        practical_id=protected_extra_prac.id,
+        student_id=student1.id,
+        variant_index=0,
+        file_path=str(extra_mod_file),
+        auto_score=Decimal("8.00"),
+        final_score=Decimal("8.50"),
+        grading_report={},
+        teacher_comment="Здача в архівному модулі",
+    )
+    extra_outside_submission = Submission(
+        practical_id=protected_extra_prac.id,
+        student_id=student1.id,
+        variant_index=0,
+        file_path=str(outside_secret_file),
+        auto_score=Decimal("6.00"),
+        final_score=Decimal("6.00"),
+        grading_report={},
+    )
+    db_session.add_all([extra_attempt, extra_submission, extra_outside_submission])
+
+    # 3. Існуючі модулі #2 (зі здачею) і #3 (без здач), де в JSON прибираємо practical=None
+    mod2, prac2 = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 2)
+        )
+    ).one()
+    mod3, prac3 = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 3)
+        )
+    ).one()
+    assert isinstance(mod2, Module)
+    assert isinstance(prac2, Practical)
+    assert isinstance(mod3, Module)
+    assert isinstance(prac3, Practical)
+
+    mod2_file = settings.UPLOADS_DIR / "mod2_protected_practical.docx"
+    build_sample_docx(mod2_file, creator="Student One")
+    mod2_submission = Submission(
+        practical_id=prac2.id,
+        student_id=student1.id,
+        variant_index=0,
+        file_path=str(mod2_file),
+        auto_score=Decimal("9.00"),
+        final_score=Decimal("9.50"),
+        grading_report={},
+        teacher_comment="Оцінка збережена попри practical=None у JSON",
+    )
+    db_session.add(mod2_submission)
+    await db_session.commit()
+
+    protected_extra_mod_id = protected_extra_mod.id
+    protected_extra_prac_id = protected_extra_prac.id
+    empty_extra_mod_id = empty_extra_mod.id
+    prac2_id = prac2.id
+    prac3_id = prac3.id
+
+    custom_content_dir = _copy_course_content_dir(tmp_path)
+    word_json_path = custom_content_dir / "word.json"
+    word_data: dict[str, Any] = json.loads(word_json_path.read_text(encoding="utf-8"))
+    for mod_json in word_data["modules"]:
+        if mod_json["order_index"] in {2, 3}:
+            mod_json["practical"] = None
+    word_json_path.write_text(
+        json.dumps(word_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # Без --allow-destructive-module-delete: об'єкти з прогресом захищені, порожні очищуються
+    # justified Any: SqliteAsyncSessionAdapter structural duck-typing for AsyncSession
+    typed_db: Any = db_session
+    with caplog.at_level(logging.WARNING, logger="app.seed"):
+        await seed_database(typed_db, sync_courses=True, content_dir=custom_content_dir)
+
+    assert (
+        await db_session.execute(
+            select(Module).where(Module.id == protected_extra_mod_id)
+        )
+    ).scalar_one_or_none() is not None
+    assert (
+        await db_session.execute(
+            select(Practical).where(Practical.id == protected_extra_prac_id)
+        )
+    ).scalar_one_or_none() is not None
+    assert (
+        await db_session.execute(
+            select(Submission).where(Submission.id == extra_submission.id)
+        )
+    ).scalar_one_or_none() is not None
+    assert extra_mod_file.is_file()
+
+    # Порожній зайвий модуль #98 без прогресу видалено автоматично
+    assert (
+        await db_session.execute(select(Module).where(Module.id == empty_extra_mod_id))
+    ).scalar_one_or_none() is None
+
+    # Практична модуля #2 зі здачею збережена, а порожня практична модуля #3 безпечно видалена
+    assert (
+        await db_session.execute(select(Practical).where(Practical.id == prac2_id))
+    ).scalar_one_or_none() is not None
+    assert (
+        await db_session.execute(
+            select(Submission).where(Submission.id == mod2_submission.id)
+        )
+    ).scalar_one_or_none() is not None
+    assert mod2_file.is_file()
+    assert (
+        await db_session.execute(select(Practical).where(Practical.id == prac3_id))
+    ).scalar_one_or_none() is None
+
+    warning_messages = [record.getMessage() for record in caplog.records]
+    assert any("order_index=99" in msg for msg in warning_messages)
+    assert any("модуль=2" in msg for msg in warning_messages)
+
+    # Із явним allow_destructive_module_delete=True: зайвий модуль і практична видаляються,
+    # а файли з UPLOADS_DIR очищуються після commit (зовнішній файл не зачеплено)
+    await seed_database(
+        typed_db,
+        sync_courses=True,
+        allow_destructive_module_delete=True,
+        content_dir=custom_content_dir,
+    )
+
+    assert (
+        await db_session.execute(
+            select(Module).where(Module.id == protected_extra_mod_id)
+        )
+    ).scalar_one_or_none() is None
+    assert (
+        await db_session.execute(
+            select(Practical).where(Practical.id == prac2_id)
+        )
+    ).scalar_one_or_none() is None
+    assert (
+        await db_session.execute(select(Module).where(Module.id == mod2.id))
+    ).scalar_one_or_none() is not None
+
+    assert not extra_mod_file.exists()
+    assert not mod2_file.exists()
+    assert outside_secret_file.is_file()
