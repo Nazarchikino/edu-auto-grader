@@ -31,7 +31,11 @@ from app.schemas.grading import (
     GradingRule,
     GradingRulesUpdateRequest,
 )
-from app.schemas.submission import ManualGradeUpdateRequest, SubmissionRead
+from app.schemas.submission import (
+    MAX_HTML_CODE_LENGTH,
+    ManualGradeUpdateRequest,
+    SubmissionRead,
+)
 from app.services.export_service import XLSX_MEDIA_TYPE, build_content_disposition
 from app.services.quiz_service import QuizService, resolve_student_variant
 from app.services.retention_service import resolve_submission_file_path
@@ -405,6 +409,15 @@ class SubmissionService:
             raise InvalidFileFormatError(
                 "Для здачі HTML-практичної роботи необхідно передати непорожній вихідний код.",
                 context={"format_type": practical.format_type.value},
+            )
+
+        if len(resolved_code) > MAX_HTML_CODE_LENGTH:
+            raise DomainError(
+                "Довжина вихідного HTML-коду перевищує максимально допустимі "
+                f"{MAX_HTML_CODE_LENGTH} символів.",
+                code="RAW_CODE_TOO_LONG",
+                status_code=422,
+                context={"max_length": MAX_HTML_CODE_LENGTH},
             )
 
         file_hash = compute_submission_hash(raw_code=resolved_code)

@@ -1,3 +1,4 @@
+import io
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -6,16 +7,20 @@ from urllib.parse import quote
 
 import openpyxl  # type: ignore[import-untyped]
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 from pydantic import ValidationError
 from sqlalchemy import select
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.core.config import Settings, settings
 from app.core.security import hash_password
+from app.core.upload_utils import read_upload_file_limited
 from app.models.course import Course, CourseSlug, Module, Practical
 from app.models.progress import QuizAttempt, Submission
 from app.models.user import AcademicGroup, User, UserRole
+from app.schemas.submission import MAX_HTML_CODE_LENGTH, HtmlSubmissionRequest
 from app.services.retention_service import cleanup_expired_submissions
 from tests.conftest import (
     SqliteAsyncSessionAdapter,
@@ -1143,3 +1148,141 @@ async def test_lifespan_starts_and_cancels_retention_background_task(
         await asyncio.wait_for(started_event.wait(), timeout=2.0)
 
     assert cancelled_flag is True
+
+
+async def test_read_upload_file_limited_stops_reading_chunks_early() -> None:
+    """Перевіряє, що read_upload_file_limited читає чанками та зупиняється при перевищенні."""
+
+    class _CountingUploadFile(StarletteUploadFile):
+        def __init__(self, payload: bytes) -> None:
+            super().__init__(file=io.BytesIO(payload), filename="large.docx")
+            self.read_calls = 0
+
+        async def read(self, size: int = -1) -> bytes:
+            self.read_calls += 1
+            return await super().read(size)
+
+    payload = b"x" * (512 * 1024)
+    upload = _CountingUploadFile(payload)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await read_upload_file_limited(
+                upload,
+                max_bytes=128 * 1024,
+                chunk_size=65_536,
+            )
+    finally:
+        await upload.close()
+
+    assert exc_info.value.status_code == 413
+    assert "МБ" in str(exc_info.value.detail)
+    # 2 чанки по 64 КБ = 128 КБ (у межах ліміту), 3-й чанк перевищує ліміт -> раннє відсікання
+    assert upload.read_calls == 3
+
+
+async def test_submit_practical_returns_413_when_file_exceeds_size_limit(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє HTTP 413 при перевищенні ліміту розміру для Office та Access практичних."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    headers = make_auth_headers(student1.id, student1.role)
+
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    _, access_mod, access_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.ACCESS,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_mod.id)
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=access_mod.id)
+
+    monkeypatch.setattr(settings, "MAX_OFFICE_UPLOAD_BYTES", 1024)
+    monkeypatch.setattr(settings, "MAX_ACCDB_UPLOAD_BYTES", 2048)
+
+    oversized_docx = b"A" * 2048
+    word_resp = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=headers,
+        files={
+            "file": (
+                "too_big.docx",
+                oversized_docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert word_resp.status_code == 413
+    assert "МБ" in word_resp.json()["detail"]
+
+    # .accdb використовує окремий ліміт MAX_ACCDB_UPLOAD_BYTES (2048 > 1024)
+    oversized_accdb = b"B" * 3072
+    accdb_too_big_resp = await async_client.post(
+        f"/api/v1/practicals/{access_prac.id}/submit",
+        headers=headers,
+        files={
+            "file": (
+                "too_big.accdb",
+                oversized_accdb,
+                "application/octet-stream",
+            )
+        },
+    )
+    assert accdb_too_big_resp.status_code == 413
+    assert "МБ" in accdb_too_big_resp.json()["detail"]
+
+    # Валідний .accdb розміром > MAX_OFFICE_UPLOAD_BYTES, але <= MAX_ACCDB_UPLOAD_BYTES приймається
+    sample_accdb = build_sample_accdb(tmp_path / "valid_limit.accdb").read_bytes()
+    monkeypatch.setattr(settings, "MAX_OFFICE_UPLOAD_BYTES", 1024)
+    monkeypatch.setattr(settings, "MAX_ACCDB_UPLOAD_BYTES", len(sample_accdb) + 512)
+    accdb_ok_resp = await async_client.post(
+        f"/api/v1/practicals/{access_prac.id}/submit",
+        headers=headers,
+        files={
+            "file": (
+                "valid_limit.accdb",
+                sample_accdb,
+                "application/octet-stream",
+            )
+        },
+    )
+    assert accdb_ok_resp.status_code == 201
+
+
+async def test_submit_html_returns_422_when_raw_code_exceeds_max_length(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє HTTP 422 при відправці HTML-коду довжиною понад 250 000 символів."""
+    oversized_html = "a" * (MAX_HTML_CODE_LENGTH + 1)
+
+    with pytest.raises(ValidationError):
+        HtmlSubmissionRequest(raw_code=oversized_html)
+
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    headers = make_auth_headers(student1.id, student1.role)
+    _, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
+
+    json_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=headers,
+        json={"raw_code": oversized_html},
+    )
+    assert json_resp.status_code == 422
+    assert json_resp.json()["code"] == "RAW_CODE_TOO_LONG"
+
+    form_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=headers,
+        data={"raw_code": oversized_html},
+    )
+    assert form_resp.status_code == 422
+    assert form_resp.json()["code"] == "RAW_CODE_TOO_LONG"

@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 
 import openpyxl  # type: ignore[import-untyped]
+from defusedxml import DefusedXmlException
 from openpyxl.cell.cell import Cell  # type: ignore[import-untyped]
 from openpyxl.utils.cell import (  # type: ignore[import-untyped]
     column_index_from_string,
@@ -16,6 +17,7 @@ from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untype
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.graders.base import BaseGrader
+from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import PracticalFormat
 from app.schemas.grading import (
     CriterionResult,
@@ -99,6 +101,7 @@ class XlsxGrader(BaseGrader):
     ) -> GradingReport:
         """Виконує перевірку книги .xlsx у режимах data_only=False та data_only=True."""
         resolved_path = self.require_file_path(file_path, expected_suffix=".xlsx")
+        validate_zip_archive_safety(resolved_path)
         formula_wb, value_wb = self._open_workbooks(resolved_path)
 
         try:
@@ -136,6 +139,18 @@ class XlsxGrader(BaseGrader):
             if formula_wb is not None:
                 formula_wb.close()
             raise
+        except DefusedXmlException as exc:
+            if formula_wb is not None:
+                formula_wb.close()
+            raise GradingError(
+                f"Книга Excel '{file_path.name}' містить небезпечні XML-конструкції "
+                "(DTD або сутності).",
+                code="UNSAFE_XML_CONTENT",
+                context={
+                    "file_name": file_path.name,
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
         except (
             InvalidFileException,
             zipfile.BadZipFile,

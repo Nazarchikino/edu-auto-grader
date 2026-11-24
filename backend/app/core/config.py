@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     COURSE_MEDIA_DIR: Path = _BACKEND_ROOT / "content" / "media"
     QUIZ_PASS_THRESHOLD_PERCENT: float = 70.0
 
+    MAX_OFFICE_UPLOAD_BYTES: int = Field(default=15 * 1024 * 1024, ge=1)
+    MAX_ACCDB_UPLOAD_BYTES: int = Field(default=30 * 1024 * 1024, ge=1)
+    MAX_IMPORT_UPLOAD_BYTES: int = Field(default=5 * 1024 * 1024, ge=1)
+
+    MAX_ZIP_ENTRIES: int = Field(default=500, ge=1)
+    MAX_ZIP_UNCOMPRESSED_BYTES: int = Field(default=50 * 1024 * 1024, ge=1)
+    MAX_ZIP_SINGLE_ENTRY_BYTES: int = Field(default=20 * 1024 * 1024, ge=1)
+    MAX_ZIP_COMPRESSION_RATIO: float = Field(default=100.0, gt=0.0)
+
     @field_validator("COURSE_CONTENT_DIR", "COURSE_MEDIA_DIR", mode="after")
     @classmethod
     def _validate_content_paths(cls, value: Path) -> Path:

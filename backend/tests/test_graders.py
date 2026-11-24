@@ -1,4 +1,5 @@
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -6,22 +7,29 @@ import openpyxl  # type: ignore[import-untyped]
 import pytest
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+from app.core.config import settings
 from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
 from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
 from app.graders.html_grader import HtmlGrader
 from app.graders.metadata import (
+    CORE_XML_ARCHIVE_PATH,
     compute_code_sha256,
     compute_file_sha256,
     evaluate_plagiarism,
+    extract_core_xml_metadata,
     extract_document_metadata,
+    parse_core_xml_bytes,
+    validate_zip_archive_safety,
 )
 from app.graders.xlsx_grader import XlsxGrader
 from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import ExtractedMetadata, GradingRule, GradingRuleType
 from app.seed import build_seed_bundle
+from app.services.student_import_service import parse_docx_students
 from tests.conftest import (
+    _replace_zip_member,
     build_sample_accdb,
     build_sample_docx,
     build_sample_xlsx,
@@ -1174,3 +1182,98 @@ def test_metadata_extraction_and_plagiarism_detection(tmp_path: Path) -> None:
     code_1 = "<header>\n  <h1>Розклад</h1>\n</header>"
     code_2 = "  <header>   <h1>Розклад</h1> </header>  "
     assert compute_code_sha256(code_1) == compute_code_sha256(code_2)
+
+
+def test_zip_bomb_protection_blocks_high_ratio_many_entries_and_oversized_uncompressed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє блокування Zip-бомб за коефіцієнтом стиснення, кількістю й розміром файлів."""
+    # 1. ZIP із високим коефіцієнтом стиснення нулів (> 100x при file_size > 1 МБ)
+    ratio_bomb_docx = tmp_path / "ratio_bomb.docx"
+    with zipfile.ZipFile(ratio_bomb_docx, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", b"\x00" * (2 * 1024 * 1024))
+
+    ratio_bomb_xlsx = tmp_path / "ratio_bomb.xlsx"
+    ratio_bomb_xlsx.write_bytes(ratio_bomb_docx.read_bytes())
+
+    with pytest.raises(GradingError) as exc_direct:
+        validate_zip_archive_safety(ratio_bomb_docx)
+    assert exc_direct.value.status_code == 422
+    assert exc_direct.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_meta:
+        extract_core_xml_metadata(ratio_bomb_docx)
+    assert exc_meta.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_docx:
+        DocxGrader().evaluate(file_path=ratio_bomb_docx, rules=[], variant_data={})
+    assert exc_docx.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_xlsx:
+        XlsxGrader().evaluate(file_path=ratio_bomb_xlsx, rules=[], variant_data={})
+    assert exc_xlsx.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_import:
+        parse_docx_students(ratio_bomb_docx.read_bytes())
+    assert exc_import.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    # 2. ZIP із понад 500 записами (> MAX_ZIP_ENTRIES)
+    many_entries_zip = tmp_path / "many_entries.docx"
+    with zipfile.ZipFile(many_entries_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx in range(settings.MAX_ZIP_ENTRIES + 1):
+            zf.writestr(f"entry_{idx:04d}.txt", b"ok")
+
+    with pytest.raises(GradingError) as exc_entries:
+        validate_zip_archive_safety(many_entries_zip)
+    assert exc_entries.value.status_code == 422
+    assert exc_entries.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    # 3. Перевищення MAX_ZIP_SINGLE_ENTRY_BYTES та MAX_ZIP_UNCOMPRESSED_BYTES
+    sized_zip = tmp_path / "sized_entries.docx"
+    with zipfile.ZipFile(sized_zip, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("part1.bin", b"A" * 1024)
+        zf.writestr("part2.bin", b"B" * 1024)
+
+    monkeypatch.setattr(settings, "MAX_ZIP_SINGLE_ENTRY_BYTES", 512)
+    with pytest.raises(GradingError) as exc_single:
+        validate_zip_archive_safety(sized_zip)
+    assert exc_single.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    monkeypatch.setattr(settings, "MAX_ZIP_SINGLE_ENTRY_BYTES", 2048)
+    monkeypatch.setattr(settings, "MAX_ZIP_UNCOMPRESSED_BYTES", 1500)
+    with pytest.raises(GradingError) as exc_total:
+        validate_zip_archive_safety(sized_zip)
+    assert exc_total.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+
+def test_core_xml_parser_rejects_xml_entity_expansion_billion_laughs(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє безпечне відхилення XML Entity Expansion (<!DOCTYPE lolz ...>) через defusedxml."""
+    billion_laughs_xml = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b"<!DOCTYPE lolz [\n"
+        b'  <!ENTITY lol "lol">\n'
+        b'  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">\n'
+        b'  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">\n'
+        b'  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">\n'
+        b"]>\n"
+        b'<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"'
+        b' xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        b"  <dc:creator>&lol4;</dc:creator>\n"
+        b"</cp:coreProperties>\n"
+    )
+
+    with pytest.raises(GradingError) as exc_direct:
+        parse_core_xml_bytes(billion_laughs_xml)
+    assert exc_direct.value.status_code == 422
+    assert exc_direct.value.code == "UNSAFE_XML_CONTENT"
+
+    malicious_docx = build_sample_docx(tmp_path / "xxe_core.docx")
+    _replace_zip_member(malicious_docx, CORE_XML_ARCHIVE_PATH, billion_laughs_xml)
+
+    with pytest.raises(GradingError) as exc_archive:
+        extract_core_xml_metadata(malicious_docx)
+    assert exc_archive.value.status_code == 422
+    assert exc_archive.value.code == "UNSAFE_XML_CONTENT"

@@ -12,8 +12,11 @@ from docx.opc.exceptions import PackageNotFoundError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import DomainError, InvalidFileFormatError
 from app.core.security import hash_password
+from app.core.upload_utils import format_size_limit_mb
+from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import Practical
 from app.models.user import AcademicGroup, User, UserRole
 from app.schemas.auth import (
@@ -26,7 +29,6 @@ from app.services.quiz_service import calculate_variant_index
 DEFAULT_COLLEGE_EMAIL_DOMAIN: Final[str] = "kpefk.com.ua"
 DEFAULT_TOTAL_VARIANTS: Final[int] = 3
 TEMP_PASSWORD_LENGTH: Final[int] = 8
-MAX_IMPORT_FILE_SIZE_BYTES: Final[int] = 10 * 1024 * 1024
 MAX_GROUP_LIST_NUMBER: Final[int] = 100
 
 UKRAINIAN_ALPHABET: Final[str] = "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя"
@@ -404,6 +406,7 @@ def parse_docx_students(
     file_bytes: bytes,
 ) -> tuple[list[ParsedStudentCandidate], list[ImportSkippedItem]]:
     """Зчитує список студентів із таблиць офіційної відомості коледжу формату .docx."""
+    validate_zip_archive_safety(file_bytes)
     try:
         document = docx.Document(io.BytesIO(file_bytes))
     except (zipfile.BadZipFile, PackageNotFoundError, ValueError, OSError) as exc:
@@ -693,12 +696,17 @@ class StudentImportService:
                 context={"filename": cleaned_filename},
             )
 
-        if len(file_bytes) > MAX_IMPORT_FILE_SIZE_BYTES:
+        max_import_bytes = settings.MAX_IMPORT_UPLOAD_BYTES
+        if len(file_bytes) > max_import_bytes:
             raise DomainError(
-                "Розмір файлу перевищує максимально допустимі 10 МБ.",
+                "Розмір файлу перевищує максимально допустимий ліміт "
+                f"({format_size_limit_mb(max_import_bytes)}).",
                 code="FILE_TOO_LARGE",
                 status_code=413,
-                context={"size_bytes": len(file_bytes)},
+                context={
+                    "size_bytes": len(file_bytes),
+                    "max_bytes": max_import_bytes,
+                },
             )
 
         if lower_filename.endswith(".docx"):

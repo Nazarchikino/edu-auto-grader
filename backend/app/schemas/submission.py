@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.models.course import CourseSlug
 from app.schemas.grading import ExtractedMetadata, GradingReport
 
+MAX_HTML_CODE_LENGTH: int = 250_000
+
 
 class ExportFormat(StrEnum):
     """Доступні формати експорту відомості успішності академічної групи."""
@@ -23,6 +25,7 @@ class HtmlSubmissionRequest(BaseModel):
     raw_code: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_HTML_CODE_LENGTH,
         description="Вихідний HTML5-код, написаний студентом у редакторі",
     )
 

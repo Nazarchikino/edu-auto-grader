@@ -17,6 +17,7 @@ from app.graders.metadata import (
     extract_document_metadata,
     normalize_code_for_hashing,
     parse_core_xml_bytes,
+    validate_zip_archive_safety,
 )
 from app.graders.xlsx_grader import XlsxGrader
 
@@ -41,4 +42,5 @@ __all__ = [
     "extract_document_metadata",
     "normalize_code_for_hashing",
     "parse_core_xml_bytes",
+    "validate_zip_archive_safety",
 ]

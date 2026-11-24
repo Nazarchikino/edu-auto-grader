@@ -1,21 +1,26 @@
 import hashlib
+import io
 import uuid
-import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
+from xml.etree.ElementTree import Element as XmlElement
 
+from defusedxml import DefusedXmlException
+from defusedxml import ElementTree as DefusedET
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import InvalidFileFormatError
+from app.core.config import settings
+from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.models.progress import Submission
 from app.schemas.grading import ExtractedMetadata, PlagiarismCheckResult
 
 CORE_XML_ARCHIVE_PATH = "docProps/core.xml"
 OPENXML_EXTENSIONS: frozenset[str] = frozenset({".docx", ".xlsx"})
 _HASH_CHUNK_SIZE = 65536
+_MIN_ENTRY_BYTES_FOR_RATIO_CHECK = 1_048_576
 
 _CORE_XML_NAMESPACES: dict[str, str] = {
     "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
@@ -99,8 +104,88 @@ def compute_submission_hash(
     )
 
 
+def validate_zip_archive_safety(source: bytes | Path) -> None:
+    """Перевіряє OpenXML ZIP-архів на ознаки Zip-бомби до будь-якого розпакування."""
+    source_label = source.name if isinstance(source, Path) else "<uploaded-bytes>"
+    zip_input: io.BytesIO | Path = io.BytesIO(source) if isinstance(source, bytes) else source
+
+    try:
+        with zipfile.ZipFile(zip_input, mode="r") as archive:
+            infos = archive.infolist()
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise InvalidFileFormatError(
+            f"Файл '{source_label}' не є коректним OpenXML ZIP-архівом.",
+            context={"file_name": source_label},
+        ) from exc
+
+    max_entries = settings.MAX_ZIP_ENTRIES
+    if len(infos) > max_entries:
+        raise GradingError(
+            "Архів OpenXML містить забагато внутрішніх файлів "
+            f"({len(infos)} > {max_entries}).",
+            code="UNSAFE_ZIP_ARCHIVE",
+            context={
+                "file_name": source_label,
+                "entries_count": len(infos),
+                "max_entries": max_entries,
+            },
+        )
+
+    max_single_bytes = settings.MAX_ZIP_SINGLE_ENTRY_BYTES
+    max_total_bytes = settings.MAX_ZIP_UNCOMPRESSED_BYTES
+    max_ratio = settings.MAX_ZIP_COMPRESSION_RATIO
+    total_uncompressed_bytes = 0
+
+    for zinfo in infos:
+        if zinfo.file_size > max_single_bytes:
+            raise GradingError(
+                "Один із файлів усередині OpenXML-архіву перевищує максимально "
+                "допустимий нестиснений розмір.",
+                code="UNSAFE_ZIP_ARCHIVE",
+                context={
+                    "file_name": source_label,
+                    "entry_name": zinfo.filename,
+                    "entry_size_bytes": zinfo.file_size,
+                    "max_single_entry_bytes": max_single_bytes,
+                },
+            )
+
+        total_uncompressed_bytes += zinfo.file_size
+        if total_uncompressed_bytes > max_total_bytes:
+            raise GradingError(
+                "Сумарний нестиснений розмір файлів OpenXML-архіву перевищує "
+                "максимально допустимий ліміт.",
+                code="UNSAFE_ZIP_ARCHIVE",
+                context={
+                    "file_name": source_label,
+                    "uncompressed_bytes": total_uncompressed_bytes,
+                    "max_uncompressed_bytes": max_total_bytes,
+                },
+            )
+
+        if (
+            zinfo.compress_size > 0
+            and zinfo.file_size > _MIN_ENTRY_BYTES_FOR_RATIO_CHECK
+        ):
+            ratio = zinfo.file_size / zinfo.compress_size
+            if ratio > max_ratio:
+                raise GradingError(
+                    "OpenXML-архів відхилено через підозріло високий коефіцієнт "
+                    f"стиснення ({ratio:.1f}x > {max_ratio:.1f}x).",
+                    code="UNSAFE_ZIP_ARCHIVE",
+                    context={
+                        "file_name": source_label,
+                        "entry_name": zinfo.filename,
+                        "file_size": zinfo.file_size,
+                        "compress_size": zinfo.compress_size,
+                        "compression_ratio": round(ratio, 2),
+                        "max_compression_ratio": max_ratio,
+                    },
+                )
+
+
 def _find_xml_text(
-    root: ET.Element,
+    root: XmlElement,
     namespaced_xpath: str,
     local_name: str,
 ) -> str | None:
@@ -121,21 +206,36 @@ def _find_xml_text(
 
 
 def parse_core_xml_bytes(xml_bytes: bytes) -> ExtractedMetadata:
-    """Парсить вміст XML-файлу `docProps/core.xml` у контракт ExtractedMetadata."""
+    """Парсить вміст XML-файлу `docProps/core.xml` у контракт ExtractedMetadata через defusedxml."""
     try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError as exc:
+        root_raw: object = DefusedET.fromstring(xml_bytes)
+    except DefusedXmlException as exc:
+        raise GradingError(
+            "Виявлено небезпечні XML-конструкції (DTD/сутності) у docProps/core.xml.",
+            code="UNSAFE_XML_CONTENT",
+            context={
+                "archive_member": CORE_XML_ARCHIVE_PATH,
+                "error_type": type(exc).__name__,
+            },
+        ) from exc
+    except DefusedET.ParseError as exc:
         raise InvalidFileFormatError(
             "Пошкоджений XML-файл метаданих docProps/core.xml.",
             context={"archive_member": CORE_XML_ARCHIVE_PATH},
         ) from exc
 
+    if not isinstance(root_raw, XmlElement):
+        raise InvalidFileFormatError(
+            "Пошкоджений XML-файл метаданих docProps/core.xml.",
+            context={"archive_member": CORE_XML_ARCHIVE_PATH},
+        )
+
     return ExtractedMetadata(
-        creator=_find_xml_text(root, "dc:creator", "creator"),
-        last_modified_by=_find_xml_text(root, "cp:lastModifiedBy", "lastModifiedBy"),
-        created=_find_xml_text(root, "dcterms:created", "created"),
-        modified=_find_xml_text(root, "dcterms:modified", "modified"),
-        revision=_find_xml_text(root, "cp:revision", "revision"),
+        creator=_find_xml_text(root_raw, "dc:creator", "creator"),
+        last_modified_by=_find_xml_text(root_raw, "cp:lastModifiedBy", "lastModifiedBy"),
+        created=_find_xml_text(root_raw, "dcterms:created", "created"),
+        modified=_find_xml_text(root_raw, "dcterms:modified", "modified"),
+        revision=_find_xml_text(root_raw, "cp:revision", "revision"),
     )
 
 
@@ -147,6 +247,8 @@ def extract_core_xml_metadata(file_path: Path) -> ExtractedMetadata:
             f"Файл для екстракції метаданих не знайдено: '{resolved.name}'.",
             context={"file_path": str(resolved)},
         )
+
+    validate_zip_archive_safety(resolved)
 
     try:
         with zipfile.ZipFile(resolved, mode="r") as archive:

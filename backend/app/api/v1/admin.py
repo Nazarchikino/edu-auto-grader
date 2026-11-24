@@ -11,6 +11,7 @@ from app.api.v1.auth import serialize_user
 from app.core.config import settings
 from app.core.exceptions import DomainError
 from app.core.security import hash_password
+from app.core.upload_utils import read_upload_file_limited
 from app.models.course import Course
 from app.models.progress import Submission
 from app.models.user import AcademicGroup, User, UserRole
@@ -363,9 +364,14 @@ async def import_admin_students(
     file: Annotated[UploadFile, File()],
 ) -> StudentImportResponse:
     """Масово імпортує студентів академічної групи з файлу відомості .docx або .txt."""
-    file_bytes = await file.read()
     filename = file.filename or ""
-    await file.close()
+    try:
+        file_bytes = await read_upload_file_limited(
+            file,
+            max_bytes=settings.MAX_IMPORT_UPLOAD_BYTES,
+        )
+    finally:
+        await file.close()
 
     service = StudentImportService(db)
     return await service.import_students(
