@@ -373,7 +373,7 @@ def _resolve_practical_columns(
                 course_slug=CourseSlug.WORD,
                 course_title="Курс",
                 module_order_index=idx,
-                max_score=10.0,
+                max_score=12.0,
             )
             for idx, cell in enumerate(journal.rows[0].cells, start=1)
         ]
@@ -543,6 +543,13 @@ def render_group_journal_xlsx(
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     generated_at_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    total_max_score = round(sum(info.max_score for info in resolved_practicals), 2)
+    subtitle_parts = [
+        f"Сформовано: {generated_at_str}",
+        f"Студентів: {len(journal.rows)}",
+    ]
+    if resolved_practicals:
+        subtitle_parts.append(f"Макс. сума: {total_max_score:.2f} б.")
     _set_xlsx_text_cell(
         sheet,
         row=1,
@@ -557,7 +564,7 @@ def render_group_journal_xlsx(
         sheet,
         row=2,
         column=1,
-        text=f"Сформовано: {generated_at_str} | Студентів: {len(journal.rows)}",
+        text=" | ".join(subtitle_parts),
         font=subtitle_font,
     )
 
@@ -923,7 +930,7 @@ def _prepare_pdf_text(text: str, *, unicode_supported: bool) -> str:
 
 
 def _format_pdf_score(score: float, *, flagged: bool = False) -> str:
-    """Форматує бал компактно для PDF-клітинок (наприклад: 10, 8.5, 8.5*)."""
+    """Форматує бал компактно для PDF-клітинок (наприклад: 12, 10, 8.5, 8.5*)."""
     rounded = round(score, 2)
     if rounded == 0:
         rounded = 0.0
@@ -984,6 +991,7 @@ def render_group_journal_pdf(
         practical_chunks = [[]]
 
     total_chunks = len(practical_chunks)
+    total_max_score = round(sum(info.max_score for info in resolved_practicals), 2)
     generated_at_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     pdf = FPDF(orientation="L", unit="mm", format="A4")
@@ -1017,7 +1025,12 @@ def render_group_journal_pdf(
         pdf.set_font(font_family, style="", size=9.5)
         subtitle_raw = (
             f"Спеціальність: {journal.specialty} | Студентів: {len(journal.rows)} | "
-            f"Дата формування: {generated_at_str}"
+            + (
+                f"Макс. сума: {_format_pdf_score(total_max_score)} б. | "
+                if resolved_practicals
+                else ""
+            )
+            + f"Дата формування: {generated_at_str}"
         )
         subtitle_text = _fit_pdf_text(
             pdf,

@@ -82,6 +82,8 @@ export interface PracticalSummaryRead {
   title: string;
   format_type: PracticalFormat;
   max_score: number;
+  auto_max_score: number;
+  manual_bonus_max: number;
   is_unlocked: boolean;
   best_score: number | null;
   needs_rules_review: boolean;
@@ -95,6 +97,8 @@ export interface PracticalStudentRead {
   instructions: string;
   format_type: PracticalFormat;
   max_score: number;
+  auto_max_score: number;
+  manual_bonus_max: number;
   needs_rules_review: boolean;
   variant_index: number;
   variant_number: number;
@@ -109,6 +113,8 @@ export interface PracticalTeacherRead {
   instructions: string;
   format_type: PracticalFormat;
   max_score: number;
+  auto_max_score: number;
+  manual_bonus_max: number;
   needs_rules_review: boolean;
   variants: PracticalVariant[];
   grading_rules: GradingRule[];
@@ -136,6 +142,7 @@ export interface ModuleSummaryRead {
   practical_id: string | null;
   practical_format: PracticalFormat | null;
   practical_score: number | null;
+  practical_max_score: number | null;
   practical_needs_rules_review: boolean;
 }
 

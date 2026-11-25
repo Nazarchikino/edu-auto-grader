@@ -289,7 +289,7 @@ export function CourseEditorPage(): ReactElement {
   const [practicalTitle, setPracticalTitle] = useState<string>("");
   const [practicalFormat, setPracticalFormat] =
     useState<PracticalFormat>("docx");
-  const [practicalMaxScore, setPracticalMaxScore] = useState<number>(10);
+  const [practicalMaxScore, setPracticalMaxScore] = useState<number>(12);
   const [practicalInstructions, setPracticalInstructions] =
     useState<string>("");
   const [variantDrafts, setVariantDrafts] = useState<VariantDraft[]>([]);
@@ -417,7 +417,7 @@ export function CourseEditorPage(): ReactElement {
         `Практична робота: ${moduleDetail?.title ?? activeCourse.title}`
       );
       setPracticalFormat(defaultFormat);
-      setPracticalMaxScore(10);
+      setPracticalMaxScore(12);
       setPracticalInstructions(
         "Виконайте завдання згідно з індивідуальним варіантом та завантажте результат на перевірку."
       );
@@ -818,6 +818,7 @@ export function CourseEditorPage(): ReactElement {
                     practical_id: null,
                     practical_format: null,
                     practical_score: null,
+                    practical_max_score: null,
                   }
                 : item
             ),
@@ -2030,11 +2031,15 @@ export function CourseEditorPage(): ReactElement {
                                 value={practicalMaxScore}
                                 onChange={(e) =>
                                   setPracticalMaxScore(
-                                    Number(e.target.value) || 10
+                                    Number(e.target.value) || 12
                                   )
                                 }
                                 className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none"
                               />
+                              <p className="mt-1 text-[11px] text-slate-500">
+                                12-бальна шкала: до 10 б. автоперевірка + до 2 б.
+                                творче завдання
+                              </p>
                             </div>
 
                             <div>

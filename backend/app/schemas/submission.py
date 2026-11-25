@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.course import CourseSlug
 from app.schemas.grading import ExtractedMetadata, GradingReport
@@ -35,16 +35,38 @@ class ManualGradeUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    final_score: float = Field(
-        ...,
+    final_score: float | None = Field(
+        default=None,
         ge=0.0,
+        allow_inf_nan=False,
         description="Скоригований викладачем підсумковий бал",
+    )
+    teacher_score_adjustment: float | None = Field(
+        default=None,
+        allow_inf_nan=False,
+        description=(
+            "Відносне коригування бала понад auto_score "
+            "(наприклад, +1.0 або +2.0 за творче завдання)"
+        ),
     )
     teacher_comment: str | None = Field(
         default=None,
         max_length=2000,
         description="Коментар викладача щодо роботи або виявленого плагіату",
     )
+
+    @model_validator(mode="after")
+    def _validate_score_input(self) -> "ManualGradeUpdateRequest":
+        if self.final_score is None and self.teacher_score_adjustment is None:
+            raise ValueError(
+                "Необхідно передати 'final_score' або 'teacher_score_adjustment'."
+            )
+        if self.final_score is not None and self.teacher_score_adjustment is not None:
+            raise ValueError(
+                "Передайте або 'final_score', або 'teacher_score_adjustment', "
+                "але не обидва поля одночасно."
+            )
+        return self
 
 
 class SubmissionRead(BaseModel):
@@ -68,7 +90,9 @@ class SubmissionRead(BaseModel):
     plagiarism_reason: str | None = None
     auto_score: float = Field(..., ge=0.0)
     final_score: float = Field(..., ge=0.0)
-    max_score: float = Field(default=10.0, gt=0.0)
+    max_score: float = Field(default=12.0, gt=0.0)
+    auto_max_score: float = Field(default=10.0, ge=0.0)
+    manual_bonus_max: float = Field(default=2.0, ge=0.0)
     grading_report: GradingReport
     teacher_comment: str | None = None
     submitted_at: datetime

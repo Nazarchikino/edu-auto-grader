@@ -75,11 +75,22 @@ def test_full_course_json_bundle_validation() -> None:
                 media_references.update(_MEDIA_URL_PATTERN.findall(variants_json))
 
                 assert not hasattr(practical, "meta")
+                assert practical.max_score == Decimal("12.00"), (
+                    f"{course.slug.value} M{module.order_index:02d}: "
+                    f"очікувався max_score=12.00, отримано {practical.max_score}"
+                )
                 assert len(practical.grading_rules) >= 1
+                rules_points_sum = Decimal("0.00")
                 for raw_rule in practical.grading_rules:
                     parsed_rule = GradingRule.model_validate(raw_rule)
                     assert parsed_rule.points > 0
+                    rules_points_sum += Decimal(str(parsed_rule.points))
                     validated_rules_count += 1
+                assert Decimal("0") < rules_points_sum <= practical.max_score
+                assert rules_points_sum == Decimal("10.00"), (
+                    f"{course.slug.value} M{module.order_index:02d}: "
+                    f"очікувалась сума балів правил 10.00, отримано {rules_points_sum}"
+                )
 
     assert validated_rules_count >= 190
     assert len(media_references) > 0
@@ -202,7 +213,15 @@ def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> No
                 GradingRule.model_validate(raw_rule)
                 for raw_rule in practical.grading_rules
             ]
-            assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+            assert practical.max_score == Decimal("12.00"), (
+                f"{course.slug.value} M{module.order_index:02d}: max_score != 12.00"
+            )
+            rules_sum = sum(
+                (Decimal(str(rule.points)) for rule in parsed_rules),
+                Decimal("0.00"),
+            )
+            assert Decimal("0") < rules_sum <= practical.max_score
+            assert rules_sum == Decimal("10.00"), (
                 f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
             )
             assert len(practical.variants) >= 1
@@ -1444,7 +1463,15 @@ def test_all_course_rules_pass_validate_rule_definition_and_access_modules_separ
                 GradingRule.model_validate(raw_rule)
                 for raw_rule in practical.grading_rules
             ]
-            assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+            assert practical.max_score == Decimal("12.00"), (
+                f"{course.slug.value} M{module.order_index:02d}: max_score != 12.00"
+            )
+            rules_sum = sum(
+                (Decimal(str(rule.points)) for rule in parsed_rules),
+                Decimal("0.00"),
+            )
+            assert Decimal("0") < rules_sum <= practical.max_score
+            assert rules_sum == Decimal("10.00"), (
                 f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
             )
             for rule in parsed_rules:

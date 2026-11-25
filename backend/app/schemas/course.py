@@ -1,11 +1,32 @@
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import GradingRule
+
+
+def calculate_practical_score_breakdown(
+    max_score: Decimal | float,
+    rule_points: Sequence[Decimal | float],
+) -> tuple[Decimal, Decimal]:
+    """Обчислює auto_max_score (сума правил) та manual_bonus_max (резерв викладача)."""
+    max_score_dec = Decimal(str(max_score)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    auto_max = sum(
+        (Decimal(str(point)) for point in rule_points),
+        Decimal("0.00"),
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    manual_bonus = max(Decimal("0.00"), max_score_dec - auto_max).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    return auto_max, manual_bonus
 
 
 class QuizQuestionCreate(BaseModel):
@@ -87,7 +108,7 @@ class PracticalCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     instructions: str = Field(..., min_length=1)
     format_type: PracticalFormat
-    max_score: float = Field(default=10.0, gt=0.0)
+    max_score: Decimal = Field(default=Decimal("12.00"), gt=Decimal("0"))
     variants: list[PracticalVariant] = Field(default_factory=list)
     grading_rules: list[GradingRule] = Field(default_factory=list)
 
@@ -100,7 +121,7 @@ class PracticalUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     instructions: str | None = Field(default=None, min_length=1)
     format_type: PracticalFormat | None = None
-    max_score: float | None = Field(default=None, gt=0.0)
+    max_score: Decimal | None = Field(default=None, gt=Decimal("0"))
     variants: list[PracticalVariant] | None = None
     grading_rules: list[GradingRule] | None = None
     needs_rules_review: bool | None = None
@@ -131,10 +152,26 @@ class PracticalSummaryRead(BaseModel):
     title: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
+    manual_bonus_max: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     is_unlocked: bool = False
     best_score: float | None = None
     needs_rules_review: bool = False
     grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _populate_score_breakdown(self) -> "PracticalSummaryRead":
+        auto_max, manual_bonus = calculate_practical_score_breakdown(
+            self.max_score,
+            [item.weight_points for item in self.grading_criteria],
+        )
+        self.auto_max_score = auto_max
+        self.manual_bonus_max = manual_bonus
+        return self
+
+    @field_serializer("auto_max_score", "manual_bonus_max", when_used="json")
+    def _serialize_score_breakdown(self, value: Decimal) -> float:
+        return round(float(value), 2)
 
 
 class PracticalStudentRead(BaseModel):
@@ -148,11 +185,27 @@ class PracticalStudentRead(BaseModel):
     instructions: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
+    manual_bonus_max: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     needs_rules_review: bool = False
     variant_index: int = Field(..., ge=0)
     variant_number: int = Field(..., ge=1)
     variant: PracticalVariant
     grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _populate_score_breakdown(self) -> "PracticalStudentRead":
+        auto_max, manual_bonus = calculate_practical_score_breakdown(
+            self.max_score,
+            [item.weight_points for item in self.grading_criteria],
+        )
+        self.auto_max_score = auto_max
+        self.manual_bonus_max = manual_bonus
+        return self
+
+    @field_serializer("auto_max_score", "manual_bonus_max", when_used="json")
+    def _serialize_score_breakdown(self, value: Decimal) -> float:
+        return round(float(value), 2)
 
 
 class PracticalTeacherRead(BaseModel):
@@ -166,9 +219,25 @@ class PracticalTeacherRead(BaseModel):
     instructions: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
+    manual_bonus_max: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     needs_rules_review: bool = False
     variants: list[PracticalVariant] = Field(default_factory=list)
     grading_rules: list[GradingRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _populate_score_breakdown(self) -> "PracticalTeacherRead":
+        auto_max, manual_bonus = calculate_practical_score_breakdown(
+            self.max_score,
+            [rule.points for rule in self.grading_rules],
+        )
+        self.auto_max_score = auto_max
+        self.manual_bonus_max = manual_bonus
+        return self
+
+    @field_serializer("auto_max_score", "manual_bonus_max", when_used="json")
+    def _serialize_score_breakdown(self, value: Decimal) -> float:
+        return round(float(value), 2)
 
 
 class ModuleCreate(BaseModel):
@@ -205,6 +274,7 @@ class ModuleSummaryRead(BaseModel):
     practical_id: uuid.UUID | None = None
     practical_format: PracticalFormat | None = None
     practical_score: float | None = None
+    practical_max_score: float | None = None
     practical_needs_rules_review: bool = False
 
 

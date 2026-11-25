@@ -1854,7 +1854,7 @@ async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
     assert cross_format_resp.status_code == 422
     assert cross_format_resp.json()["code"] == "INVALID_RULE_TYPE_FOR_FORMAT"
 
-    # 3. Збереження з sync_max_score=False залишає max_score=10.0 і скидає needs_rules_review=False
+    # 3. Збереження з sync_max_score=False залишає max_score=12.0 і скидає needs_rules_review=False
     partial_rules = [
         {
             "id": "m02_font_check",
@@ -1883,7 +1883,9 @@ async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
     )
     assert keep_max_resp.status_code == 200
     keep_max_data = keep_max_resp.json()
-    assert keep_max_data["max_score"] == 10.0
+    assert keep_max_data["max_score"] == 12.0
+    assert keep_max_data["auto_max_score"] == 7.0
+    assert keep_max_data["manual_bonus_max"] == 5.0
     assert keep_max_data["needs_rules_review"] is False
     assert len(keep_max_data["grading_rules"]) == 2
 
@@ -2229,3 +2231,139 @@ async def test_student_module_and_practical_endpoints_return_formatted_grading_c
     acc_s1_text = " | ".join(item["description"] for item in acc_s1_criteria)
     acc_s2_text = " | ".join(item["description"] for item in acc_s2_criteria)
     assert acc_s1_text != acc_s2_text
+
+
+async def test_twelve_point_grading_scale_auto_plus_teacher_creative_bonus(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Інтеграційна перевірка T6.16b: 12-бальна шкала (10 б. авто + до 2 б. творче)."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    student_headers = make_auth_headers(student1.id, student1.role)
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+
+    _html_course, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+
+    # 1. GET /api/v1/modules/{id} повертає max_score=12.0, auto_max_score=10.0, manual_bonus_max=2.0
+    mod_resp = await async_client.get(
+        f"/api/v1/modules/{html_mod.id}",
+        headers=student_headers,
+    )
+    assert mod_resp.status_code == 200
+    mod_prac = mod_resp.json()["practical"]
+    assert mod_prac is not None
+    assert mod_prac["max_score"] == 12.0
+    assert mod_prac["auto_max_score"] == 10.0
+    assert mod_prac["manual_bonus_max"] == 2.0
+
+    # Перевіряємо також /practicals/{id} (студент) та /practicals/{id}/teacher (викладач)
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
+
+    student_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{html_prac.id}",
+        headers=student_headers,
+    )
+    assert student_prac_resp.status_code == 200
+    student_prac_data = student_prac_resp.json()
+    assert student_prac_data["max_score"] == 12.0
+    assert student_prac_data["auto_max_score"] == 10.0
+    assert student_prac_data["manual_bonus_max"] == 2.0
+
+    teacher_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{html_prac.id}/teacher",
+        headers=teacher_headers,
+    )
+    assert teacher_prac_resp.status_code == 200
+    teacher_prac_data = teacher_prac_resp.json()
+    assert teacher_prac_data["max_score"] == 12.0
+    assert teacher_prac_data["auto_max_score"] == 10.0
+    assert teacher_prac_data["manual_bonus_max"] == 2.0
+
+    # 2. Студент виконує всі критерії автоперевірки -> auto_score=10.0, final_score=10.0 з 12.0
+    full_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Портфоліо студента</title>
+      </head>
+      <body>
+        <h1>Профіль студента</h1>
+        <h2>Освіта</h2>
+        <p>Вивчаю <strong>вебтехнології</strong> та семантичний HTML5.</p>
+        <h2>Проєкти</h2>
+        <p>Цікавлюся <em>адаптивною версткою</em> та доступністю.</p>
+        <p>Виконую практичні завдання коледжу.</p>
+        <blockquote>Якісна розмітка — основа сучасного вебу.</blockquote>
+      </body>
+    </html>
+    """
+    submit_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=student_headers,
+        json={"raw_code": full_html},
+    )
+    assert submit_resp.status_code == 201
+    sub_data = submit_resp.json()
+    assert sub_data["auto_score"] == 10.0
+    assert sub_data["final_score"] == 10.0
+    assert sub_data["max_score"] == 12.0
+    assert sub_data["auto_max_score"] == 10.0
+    assert sub_data["manual_bonus_max"] == 2.0
+    submission_id = sub_data["id"]
+
+    # 3. Викладач додає teacher_score_adjustment=2.0 -> final_score=12.0
+    bonus_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={
+            "teacher_score_adjustment": 2.0,
+            "teacher_comment": "Чудове творче оформлення сторінки (+2 б.).",
+        },
+    )
+    assert bonus_resp.status_code == 200
+    bonus_data = bonus_resp.json()
+    assert bonus_data["auto_score"] == 10.0
+    assert bonus_data["final_score"] == 12.0
+    assert bonus_data["max_score"] == 12.0
+    assert bonus_data["teacher_comment"] == "Чудове творче оформлення сторінки (+2 б.)."
+
+    # 4. Спроба додати teacher_score_adjustment=5.0 -> 422 SCORE_EXCEEDS_MAX (не вище 12.0)
+    excess_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={"teacher_score_adjustment": 5.0},
+    )
+    assert excess_resp.status_code == 422
+    assert excess_resp.json()["code"] == "SCORE_EXCEEDS_MAX"
+
+    # Переконуємося, що збережений final_score не перевищив 12.0
+    detail_resp = await async_client.get(
+        f"/api/v1/submissions/{submission_id}",
+        headers=teacher_headers,
+    )
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["final_score"] == 12.0
+
+    # 5. Надмірне від'ємне коригування (< 0) -> 422 SCORE_BELOW_ZERO, пряме final_score=11.0 -> 200
+    below_zero_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={"teacher_score_adjustment": -15.0},
+    )
+    assert below_zero_resp.status_code == 422
+    assert below_zero_resp.json()["code"] == "SCORE_BELOW_ZERO"
+
+    direct_score_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={
+            "final_score": 11.0,
+            "teacher_comment": "Додано +1 б. за творчу частину.",
+        },
+    )
+    assert direct_score_resp.status_code == 200
+    assert direct_score_resp.json()["final_score"] == 11.0

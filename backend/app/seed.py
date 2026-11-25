@@ -68,7 +68,7 @@ class _SeedPracticalPayload(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     instructions: str = Field(..., min_length=1)
     format_type: PracticalFormat
-    max_score: Decimal = Field(default=Decimal("10.00"), gt=Decimal("0"))
+    max_score: Decimal = Field(default=Decimal("12.00"), gt=Decimal("0"))
     variants: list[dict[str, object]] = Field(default_factory=list)
     grading_rules: list[GradingRule] = Field(..., min_length=1)
     meta: dict[str, object] | None = Field(default=None, exclude=True)

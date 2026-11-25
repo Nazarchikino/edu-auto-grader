@@ -33,7 +33,11 @@ from app.graders.metadata import (
 from app.models.course import CourseSlug, Module, Practical, PracticalFormat
 from app.models.progress import Submission
 from app.models.user import AcademicGroup, User, UserRole
-from app.schemas.course import PracticalTeacherRead, PracticalVariant
+from app.schemas.course import (
+    PracticalTeacherRead,
+    PracticalVariant,
+    calculate_practical_score_breakdown,
+)
 from app.schemas.grading import (
     ExtractedMetadata,
     GradingReport,
@@ -331,7 +335,7 @@ def serialize_submission(
     practical_title: str | None = None
     course_slug: CourseSlug | None = None
     format_type: PracticalFormat | None = None
-    max_score: float = 10.0
+    max_score: float = 12.0
 
     if practical is not None:
         practical_title = practical.title
@@ -346,6 +350,22 @@ def serialize_submission(
     student_full_name: str | None = student.full_name if student is not None else None
     extracted_metadata = ExtractedMetadata.model_validate(submission.extracted_metadata)
     grading_report = GradingReport.model_validate(submission.grading_report)
+
+    if grading_report.results:
+        rule_points_source: list[Decimal | float] = [
+            criterion.max_points for criterion in grading_report.results
+        ]
+    elif practical is not None and practical.grading_rules:
+        rule_points_source = [
+            GradingRule.model_validate(item).points for item in practical.grading_rules
+        ]
+    else:
+        rule_points_source = [grading_report.max_points]
+
+    auto_max_dec, manual_bonus_dec = calculate_practical_score_breakdown(
+        max_score,
+        rule_points_source,
+    )
 
     effective_uploads_dir = (
         uploads_dir if uploads_dir is not None else settings.UPLOADS_DIR
@@ -385,6 +405,8 @@ def serialize_submission(
         auto_score=float(submission.auto_score),
         final_score=float(submission.final_score),
         max_score=max_score,
+        auto_max_score=round(float(auto_max_dec), 2),
+        manual_bonus_max=round(float(manual_bonus_dec), 2),
         grading_report=grading_report,
         teacher_comment=submission.teacher_comment,
         submitted_at=submission.submitted_at,
@@ -863,10 +885,40 @@ class SubmissionService:
         )
         max_score = submission.practical.max_score
 
-        final_score_decimal = Decimal(str(payload.final_score)).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_HALF_UP,
-        )
+        if payload.teacher_score_adjustment is not None:
+            adjustment_decimal = Decimal(str(payload.teacher_score_adjustment)).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            final_score_decimal = (submission.auto_score + adjustment_decimal).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+        else:
+            if payload.final_score is None:
+                raise DomainError(
+                    "Необхідно передати 'final_score' або 'teacher_score_adjustment'.",
+                    code="INVALID_GRADE_UPDATE",
+                    status_code=422,
+                    context={"submission_id": str(submission_id)},
+                )
+            final_score_decimal = Decimal(str(payload.final_score)).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+
+        if final_score_decimal < Decimal("0.00"):
+            raise DomainError(
+                f"Підсумковий бал ({final_score_decimal}) не може бути меншим за 0.00.",
+                code="SCORE_BELOW_ZERO",
+                status_code=422,
+                context={
+                    "final_score": float(final_score_decimal),
+                    "min_score": 0.0,
+                    "submission_id": str(submission_id),
+                },
+            )
+
         if final_score_decimal > max_score:
             raise DomainError(
                 f"Підсумковий бал ({final_score_decimal}) не може перевищувати "

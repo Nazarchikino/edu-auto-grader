@@ -2083,6 +2083,10 @@ export function ModuleViewPage(): ReactElement {
                       return null;
                     }
 
+                    const autoMaxScore = practicalDetail.auto_max_score;
+                    const manualBonusMax = practicalDetail.manual_bonus_max;
+                    const maxScoreValue = practicalDetail.max_score;
+
                     return (
                       <div
                         className="rounded-2xl border border-emerald-200/90 bg-emerald-50/40 p-5 shadow-xs"
@@ -2105,8 +2109,9 @@ export function ModuleViewPage(): ReactElement {
                           </div>
 
                           <span className="inline-flex items-center rounded-full border border-emerald-300 bg-white px-3 py-1 text-xs font-bold text-emerald-800 shadow-2xs">
-                            Максимум: {formatPointsValue(practicalDetail.max_score)}{" "}
-                            б.
+                            {manualBonusMax > 0
+                              ? `Максимум: ${formatPointsValue(maxScoreValue)} б. (до ${formatPointsValue(autoMaxScore)} б. автоперевірка + до ${formatPointsValue(manualBonusMax)} б. творче завдання)`
+                              : `Максимум: ${formatPointsValue(maxScoreValue)} б.`}
                           </span>
                         </div>
 
@@ -2129,6 +2134,23 @@ export function ModuleViewPage(): ReactElement {
                               </span>
                             </li>
                           ))}
+
+                          {manualBonusMax > 0 && (
+                            <li className="flex flex-col justify-between gap-2 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:text-sm">
+                              <div className="flex items-start gap-2.5">
+                                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700">
+                                  <Sparkles className="h-3 w-3" />
+                                </span>
+                                <span className="font-semibold leading-relaxed text-indigo-950">
+                                  Творче завдання / додаткове оформлення
+                                  (перевіряє викладач вручну)
+                                </span>
+                              </div>
+                              <span className="inline-flex shrink-0 items-center self-start rounded-lg border border-indigo-200 bg-white px-2.5 py-0.5 font-mono text-xs font-bold text-indigo-800 sm:self-center">
+                                +{formatPointsValue(manualBonusMax)} б.
+                              </span>
+                            </li>
+                          )}
                         </ol>
 
                         {practicalDetail.needs_rules_review && (
@@ -2397,6 +2419,33 @@ export function ModuleViewPage(): ReactElement {
                           <ArrowRight className="h-3.5 w-3.5" />
                         </Link>
                       </div>
+
+                      {lastSubmissionResult.manual_bonus_max > 0 &&
+                        lastSubmissionResult.auto_max_score > 0 &&
+                        lastSubmissionResult.auto_score >=
+                          lastSubmissionResult.auto_max_score - 0.005 && (
+                          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/80 p-3.5 text-xs text-indigo-950">
+                            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+                            <p className="leading-relaxed">
+                              Усі критерії автоперевірки виконано (
+                              <span className="font-bold">
+                                {formatPointsValue(
+                                  lastSubmissionResult.auto_score
+                                )}{" "}
+                                з{" "}
+                                {formatPointsValue(
+                                  lastSubmissionResult.max_score
+                                )}{" "}
+                                б.
+                              </span>
+                              ). Додаткові бали за творче завдання (до +
+                              {formatPointsValue(
+                                lastSubmissionResult.manual_bonus_max
+                              )}{" "}
+                              б.) виставляє викладач після перегляду роботи.
+                            </p>
+                          </div>
+                        )}
 
                       {lastSubmissionResult.is_plagiarism_flagged &&
                         lastSubmissionResult.plagiarism_reason !== null && (

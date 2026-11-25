@@ -482,14 +482,34 @@ export function GradingReportCard({
                 <span className="text-sm font-semibold text-slate-500">
                   / {submission.max_score.toFixed(1)} б.
                 </span>
-                <span className="ml-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-xs font-bold text-blue-700">
+                <span
+                  className={`ml-1 rounded-md px-1.5 py-0.5 text-xs font-bold ${
+                    scorePercent >= 80
+                      ? "bg-emerald-50 text-emerald-700"
+                      : scorePercent >= 60
+                        ? "bg-blue-50 text-blue-700"
+                        : scorePercent >= 40
+                          ? "bg-amber-50 text-amber-700"
+                          : "bg-rose-50 text-rose-700"
+                  }`}
+                >
                   {scorePercent}%
                 </span>
               </div>
               {isManuallyAdjusted ? (
                 <p className="mt-0.5 text-[11px] font-medium text-amber-700">
-                  Автобал ядра: {submission.auto_score.toFixed(1)} б. (скориговано
+                  Автооцінка: {submission.auto_score.toFixed(1)} /{" "}
+                  {submission.auto_max_score.toFixed(1)} б. (скориговано
                   викладачем)
+                </p>
+              ) : submission.manual_bonus_max > 0 ? (
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  Автооцінка: {submission.auto_score.toFixed(1)} /{" "}
+                  {submission.auto_max_score.toFixed(1)} б. (+ до{" "}
+                  {Number.isInteger(submission.manual_bonus_max)
+                    ? submission.manual_bonus_max.toFixed(0)
+                    : submission.manual_bonus_max.toFixed(1)}{" "}
+                  б. творче завдання)
                 </p>
               ) : (
                 <p className="mt-0.5 text-[11px] text-slate-500">

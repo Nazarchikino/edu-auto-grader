@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
@@ -138,6 +138,9 @@ def _serialize_course(
         practical_score = (
             best_practical_by_id.get(practical.id) if practical is not None else None
         )
+        practical_max_score = (
+            float(practical.max_score) if practical is not None else None
+        )
         practical_needs_rules_review = (
             practical.needs_rules_review if practical is not None else False
         )
@@ -156,6 +159,7 @@ def _serialize_course(
                 practical_id=practical_id,
                 practical_format=practical_format,
                 practical_score=practical_score,
+                practical_max_score=practical_max_score,
                 practical_needs_rules_review=practical_needs_rules_review,
             )
         )
@@ -928,7 +932,10 @@ async def upsert_module_practical(
     serialized_rules: list[dict[str, object]] = [
         rule.model_dump(mode="json") for rule in payload.grading_rules
     ]
-    max_score_decimal = Decimal(str(payload.max_score))
+    max_score_decimal = payload.max_score.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
 
     if module.practical is None:
         practical = Practical(
@@ -993,7 +1000,10 @@ async def update_practical(
     if payload.format_type is not None:
         practical.format_type = payload.format_type
     if payload.max_score is not None:
-        practical.max_score = Decimal(str(payload.max_score))
+        practical.max_score = payload.max_score.quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
     if payload.variants is not None:
         practical.variants = [
             variant.model_dump(mode="json") for variant in payload.variants
