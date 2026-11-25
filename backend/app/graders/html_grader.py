@@ -12,7 +12,7 @@ from bs4.element import (
 )
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.base import BaseGrader
+from app.graders.base import BaseGrader, format_student_criterion_description
 from app.models.course import PracticalFormat
 from app.schemas.grading import (
     CriterionResult,
@@ -263,7 +263,14 @@ class HtmlGrader(BaseGrader):
         if not has_meaningful_html_body(soup):
             empty_results = [
                 self.build_criterion_result(
-                    rule,
+                    rule.model_copy(
+                        update={
+                            "description": format_student_criterion_description(
+                                rule.description,
+                                variant_data,
+                            )
+                        }
+                    ),
                     passed=False,
                     actual=None,
                     feedback=EMPTY_HTML_BODY_ERROR_MESSAGE,
@@ -277,9 +284,17 @@ class HtmlGrader(BaseGrader):
         for rule in rules:
             resolved_expected = self.resolve_expected(rule.expected, variant_data)
             resolved_target = self.resolve_expected(rule.target, variant_data)
+            resolved_rule = rule.model_copy(
+                update={
+                    "description": format_student_criterion_description(
+                        rule.description,
+                        variant_data,
+                    )
+                }
+            )
             result = self._evaluate_rule(
                 soup=soup,
-                rule=rule,
+                rule=resolved_rule,
                 target=resolved_target,
                 expected=resolved_expected,
             )

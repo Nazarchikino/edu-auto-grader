@@ -40,7 +40,7 @@ from access_parser.utils import (  # type: ignore[import-untyped]
 from construct import ConstructError  # type: ignore[import-untyped]
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.base import BaseGrader
+from app.graders.base import BaseGrader, format_student_criterion_description
 from app.models.course import PracticalFormat
 from app.schemas.grading import (
     CriterionResult,
@@ -640,9 +640,17 @@ class AccdbGrader(BaseGrader):
         for rule in rules:
             resolved_expected = self.resolve_expected(rule.expected, variant_data)
             resolved_target = self.resolve_expected(rule.target, variant_data)
+            resolved_rule = rule.model_copy(
+                update={
+                    "description": format_student_criterion_description(
+                        rule.description,
+                        variant_data,
+                    )
+                }
+            )
             result = self._evaluate_rule(
                 schema=schema,
-                rule=rule,
+                rule=resolved_rule,
                 target=resolved_target,
                 expected=resolved_expected,
             )

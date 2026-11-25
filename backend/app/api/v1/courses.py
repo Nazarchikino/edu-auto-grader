@@ -48,7 +48,11 @@ from app.schemas.course import (
     QuizSubmitResponse,
 )
 from app.schemas.grading import GradingRule
-from app.services.quiz_service import QuizService
+from app.services.quiz_service import (
+    QuizService,
+    build_student_grading_criteria,
+    resolve_student_variant,
+)
 from app.services.retention_service import delete_submission_files_for_paths_async
 
 router = APIRouter(tags=["courses"])
@@ -298,6 +302,10 @@ async def _build_module_detail_read(
         best_sub_result = await db.execute(best_sub_stmt)
         max_sub_score: Decimal | None = best_sub_result.scalar_one_or_none()
 
+        _, _, resolved_variant = resolve_student_variant(
+            practical=module.practical,
+            list_number=current_user.list_number,
+        )
         practical_summary = PracticalSummaryRead(
             id=module.practical.id,
             module_id=module.id,
@@ -309,6 +317,10 @@ async def _build_module_detail_read(
                 round(float(max_sub_score), 2) if max_sub_score is not None else None
             ),
             needs_rules_review=module.practical.needs_rules_review,
+            grading_criteria=build_student_grading_criteria(
+                module.practical,
+                resolved_variant,
+            ),
         )
 
     quiz_questions_read = [

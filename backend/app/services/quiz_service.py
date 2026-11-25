@@ -8,15 +8,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import DomainError, QuizNotPassedError
+from app.graders.base import format_student_criterion_description
 from app.models.course import Module, Practical, QuizQuestion
 from app.models.progress import QuizAttempt
 from app.models.user import User
 from app.schemas.course import (
+    GradingCriterionPreviewRead,
     PracticalStudentRead,
     PracticalVariant,
     QuizSubmitRequest,
     QuizSubmitResponse,
 )
+from app.schemas.grading import GradingRule
 
 
 def get_quiz_pass_threshold_percent() -> Decimal:
@@ -91,6 +94,29 @@ def resolve_student_variant(
         parameters=parameters,
     )
     return variant_index, variant_number, variant
+
+
+def build_student_grading_criteria(
+    practical: Practical,
+    variant: PracticalVariant,
+) -> list[GradingCriterionPreviewRead]:
+    """Формує безпечний список україномовних критеріїв оцінювання без сирих target/expected."""
+    variant_data: dict[str, object] = variant.model_dump(mode="python")
+    criteria: list[GradingCriterionPreviewRead] = []
+    for raw_rule in practical.grading_rules:
+        rule = GradingRule.model_validate(raw_rule)
+        formatted_description = format_student_criterion_description(
+            rule.description,
+            variant_data,
+        )
+        criteria.append(
+            GradingCriterionPreviewRead(
+                id=rule.id,
+                description=formatted_description,
+                weight_points=Decimal(str(rule.points)),
+            )
+        )
+    return criteria
 
 
 class QuizService:
@@ -411,11 +437,13 @@ class QuizService:
             variant_index=variant_index,
             variant_number=variant_number,
             variant=variant,
+            grading_criteria=build_student_grading_criteria(practical, variant),
         )
 
 
 __all__ = [
     "QuizService",
+    "build_student_grading_criteria",
     "calculate_variant_index",
     "format_cooldown_remaining",
     "get_quiz_pass_threshold_percent",

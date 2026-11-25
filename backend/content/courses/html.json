@@ -243,7 +243,7 @@
             "target": "html",
             "expected": "lang",
             "points": 1.0,
-            "description": "Перевірка наявності атрибута lang у кореневому тегу <html>"
+            "description": "У кореневому тегу <html> вказано атрибут мови lang"
           },
           {
             "id": "h_m01_meta_charset",
@@ -251,7 +251,7 @@
             "target": "head meta[charset]",
             "expected": "charset",
             "points": 1.0,
-            "description": "Перевірка наявності метатега <meta charset=\"UTF-8\"> усередині <head>"
+            "description": "У блоці <head> додано метатег <meta charset=\"UTF-8\"> для кодування символів"
           },
           {
             "id": "h_m01_head_title",
@@ -259,7 +259,7 @@
             "target": "head > title",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності заголовка вкладки <title> безпосередньо в <head>"
+            "description": "У блоці <head> задано заголовок вкладки браузера в тегу <title>"
           },
           {
             "id": "h_m01_h1_exists",
@@ -267,7 +267,7 @@
             "target": "body h1",
             "expected": "true",
             "points": 1.5,
-            "description": "Перевірка наявності головного заголовка <h1> у тілі документа <body>"
+            "description": "У тілі сторінки <body> розміщено головний заголовок <h1>"
           },
           {
             "id": "h_m01_h2_count",
@@ -275,7 +275,7 @@
             "target": "body h2",
             "expected": ">=2",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 2 підзаголовків <h2> у тілі документа"
+            "description": "У тілі сторінки <body> створено не менше 2 підзаголовків <h2>"
           },
           {
             "id": "h_m01_p_count",
@@ -283,7 +283,7 @@
             "target": "body p",
             "expected": ">=3",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 3 абзаців тексту <p> у тілі документа"
+            "description": "У тілі сторінки <body> написано не менше 3 абзаців тексту <p>"
           },
           {
             "id": "h_m01_strong_exists",
@@ -291,7 +291,7 @@
             "target": "strong",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка використання тега <strong> для виділення ключових понять"
+            "description": "Ключові поняття виділено семантичним тегом <strong>"
           },
           {
             "id": "h_m01_em_exists",
@@ -299,7 +299,7 @@
             "target": "em",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка використання тега <em> для смислового наголосу"
+            "description": "Смисловий наголос оформлено тегом <em>"
           },
           {
             "id": "h_m01_blockquote",
@@ -307,7 +307,7 @@
             "target": "blockquote",
             "expected": "true",
             "points": 0.5,
-            "description": "Перевірка наявності тематичної цитати в тегу <blockquote>"
+            "description": "На сторінці додано тематичну цитату в тегу <blockquote>"
           }
         ],
         "meta": {
@@ -565,7 +565,7 @@
             "target": "h1",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності головного заголовка <h1>"
+            "description": "На сторінці додано головний заголовок <h1>"
           },
           {
             "id": "h_m02_nav_ul",
@@ -573,7 +573,7 @@
             "target": "nav ul",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності маркованого списку <ul> усередині навігації <nav>"
+            "description": "Усередині блоку навігації <nav> розміщено маркований список <ul>"
           },
           {
             "id": "h_m02_nav_links",
@@ -581,7 +581,7 @@
             "target": "nav a",
             "expected": ">=3",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 3 навігаційних посилань <a> всередині <nav>"
+            "description": "У блоці навігації <nav> створено не менше 3 посилань <a>"
           },
           {
             "id": "h_m02_ul_count",
@@ -589,7 +589,7 @@
             "target": "ul",
             "expected": ">=2",
             "points": 1.0,
-            "description": "Перевірка наявності щонайменше 2 маркованих списків <ul> (навігаційний та змістовий)"
+            "description": "На сторінці використано не менше 2 маркованих списків <ul> (навігаційний і змістовий)"
           },
           {
             "id": "h_m02_ol_li_count",
@@ -597,7 +597,7 @@
             "target": "ol li",
             "expected": ">=3",
             "points": 1.5,
-            "description": "Перевірка наявності нумерованого списку <ol> щонайменше з 3 пунктами <li>"
+            "description": "Створено нумерований список <ol>, що містить не менше 3 пунктів <li>"
           },
           {
             "id": "h_m02_dl_dt_count",
@@ -605,7 +605,7 @@
             "target": "dl dt",
             "expected": ">=2",
             "points": 1.0,
-            "description": "Перевірка наявності списку описів <dl> щонайменше з 2 термінами <dt>"
+            "description": "У списку описів <dl> додано не менше 2 термінів <dt>"
           },
           {
             "id": "h_m02_dl_dd_count",
@@ -613,7 +613,7 @@
             "target": "dl dd",
             "expected": ">=2",
             "points": 1.0,
-            "description": "Перевірка наявності щонайменше 2 визначень <dd> у списку описів <dl>"
+            "description": "У списку описів <dl> додано не менше 2 визначень <dd>"
           },
           {
             "id": "h_m02_a_href",
@@ -621,7 +621,7 @@
             "target": "a",
             "expected": "href",
             "points": 1.0,
-            "description": "Перевірка наявності атрибута href в усіх гіперпосиланнях <a>"
+            "description": "Кожне гіперпосилання <a> містить заповнений атрибут адреси href"
           },
           {
             "id": "h_m02_external_rel",
@@ -629,7 +629,7 @@
             "target": "a[target='_blank']",
             "expected": "rel",
             "points": 1.0,
-            "description": "Перевірка наявності атрибута rel (noopener noreferrer) у зовнішніх посилань із target=\"_blank\""
+            "description": "Для зовнішніх посилань <a> з відкриттям у новій вкладці (target=\"_blank\") додано захисний атрибут rel"
           }
         ],
         "meta": {
@@ -837,7 +837,7 @@
             "target": "html",
             "expected": "lang",
             "points": 1.0,
-            "description": "Перевірка наявності атрибута lang у тегу <html> для екранних дикторів"
+            "description": "У кореневому тегу <html> вказано атрибут мови lang для коректної доступності"
           },
           {
             "id": "h_m03_h1_exists",
@@ -845,7 +845,7 @@
             "target": "h1",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності головного заголовка галереї <h1>"
+            "description": "На сторінці галереї додано головний заголовок <h1>"
           },
           {
             "id": "h_m03_figure_count",
@@ -853,7 +853,7 @@
             "target": "figure",
             "expected": ">=3",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 3 семантичних контейнерів <figure>"
+            "description": "Створено не менше 3 семантичних медіаблоків <figure>"
           },
           {
             "id": "h_m03_figure_img",
@@ -861,7 +861,7 @@
             "target": "figure img",
             "expected": ">=3",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 3 зображень <img> усередині <figure>"
+            "description": "Усередині контейнерів <figure> розміщено не менше 3 зображень <img>"
           },
           {
             "id": "h_m03_figcaption_count",
@@ -869,7 +869,7 @@
             "target": "figure figcaption",
             "expected": ">=3",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 3 підписів <figcaption> усередині <figure>"
+            "description": "До ілюстрацій усередині <figure> додано не менше 3 підписів <figcaption>"
           },
           {
             "id": "h_m03_img_src",
@@ -877,7 +877,7 @@
             "target": "img",
             "expected": "src",
             "points": 1.0,
-            "description": "Перевірка наявності атрибута src в усіх зображеннях <img>"
+            "description": "У кожному зображенні <img> вказано шлях до файлу в атрибуті src"
           },
           {
             "id": "h_m03_img_alt",
@@ -885,7 +885,7 @@
             "target": "img",
             "expected": "alt",
             "points": 1.5,
-            "description": "Перевірка наявності атрибута доступності alt в усіх зображеннях <img>"
+            "description": "Кожне зображення <img> містить альтернативний текстовий опис в атрибуті alt"
           },
           {
             "id": "h_m03_audio_controls",
@@ -893,7 +893,7 @@
             "target": "audio",
             "expected": "controls",
             "points": 1.0,
-            "description": "Перевірка наявності аудіоплеєра <audio> з атрибутом controls"
+            "description": "На сторінці додано аудіопрогравач <audio> з панеллю керування (атрибут controls)"
           }
         ],
         "meta": {
@@ -1161,7 +1161,7 @@
             "target": "table",
             "expected": "true",
             "points": 0.5,
-            "description": "Перевірка наявності HTML-таблиці <table>"
+            "description": "На сторінці створено таблицю <table>"
           },
           {
             "id": "h_m04_caption_exists",
@@ -1169,7 +1169,7 @@
             "target": "table caption",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності заголовка таблиці <caption> усередині <table>"
+            "description": "Усередині таблиці <table> додано семантичний заголовок <caption>"
           },
           {
             "id": "h_m04_thead_exists",
@@ -1177,7 +1177,7 @@
             "target": "table thead",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності секції шапки таблиці <thead>"
+            "description": "У таблиці виділено секцію шапки <thead>"
           },
           {
             "id": "h_m04_thead_th_count",
@@ -1185,7 +1185,7 @@
             "target": "table thead th",
             "expected": ">=4",
             "points": 1.0,
-            "description": "Перевірка наявності щонайменше 4 комірок-заголовків <th> у секції <thead>"
+            "description": "У секції шапки <thead> створено не менше 4 комірок-заголовків <th>"
           },
           {
             "id": "h_m04_th_scope",
@@ -1193,7 +1193,7 @@
             "target": "table thead th",
             "expected": "scope",
             "points": 1.0,
-            "description": "Перевірка наявності атрибута доступності scope в усіх <th> секції <thead>"
+            "description": "Кожна комірка-заголовок <th> у секції <thead> містить атрибут доступності scope"
           },
           {
             "id": "h_m04_tbody_tr_count",
@@ -1201,7 +1201,7 @@
             "target": "table tbody tr",
             "expected": ">=4",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 4 рядків даних <tr> у секції <tbody>"
+            "description": "У тілі таблиці <tbody> створено не менше 4 рядків даних <tr>"
           },
           {
             "id": "h_m04_tfoot_exists",
@@ -1209,7 +1209,7 @@
             "target": "table tfoot",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності підсумкової секції таблиці <tfoot>"
+            "description": "У таблиці оформлено підсумкову секцію <tfoot>"
           },
           {
             "id": "h_m04_colspan_exists",
@@ -1217,7 +1217,7 @@
             "target": "table td[colspan], table th[colspan]",
             "expected": "true",
             "points": 1.5,
-            "description": "Перевірка використання горизонтального об'єднання комірок через атрибут colspan"
+            "description": "У таблиці застосовано горизонтальне об'єднання комірок через атрибут colspan"
           },
           {
             "id": "h_m04_rowspan_exists",
@@ -1225,7 +1225,7 @@
             "target": "table td[rowspan], table th[rowspan]",
             "expected": "true",
             "points": 1.5,
-            "description": "Перевірка використання вертикального об'єднання комірок через атрибут rowspan"
+            "description": "У таблиці застосовано вертикальне об'єднання комірок через атрибут rowspan"
           }
         ],
         "meta": {
@@ -1483,7 +1483,7 @@
             "target": "form",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності контейнера форми <form>"
+            "description": "На сторінці створено інтерактивну форму <form>"
           },
           {
             "id": "h_m05_form_method",
@@ -1491,7 +1491,7 @@
             "target": "form",
             "expected": "method",
             "points": 0.5,
-            "description": "Перевірка наявності атрибута method у тегу <form>"
+            "description": "У тегу <form> вказано спосіб надсилання даних через атрибут method"
           },
           {
             "id": "h_m05_fieldset_legend",
@@ -1499,7 +1499,7 @@
             "target": "form fieldset legend",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка логічного групування полів через <fieldset> і <legend>"
+            "description": "Поля форми логічно згруповано за допомогою <fieldset> і заголовка <legend>"
           },
           {
             "id": "h_m05_label_count",
@@ -1507,7 +1507,7 @@
             "target": "form label",
             "expected": ">=4",
             "points": 1.0,
-            "description": "Перевірка наявності щонайменше 4 підписів <label> усередині форми"
+            "description": "У формі створено не менше 4 підписів до полів <label>"
           },
           {
             "id": "h_m05_label_for",
@@ -1515,7 +1515,7 @@
             "target": "form label",
             "expected": "for",
             "points": 1.0,
-            "description": "Перевірка явного зв'язування кожного <label> із полем через атрибут for"
+            "description": "Кожен підпис <label> явно зв'язано з полем вводу через атрибут for"
           },
           {
             "id": "h_m05_input_count",
@@ -1523,7 +1523,7 @@
             "target": "form input",
             "expected": ">=4",
             "points": 1.0,
-            "description": "Перевірка наявності щонайменше 4 полів вводу <input> усередині форми"
+            "description": "У формі додано не менше 4 полів вводу <input>"
           },
           {
             "id": "h_m05_email_required",
@@ -1531,7 +1531,7 @@
             "target": "form input[type='email']",
             "expected": "required",
             "points": 1.5,
-            "description": "Перевірка наявності поля input[type='email'] з обов'язковою клієнтською валідацією required"
+            "description": "У формі є поле електронної пошти <input type=\"email\"> з обов'язковим атрибутом required"
           },
           {
             "id": "h_m05_select_options",
@@ -1539,7 +1539,7 @@
             "target": "form select option",
             "expected": ">=3",
             "points": 1.0,
-            "description": "Перевірка наявності випадаючого списку <select> щонайменше з 3 варіантами <option>"
+            "description": "У формі додано розкривний список <select>, що містить не менше 3 варіантів <option>"
           },
           {
             "id": "h_m05_textarea_exists",
@@ -1547,7 +1547,7 @@
             "target": "form textarea",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності багаторядкового поля <textarea> у формі"
+            "description": "У формі передбачено багаторядкове текстове поле <textarea>"
           },
           {
             "id": "h_m05_submit_button",
@@ -1555,7 +1555,7 @@
             "target": "form button[type='submit']",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності кнопки відправлення <button type=\"submit\">"
+            "description": "У формі додано кнопку надсилання <button type=\"submit\">"
           }
         ],
         "meta": {
@@ -1883,7 +1883,7 @@
             "target": "html",
             "expected": "lang",
             "points": 0.5,
-            "description": "Перевірка наявності атрибута мови lang у кореневому тегу <html>"
+            "description": "У кореневому тегу <html> вказано атрибут мови lang"
           },
           {
             "id": "h_m06_header_h1",
@@ -1891,7 +1891,7 @@
             "target": "header > h1",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка розміщення головного заголовка <h1> безпосередньо в шапці <header>"
+            "description": "Головний заголовок <h1> розміщено безпосередньо в шапці сайту <header>"
           },
           {
             "id": "h_m06_nav_links",
@@ -1899,7 +1899,7 @@
             "target": "nav ul li a",
             "expected": ">=3",
             "points": 1.0,
-            "description": "Перевірка наявності навігації <nav><ul><li><a> щонайменше з 3 посиланнями"
+            "description": "У навігаційному меню <nav> через список <ul> і <li> оформлено не менше 3 посилань <a>"
           },
           {
             "id": "h_m06_nav_href",
@@ -1907,7 +1907,7 @@
             "target": "nav a",
             "expected": "href",
             "points": 0.5,
-            "description": "Перевірка наявності атрибута href в усіх посиланнях усередині <nav>"
+            "description": "Кожне навігаційне посилання <a> у блоці <nav> містить атрибут адреси href"
           },
           {
             "id": "h_m06_main_exists",
@@ -1915,7 +1915,7 @@
             "target": "main",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності семантичного контейнера основного вмісту <main>"
+            "description": "Основний вміст сторінки виділено в семантичний контейнер <main>"
           },
           {
             "id": "h_m06_section_count",
@@ -1923,7 +1923,7 @@
             "target": "main section",
             "expected": ">=2",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 2 тематичних розділів <section> усередині <main>"
+            "description": "Усередині <main> створено не менше 2 тематичних розділів <section>"
           },
           {
             "id": "h_m06_article_count",
@@ -1931,7 +1931,7 @@
             "target": "main article",
             "expected": ">=2",
             "points": 1.5,
-            "description": "Перевірка наявності щонайменше 2 самостійних публікацій/карток <article> усередині <main>"
+            "description": "Усередині <main> розміщено не менше 2 самостійних публікацій або карток <article>"
           },
           {
             "id": "h_m06_aside_exists",
@@ -1939,7 +1939,7 @@
             "target": "aside",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності додаткового інформаційного блоку <aside>"
+            "description": "На сторінці додано бічний інформаційний блок <aside>"
           },
           {
             "id": "h_m06_img_alt",
@@ -1947,7 +1947,7 @@
             "target": "main img",
             "expected": "alt",
             "points": 1.0,
-            "description": "Перевірка наявності зображення <img> у <main> з обов'язковим атрибутом доступності alt"
+            "description": "Усередині <main> розміщено зображення <img> з обов'язковим описовим атрибутом alt"
           },
           {
             "id": "h_m06_footer_exists",
@@ -1955,7 +1955,7 @@
             "target": "footer",
             "expected": "true",
             "points": 1.0,
-            "description": "Перевірка наявності семантичного підвалу сторінки <footer>"
+            "description": "Сторінку завершено семантичним підвалом <footer>"
           }
         ],
         "meta": {

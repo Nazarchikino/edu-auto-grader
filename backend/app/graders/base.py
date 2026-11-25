@@ -1,7 +1,8 @@
 import math
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from pathlib import Path
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
@@ -18,6 +19,215 @@ _NUMERIC_CONDITION_PATTERN = re.compile(
 )
 _PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 _WHOLE_PLACEHOLDER_PATTERN = re.compile(r"^\{[a-zA-Z_][a-zA-Z0-9_]*\}$")
+
+_ALIGNMENT_UK_LABELS: dict[str, str] = {
+    "justify": "по ширині",
+    "both": "по ширині",
+    "center": "по центру",
+    "left": "по лівому краю",
+    "right": "по правому краю",
+    "distribute": "рівномірно за шириною",
+}
+_MARGIN_SIDE_ORDER: tuple[str, ...] = ("left", "right", "top", "bottom")
+_MARGIN_SIDE_UK_LABELS: dict[str, str] = {
+    "left": "ліве",
+    "right": "праве",
+    "top": "верхнє",
+    "bottom": "нижнє",
+}
+_SINGLE_MARGIN_PATTERN = re.compile(
+    r"^\s*(\d+(?:[.,]\d+)?)\s*(cm|mm|см|мм)?\s*$",
+    re.IGNORECASE,
+)
+_COMPARISON_VALUE_PATTERN = re.compile(
+    r"^\s*(>=|<=|>|<)\s*(\d+(?:[.,]\d+)?)\s*$"
+)
+
+
+def _format_uk_decimal(raw_number: str) -> str:
+    """Форматує десяткове число з українською комою без зайвих кінцевих нулів."""
+    normalized = raw_number.strip().replace(",", ".")
+    if "." not in normalized:
+        return normalized
+    stripped = normalized.rstrip("0").rstrip(".")
+    return stripped.replace(".", ",")
+
+
+def _format_margin_measurement(raw_value: object) -> str:
+    """Перетворює одиночний розмір поля ('1.5cm', '20mm', 2.0) у читабельний запис з одиницями."""
+    if isinstance(raw_value, (int, float, Decimal)) and not isinstance(raw_value, bool):
+        numeric = float(raw_value)
+        unit = "см" if numeric <= 5.0 else "мм"
+        return f"{_format_uk_decimal(str(raw_value))} {unit}"
+
+    cleaned = str(raw_value).strip().strip("'\"")
+    match = _SINGLE_MARGIN_PATTERN.fullmatch(cleaned)
+    if match is None:
+        return cleaned
+
+    num_str = match.group(1)
+    unit_raw = (match.group(2) or "").lower()
+    if unit_raw in {"cm", "см"}:
+        unit = "см"
+    elif unit_raw in {"mm", "мм"}:
+        unit = "мм"
+    else:
+        unit = "см" if float(num_str.replace(",", ".")) <= 5.0 else "мм"
+    return f"{_format_uk_decimal(num_str)} {unit}"
+
+
+def _format_margins_value(raw_value: object) -> str:
+    """Форматує поля сторінки (рядок або словник) зрозумілою українською мовою."""
+    if isinstance(raw_value, Mapping):
+        parts: list[str] = []
+        for side in _MARGIN_SIDE_ORDER:
+            if side in raw_value:
+                side_label = _MARGIN_SIDE_UK_LABELS[side]
+                parts.append(f"{side_label} — {_format_margin_measurement(raw_value[side])}")
+        if parts:
+            return ", ".join(parts)
+
+    cleaned = str(raw_value).strip().strip("'\"")
+    if "=" in cleaned:
+        side_values: dict[str, str] = {}
+        for token in re.split(r"[,;]", cleaned):
+            item = token.strip()
+            if "=" not in item:
+                continue
+            k_raw, v_raw = item.split("=", maxsplit=1)
+            side = k_raw.strip().lower()
+            if side in _MARGIN_SIDE_UK_LABELS:
+                side_values[side] = _format_margin_measurement(v_raw)
+        if side_values:
+            ordered = [
+                f"{_MARGIN_SIDE_UK_LABELS[side]} — {side_values[side]}"
+                for side in _MARGIN_SIDE_ORDER
+                if side in side_values
+            ]
+            return ", ".join(ordered)
+
+    if _SINGLE_MARGIN_PATTERN.fullmatch(cleaned) is not None:
+        return f"по {_format_margin_measurement(cleaned)} з усіх боків"
+
+    return cleaned
+
+
+def _format_student_placeholder_value(token: str, raw_value: object) -> str:
+    """Перетворює технічне значення параметра варіанта у зрозумілий український текст."""
+    token_lower = token.lower()
+
+    if isinstance(raw_value, bool):
+        return "так" if raw_value else "ні"
+
+    if isinstance(raw_value, Mapping):
+        keys_lower = {str(k).lower() for k in raw_value}
+        if keys_lower and keys_lower.issubset(set(_MARGIN_SIDE_ORDER)):
+            return _format_margins_value(raw_value)
+        formatted_pairs = [
+            f"{k}: {_format_student_placeholder_value(str(k), v)}"
+            for k, v in raw_value.items()
+        ]
+        return ", ".join(formatted_pairs)
+
+    if isinstance(raw_value, (list, tuple)):
+        return ", ".join(
+            _format_student_placeholder_value(token, item) for item in raw_value
+        )
+
+    if isinstance(raw_value, (int, float, Decimal)):
+        return _format_uk_decimal(str(raw_value))
+
+    cleaned = str(raw_value).strip().strip("'\"")
+    cleaned_lower = cleaned.lower()
+
+    if cleaned_lower in _ALIGNMENT_UK_LABELS:
+        return _ALIGNMENT_UK_LABELS[cleaned_lower]
+
+    if cleaned_lower in {"true", "yes"}:
+        return "так"
+    if cleaned_lower in {"false", "no"}:
+        return "ні"
+
+    if (
+        token_lower == "margins"
+        or token_lower.endswith("_margins")
+        or (
+            "=" in cleaned
+            and any(f"{side}=" in cleaned_lower for side in _MARGIN_SIDE_ORDER)
+        )
+    ):
+        return _format_margins_value(cleaned)
+
+    if token_lower == "line_spacing":
+        num_norm = cleaned.replace(",", ".")
+        if num_norm in {"1", "1.0"}:
+            return "1,0 (одинарний)"
+        if num_norm in {"2", "2.0"}:
+            return "2,0 (подвійний)"
+        return cleaned.replace(".", ",")
+
+    if token_lower == "body_size" or token_lower.endswith("_size"):
+        size_clean = re.sub(r"\s*(?:pt|пт)$", "", cleaned, flags=re.IGNORECASE)
+        return _format_uk_decimal(size_clean)
+
+    if token_lower == "min_tables":
+        comp_match = _COMPARISON_VALUE_PATTERN.fullmatch(cleaned)
+        if comp_match is not None:
+            op, num_str = comp_match.group(1), comp_match.group(2)
+            num_int = int(float(num_str.replace(",", ".")))
+            if op == ">=" and num_int == 0:
+                return "таблиця за цим варіантом не обов'язкова"
+            if op == ">=" and num_int == 1:
+                return "потрібна щонайменше 1 таблиця"
+            if op == ">=":
+                is_few = 2 <= (num_int % 10) <= 4 and not (12 <= (num_int % 100) <= 14)
+                noun = "таблиці" if is_few else "таблиць"
+                return f"потрібно щонайменше {num_int} {noun}"
+
+    if token_lower == "pk_target" and "." in cleaned:
+        table_name, col_name = cleaned.split(".", maxsplit=1)
+        return f"«{col_name.strip()}» у таблиці «{table_name.strip()}»"
+
+    comp_match = _COMPARISON_VALUE_PATTERN.fullmatch(cleaned)
+    if comp_match is not None:
+        op, num_str = comp_match.group(1), _format_uk_decimal(comp_match.group(2))
+        op_labels = {
+            ">=": "не менше",
+            "<=": "не більше",
+            ">": "більше",
+            "<": "менше",
+        }
+        return f"{op_labels[op]} {num_str}"
+
+    return cleaned
+
+
+def format_student_criterion_description(
+    description: str,
+    variant_data: Mapping[str, object],
+) -> str:
+    """Підставляє параметри варіанта в опис критерію, форматуючи їх зрозумілою українською."""
+    if "{" not in description:
+        return description.strip()
+
+    lookup: dict[str, object] = {}
+    for key, value in variant_data.items():
+        if key != "parameters":
+            lookup[key] = value
+
+    nested_params = variant_data.get("parameters")
+    if isinstance(nested_params, Mapping):
+        for key, value in nested_params.items():
+            if isinstance(key, str):
+                lookup[key] = value
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(1)
+        if token not in lookup:
+            return match.group(0)
+        return _format_student_placeholder_value(token, lookup[token])
+
+    return _PLACEHOLDER_PATTERN.sub(_replace, description).strip()
 
 
 class BaseGrader(ABC):

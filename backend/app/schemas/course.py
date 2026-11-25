@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import GradingRule
@@ -105,6 +106,21 @@ class PracticalUpdate(BaseModel):
     needs_rules_review: bool | None = None
 
 
+class GradingCriterionPreviewRead(BaseModel):
+    """Публічний опис окремого критерію автоперевірки для студента (без сирих target/expected)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    weight_points: Decimal = Field(..., gt=Decimal("0"))
+
+    @field_serializer("weight_points", when_used="json")
+    def _serialize_weight_points(self, value: Decimal) -> float:
+        """Серіалізує вагу критерію як JSON-число для коректного відображення на фронтенді."""
+        return round(float(value), 2)
+
+
 class PracticalSummaryRead(BaseModel):
     """Стисла інформація про практичну роботу в контексті навчального модуля."""
 
@@ -118,6 +134,7 @@ class PracticalSummaryRead(BaseModel):
     is_unlocked: bool = False
     best_score: float | None = None
     needs_rules_review: bool = False
+    grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
 
 
 class PracticalStudentRead(BaseModel):
@@ -135,6 +152,7 @@ class PracticalStudentRead(BaseModel):
     variant_index: int = Field(..., ge=0)
     variant_number: int = Field(..., ge=1)
     variant: PracticalVariant
+    grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
 
 
 class PracticalTeacherRead(BaseModel):

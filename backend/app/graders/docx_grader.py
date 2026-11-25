@@ -13,7 +13,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.base import BaseGrader
+from app.graders.base import BaseGrader, format_student_criterion_description
 from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import PracticalFormat
 from app.schemas.grading import (
@@ -248,7 +248,16 @@ class DocxGrader(BaseGrader):
         for rule in rules:
             resolved_target = self.resolve_expected(rule.target, variant_data)
             resolved_expected = self.resolve_expected(rule.expected, variant_data)
-            resolved_rule = rule.model_copy(update={"target": resolved_target})
+            resolved_description = format_student_criterion_description(
+                rule.description,
+                variant_data,
+            )
+            resolved_rule = rule.model_copy(
+                update={
+                    "target": resolved_target,
+                    "description": resolved_description,
+                }
+            )
             result = self._evaluate_rule(document, resolved_rule, resolved_expected)
             results.append(result)
 

@@ -70,6 +70,12 @@ export interface PracticalUpdate {
   needs_rules_review?: boolean | null;
 }
 
+export interface GradingCriterionPreviewRead {
+  id: string;
+  description: string;
+  weight_points: number;
+}
+
 export interface PracticalSummaryRead {
   id: string;
   module_id: string;
@@ -79,6 +85,7 @@ export interface PracticalSummaryRead {
   is_unlocked: boolean;
   best_score: number | null;
   needs_rules_review: boolean;
+  grading_criteria: GradingCriterionPreviewRead[];
 }
 
 export interface PracticalStudentRead {
@@ -92,6 +99,7 @@ export interface PracticalStudentRead {
   variant_index: number;
   variant_number: number;
   variant: PracticalVariant;
+  grading_criteria: GradingCriterionPreviewRead[];
 }
 
 export interface PracticalTeacherRead {

@@ -287,7 +287,7 @@ async def test_submit_all_four_practical_formats_via_api(
     ws_exams["A1"] = "Прізвище"
     ws_exams["B1"] = "Алгебра"
     ws_budget = wb.create_sheet("Бюджет")
-    ws_budget["E10"] = "=SUM(E2:E9)"
+    ws_budget["J3"] = "=SUM(B3:H3)"
     wb.save(str(xlsx_file))
     wb.close()
     rewrite_openxml_core_metadata(
@@ -706,7 +706,7 @@ async def test_download_submissions_by_course_teacher_and_admin_with_headers_and
     ws.title = "Іспити"
     ws["A1"] = "Прізвище"
     ws_budget = wb.create_sheet("Бюджет")
-    ws_budget["E10"] = "=SUM(E2:E9)"
+    ws_budget["J3"] = "=SUM(B3:H3)"
     wb.save(str(xlsx_path))
     wb.close()
     xlsx_bytes = xlsx_path.read_bytes()
@@ -2075,3 +2075,157 @@ async def test_antiplagiarism_api_html_structural_match_and_classroom_template_c
     assert w_r2.status_code == 201
     assert w_r2.json()["is_plagiarism_flagged"] is False
     assert w_r2.json()["plagiarism_reason"] is None
+
+
+async def test_student_module_and_practical_endpoints_return_formatted_grading_criteria(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Інтеграційна перевірка T6.16a: прозорі україномовні критерії без expected/target."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+    headers_s1 = make_auth_headers(student1.id, student1.role)
+    headers_s2 = make_auth_headers(student2.id, student2.role)
+
+    async def _get_module_and_practical_by_order(
+        slug: CourseSlug,
+        order_index: int,
+    ) -> tuple[Module, Practical]:
+        row = (
+            await db_session.execute(
+                select(Module, Practical)
+                .join(Course, Module.course_id == Course.id)
+                .join(Practical, Practical.module_id == Module.id)
+                .where(Course.slug == slug, Module.order_index == order_index)
+            )
+        ).one()
+        mod, prac = row
+        assert isinstance(mod, Module)
+        assert isinstance(prac, Practical)
+        return mod, prac
+
+    def _assert_safe_criteria_list(
+        criteria: list[dict[str, Any]],
+        *,
+        expected_count: int,
+    ) -> None:
+        assert len(criteria) == expected_count
+        total_weight = 0.0
+        for item in criteria:
+            assert set(item.keys()) == {"id", "description", "weight_points"}
+            assert "expected" not in item
+            assert "target" not in item
+            desc = item["description"]
+            assert isinstance(desc, str) and desc.strip() != ""
+            assert "{" not in desc and "}" not in desc
+            for forbidden in ("justify", "center", "left", "right", "docx_", "accdb_"):
+                assert forbidden not in desc.lower()
+            total_weight += float(item["weight_points"])
+        assert total_weight == pytest.approx(10.0)
+
+    # 1. Word M01: студент 1 (Варіант 1 -> Times New Roman) vs студент 2 (Варіант 2 -> Calibri)
+    word_m01, word_m01_prac = await _get_module_and_practical_by_order(
+        CourseSlug.WORD,
+        1,
+    )
+    mod_s1_resp = await async_client.get(
+        f"/api/v1/modules/{word_m01.id}",
+        headers=headers_s1,
+    )
+    assert mod_s1_resp.status_code == 200
+    mod_s1_prac = mod_s1_resp.json()["practical"]
+    assert mod_s1_prac is not None
+    assert mod_s1_prac["needs_rules_review"] is False
+    s1_criteria = mod_s1_prac["grading_criteria"]
+    _assert_safe_criteria_list(s1_criteria, expected_count=4)
+    s1_joined = " | ".join(item["description"] for item in s1_criteria)
+    assert "Times New Roman" in s1_joined
+    assert "по ширині" in s1_joined
+    assert "1,5" in s1_joined
+    assert "2 см" in s1_joined
+
+    mod_s2_resp = await async_client.get(
+        f"/api/v1/modules/{word_m01.id}",
+        headers=headers_s2,
+    )
+    assert mod_s2_resp.status_code == 200
+    s2_criteria = mod_s2_resp.json()["practical"]["grading_criteria"]
+    _assert_safe_criteria_list(s2_criteria, expected_count=4)
+    s2_joined = " | ".join(item["description"] for item in s2_criteria)
+    assert "Calibri" in s2_joined
+    assert "по ширині" in s2_joined
+    assert s1_joined != s2_joined
+
+    # 2. Після проходження тесту GET /api/v1/practicals/{id} повертає ті самі безпечні критерії
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_m01.id)
+    prac_s1_resp = await async_client.get(
+        f"/api/v1/practicals/{word_m01_prac.id}",
+        headers=headers_s1,
+    )
+    assert prac_s1_resp.status_code == 200
+    prac_s1_data = prac_s1_resp.json()
+    assert prac_s1_data["grading_criteria"] == s1_criteria
+
+    # Перевіряємо також, що GradingReport містить підставлений опис без {body_font}
+    docx_file = build_sample_docx(
+        tmp_path / "criteria_check.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+    )
+    submit_resp = await async_client.post(
+        f"/api/v1/practicals/{word_m01_prac.id}/submit",
+        headers=headers_s1,
+        files={
+            "file": (
+                "criteria_check.docx",
+                docx_file.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert submit_resp.status_code == 201
+    report_descs = " | ".join(
+        item["description"] for item in submit_resp.json()["grading_report"]["results"]
+    )
+    assert "Times New Roman" in report_descs
+    assert "по ширині" in report_descs
+    assert "{" not in report_descs
+
+    # 3. Word M02: прапорець needs_rules_review=True та відсутність прихованих правил шрифту
+    word_m02, _ = await _get_module_and_practical_by_order(CourseSlug.WORD, 2)
+    m02_resp = await async_client.get(
+        f"/api/v1/modules/{word_m02.id}",
+        headers=headers_s1,
+    )
+    assert m02_resp.status_code == 200
+    m02_prac_data = m02_resp.json()["practical"]
+    assert m02_prac_data["needs_rules_review"] is True
+    m02_criteria = m02_prac_data["grading_criteria"]
+    _assert_safe_criteria_list(m02_criteria, expected_count=2)
+    m02_joined = " | ".join(item["description"] for item in m02_criteria).lower()
+    assert "шрифт" not in m02_joined
+    assert "2 см" in m02_joined
+    assert "1,5" in m02_joined
+
+    # 4. Access M09: назви таблиць і первинного ключа підставляються індивідуально
+    access_m09, _ = await _get_module_and_practical_by_order(CourseSlug.ACCESS, 9)
+    acc_s1_resp = await async_client.get(
+        f"/api/v1/modules/{access_m09.id}",
+        headers=headers_s1,
+    )
+    acc_s2_resp = await async_client.get(
+        f"/api/v1/modules/{access_m09.id}",
+        headers=headers_s2,
+    )
+    assert acc_s1_resp.status_code == 200
+    assert acc_s2_resp.status_code == 200
+    acc_s1_criteria = acc_s1_resp.json()["practical"]["grading_criteria"]
+    acc_s2_criteria = acc_s2_resp.json()["practical"]["grading_criteria"]
+    _assert_safe_criteria_list(acc_s1_criteria, expected_count=8)
+    _assert_safe_criteria_list(acc_s2_criteria, expected_count=8)
+    acc_s1_text = " | ".join(item["description"] for item in acc_s1_criteria)
+    acc_s2_text = " | ".join(item["description"] for item in acc_s2_criteria)
+    assert acc_s1_text != acc_s2_text

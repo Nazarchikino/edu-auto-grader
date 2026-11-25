@@ -2,6 +2,7 @@ import type { CourseSlug } from "./course";
 import type { ExtractedMetadata, GradingReport } from "./grading";
 
 export {
+  type GradingCriterionPreviewRead,
   type PracticalStudentRead,
   type PracticalSummaryRead,
   type PracticalTeacherRead,
