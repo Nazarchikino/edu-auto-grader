@@ -3,7 +3,19 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, ForeignKey, Numeric, SmallInteger, String, Text, Uuid, text
+from sqlalchemy import (
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,6 +62,7 @@ class Course(Base):
     """Навчальний курс із дисципліни (таблиця `courses`)."""
 
     __tablename__ = "courses"
+    __table_args__ = (Index("ix_courses_teacher_id", "teacher_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -93,6 +106,14 @@ class Module(Base):
     """Навчальний модуль курсу з лекцією, тестом та практичною (таблиця `modules`)."""
 
     __tablename__ = "modules"
+    __table_args__ = (
+        Index("ix_modules_course_order", "course_id", "order_index"),
+        UniqueConstraint(
+            "course_id",
+            "order_index",
+            name="uq_modules_course_order_index",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -125,6 +146,7 @@ class Module(Base):
         "QuizQuestion",
         back_populates="module",
         cascade="all, delete-orphan",
+        order_by=lambda: (QuizQuestion.order_index.asc(), QuizQuestion.id.asc()),
     )
     practical: Mapped["Practical | None"] = relationship(
         "Practical",
@@ -143,6 +165,9 @@ class QuizQuestion(Base):
     """Тестове питання для допуску до практичної роботи модуля (таблиця `quiz_questions`)."""
 
     __tablename__ = "quiz_questions"
+    __table_args__ = (
+        Index("ix_quiz_questions_module_order", "module_id", "order_index"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -153,6 +178,12 @@ class QuizQuestion(Base):
         Uuid(as_uuid=True),
         ForeignKey("modules.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    order_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     question_text: Mapped[str] = mapped_column(
         Text,

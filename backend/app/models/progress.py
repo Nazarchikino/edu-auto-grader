@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Numeric,
     SmallInteger,
     String,
@@ -29,6 +30,14 @@ class QuizAttempt(Base):
     """Спроба проходження студентом тесту-допуску до модуля (таблиця `quiz_attempts`)."""
 
     __tablename__ = "quiz_attempts"
+    __table_args__ = (
+        Index(
+            "ix_quiz_attempts_student_module",
+            "student_id",
+            "module_id",
+            "attempted_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -71,6 +80,18 @@ class Submission(Base):
     """Здача практичної роботи студентом та результати її автоперевірки (таблиця `submissions`)."""
 
     __tablename__ = "submissions"
+    __table_args__ = (
+        Index(
+            "ix_submissions_student_practical",
+            "student_id",
+            "practical_id",
+        ),
+        Index(
+            "ix_submissions_practical_submitted_at",
+            "practical_id",
+            "submitted_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),

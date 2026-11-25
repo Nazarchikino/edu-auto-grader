@@ -5,11 +5,10 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.exceptions import DomainError, QuizNotPassedError
-from app.models.course import Module, Practical
+from app.models.course import Module, Practical, QuizQuestion
 from app.models.progress import QuizAttempt
 from app.models.user import User
 from app.schemas.course import (
@@ -179,14 +178,17 @@ class QuizService:
         module_id: uuid.UUID,
     ) -> bool:
         """Перевіряє, чи склав студент тест-допуск для вказаного модуля."""
-        module_stmt = (
-            select(Module)
-            .options(selectinload(Module.quiz_questions))
-            .where(Module.id == module_id)
-        )
+        module_stmt = select(Module.id).where(Module.id == module_id)
         module_result = await self._db.execute(module_stmt)
-        module = module_result.scalar_one_or_none()
-        has_questions = True if module is None else len(module.quiz_questions) > 0
+        module_exists = module_result.scalar_one_or_none() is not None
+        if not module_exists:
+            has_questions = True
+        else:
+            questions_count_stmt = select(func.count(QuizQuestion.id)).where(
+                QuizQuestion.module_id == module_id
+            )
+            questions_count_result = await self._db.execute(questions_count_stmt)
+            has_questions = int(questions_count_result.scalar_one()) > 0
 
         quiz_passed, _ = await self.get_module_quiz_status(
             student_id=student_id,
@@ -228,11 +230,7 @@ class QuizService:
         payload: QuizSubmitRequest,
     ) -> QuizSubmitResponse:
         """Оцінює відповіді студента на тест-допуск із перевіркою повноти та cooldown."""
-        stmt = (
-            select(Module)
-            .options(selectinload(Module.quiz_questions))
-            .where(Module.id == module_id)
-        )
+        stmt = select(Module).where(Module.id == module_id)
         result = await self._db.execute(stmt)
         module = result.scalar_one_or_none()
         if module is None:
@@ -243,7 +241,13 @@ class QuizService:
                 context={"module_id": str(module_id)},
             )
 
-        questions = module.quiz_questions
+        questions_stmt = (
+            select(QuizQuestion)
+            .where(QuizQuestion.module_id == module.id)
+            .order_by(QuizQuestion.order_index.asc(), QuizQuestion.id.asc())
+        )
+        questions_result = await self._db.execute(questions_stmt)
+        questions = list(questions_result.scalars().all())
         total_questions = len(questions)
         if total_questions == 0:
             raise DomainError(

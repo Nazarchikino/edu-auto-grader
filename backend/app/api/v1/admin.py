@@ -1,8 +1,9 @@
 import uuid
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -162,6 +163,66 @@ async def _ensure_email_unique(
             status_code=409,
             context={"email": email},
         )
+
+
+async def _ensure_group_list_number_unique(
+    db: AsyncSession,
+    group_id: uuid.UUID | None,
+    list_number: int | None,
+    *,
+    exclude_user_id: uuid.UUID | None = None,
+) -> None:
+    """Перевіряє унікальність порядкового номера студента в межах академічної групи."""
+    if group_id is None or list_number is None:
+        return
+    stmt = select(User.id).where(
+        User.group_id == group_id,
+        User.list_number == list_number,
+    )
+    if exclude_user_id is not None:
+        stmt = stmt.where(User.id != exclude_user_id)
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is not None:
+        raise DomainError(
+            f"У цій академічній групі студент із номером у списку №{list_number} уже існує.",
+            code="USER_GROUP_LIST_NUMBER_EXISTS",
+            status_code=409,
+            context={
+                "group_id": str(group_id),
+                "list_number": list_number,
+            },
+        )
+
+
+def _raise_user_conflict_from_integrity_error(
+    exc: IntegrityError,
+    *,
+    email: str,
+    group_id: uuid.UUID | None,
+    list_number: int | None,
+) -> NoReturn:
+    """Перетворює IntegrityError при збереженні користувача на зрозумілий DomainError 409."""
+    err_text = str(exc.orig if exc.orig is not None else exc).lower()
+    if "uq_users_group_list_number" in err_text or (
+        "group_id" in err_text and "list_number" in err_text
+    ):
+        raise DomainError(
+            f"У цій академічній групі студент із номером у списку №{list_number} уже існує.",
+            code="USER_GROUP_LIST_NUMBER_EXISTS",
+            status_code=409,
+            context={
+                "group_id": str(group_id) if group_id is not None else None,
+                "list_number": list_number,
+            },
+        ) from exc
+    if "email" in err_text:
+        raise DomainError(
+            f"Користувач із поштою «{email}» вже зареєстрований.",
+            code="USER_EMAIL_EXISTS",
+            status_code=409,
+            context={"email": email},
+        ) from exc
+    raise exc
 
 
 @router.get("/groups", response_model=list[AcademicGroupRead])
@@ -338,6 +399,11 @@ async def create_admin_user(
             await _get_group_or_404(db, payload.group_id)
             resolved_group_id = payload.group_id
         resolved_list_number = payload.list_number
+        await _ensure_group_list_number_unique(
+            db,
+            resolved_group_id,
+            resolved_list_number,
+        )
 
     password_hash = await hash_password_async(payload.password)
     user = User(
@@ -349,7 +415,16 @@ async def create_admin_user(
         list_number=resolved_list_number,
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        _raise_user_conflict_from_integrity_error(
+            exc,
+            email=email,
+            group_id=resolved_group_id,
+            list_number=resolved_list_number,
+        )
 
     created_user = await _get_user_with_group_or_404(db, user.id)
     return serialize_user(created_user)
@@ -395,6 +470,7 @@ async def update_admin_user(
     user = await _get_user_with_group_or_404(db, user_id)
     fields_set = payload.model_fields_set
 
+    next_email = user.email
     if "email" in fields_set and payload.email is not None:
         normalized_email = _normalize_email(payload.email)
         await _ensure_email_unique(
@@ -402,10 +478,11 @@ async def update_admin_user(
             normalized_email,
             exclude_user_id=user.id,
         )
-        user.email = normalized_email
+        next_email = normalized_email
 
+    next_full_name = user.full_name
     if "full_name" in fields_set and payload.full_name is not None:
-        user.full_name = _normalize_non_empty(
+        next_full_name = _normalize_non_empty(
             payload.full_name,
             field_label="ПІБ користувача",
             code="INVALID_FULL_NAME",
@@ -421,18 +498,31 @@ async def update_admin_user(
                 context={"user_id": str(user.id)},
             )
         target_role = payload.role
-        user.role = target_role
 
+    next_group_id = user.group_id
+    next_list_number = user.list_number
     if target_role == UserRole.STUDENT:
         if "group_id" in fields_set:
             if payload.group_id is not None:
                 await _get_group_or_404(db, payload.group_id)
-            user.group_id = payload.group_id
+            next_group_id = payload.group_id
         if "list_number" in fields_set:
-            user.list_number = payload.list_number
+            next_list_number = payload.list_number
+        await _ensure_group_list_number_unique(
+            db,
+            next_group_id,
+            next_list_number,
+            exclude_user_id=user.id,
+        )
     else:
-        user.group_id = None
-        user.list_number = None
+        next_group_id = None
+        next_list_number = None
+
+    user.email = next_email
+    user.full_name = next_full_name
+    user.role = target_role
+    user.group_id = next_group_id
+    user.list_number = next_list_number
 
     if "password" in fields_set and payload.password is not None:
         user.password_hash = await hash_password_async(payload.password)
@@ -440,7 +530,16 @@ async def update_admin_user(
         if user.id != current_admin.id:
             user.must_change_password = True
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        _raise_user_conflict_from_integrity_error(
+            exc,
+            email=next_email,
+            group_id=next_group_id,
+            list_number=next_list_number,
+        )
     updated_user = await _get_user_with_group_or_404(db, user.id)
     return serialize_user(updated_user)
 

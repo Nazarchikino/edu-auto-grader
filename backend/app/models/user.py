@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -77,6 +78,17 @@ class User(Base):
     """Користувач системи: студент, викладач або адміністратор (таблиця `users`)."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_group_id", "group_id"),
+        Index(
+            "uq_users_group_list_number",
+            "group_id",
+            "list_number",
+            unique=True,
+            postgresql_where=text("group_id IS NOT NULL AND list_number IS NOT NULL"),
+            sqlite_where=text("group_id IS NOT NULL AND list_number IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),

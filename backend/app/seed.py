@@ -170,11 +170,12 @@ def _load_course_from_json(
         )
         module.quiz_questions = [
             QuizQuestion(
+                order_index=idx,
                 question_text=question.question_text,
                 options=list(question.options),
                 correct_option_index=question.correct_option_index,
             )
-            for question in mod_payload.quiz_questions
+            for idx, question in enumerate(mod_payload.quiz_questions, start=1)
         ]
         if mod_payload.practical is not None:
             prac_payload = mod_payload.practical
@@ -323,25 +324,25 @@ def _sync_quiz_questions_in_place(
     incoming_questions: Sequence[QuizQuestion],
 ) -> None:
     """Оновлює питання тесту модуля без перестворення ідентичних записів і втрати QuizAttempt."""
-    existing_questions = list(existing_module.quiz_questions)
-    existing_signatures = [_question_signature(item) for item in existing_questions]
-    incoming_signatures = [_question_signature(item) for item in incoming_questions]
-    if existing_signatures == incoming_signatures:
-        return
-
+    existing_questions = sorted(
+        existing_module.quiz_questions,
+        key=lambda item: (item.order_index, str(item.id)),
+    )
     existing_by_sig: dict[_QuizQuestionSignature, list[QuizQuestion]] = {}
     for question in existing_questions:
         existing_by_sig.setdefault(_question_signature(question), []).append(question)
 
     matched_existing_obj_ids: set[int] = set()
-    unmatched_incoming: list[QuizQuestion] = []
-    for incoming in incoming_questions:
+    unmatched_incoming: list[tuple[int, QuizQuestion]] = []
+    for idx, incoming in enumerate(incoming_questions, start=1):
         bucket = existing_by_sig.get(_question_signature(incoming))
         if bucket:
             kept = bucket.pop(0)
             matched_existing_obj_ids.add(id(kept))
+            if kept.order_index != idx:
+                kept.order_index = idx
         else:
-            unmatched_incoming.append(incoming)
+            unmatched_incoming.append((idx, incoming))
 
     unmatched_existing = [
         question
@@ -351,15 +352,23 @@ def _sync_quiz_questions_in_place(
     if not unmatched_incoming and not unmatched_existing:
         return
 
-    for target, source in zip(unmatched_existing, unmatched_incoming, strict=False):
+    for target, (target_order_index, source) in zip(
+        unmatched_existing,
+        unmatched_incoming,
+        strict=False,
+    ):
+        target.order_index = target_order_index
         target.question_text = source.question_text
         target.options = list(source.options)
         target.correct_option_index = source.correct_option_index
 
     if len(unmatched_incoming) > len(unmatched_existing):
-        for source in unmatched_incoming[len(unmatched_existing) :]:
+        for target_order_index, source in unmatched_incoming[
+            len(unmatched_existing) :
+        ]:
             existing_module.quiz_questions.append(
                 QuizQuestion(
+                    order_index=target_order_index,
                     question_text=source.question_text,
                     options=list(source.options),
                     correct_option_index=source.correct_option_index,
@@ -465,11 +474,12 @@ async def _sync_course_in_place(
             )
             new_module.quiz_questions = [
                 QuizQuestion(
+                    order_index=question.order_index if question.order_index > 0 else idx,
                     question_text=question.question_text,
                     options=list(question.options),
                     correct_option_index=question.correct_option_index,
                 )
-                for question in incoming_mod.quiz_questions
+                for idx, question in enumerate(incoming_mod.quiz_questions, start=1)
             ]
             if incoming_mod.practical is not None:
                 new_module.practical = Practical(
