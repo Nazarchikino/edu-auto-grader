@@ -309,6 +309,7 @@ function parseInlineNodes(
                     src={safeUrl}
                     alt={alt}
                     loading="lazy"
+                    referrerPolicy="no-referrer"
                     className="max-h-40 max-w-full rounded object-contain"
                   />
                 </button>
@@ -323,6 +324,7 @@ function parseInlineNodes(
                     src={safeUrl}
                     alt={alt}
                     loading="lazy"
+                    referrerPolicy="no-referrer"
                     className="max-h-40 max-w-full rounded object-contain"
                   />
                 </span>
@@ -340,6 +342,7 @@ function parseInlineNodes(
                     src={safeUrl}
                     alt={alt}
                     loading="lazy"
+                    referrerPolicy="no-referrer"
                     className="max-h-40 max-w-full rounded object-contain"
                   />
                 </a>
@@ -1194,6 +1197,7 @@ export function MarkdownRenderer({
                   src={safeUrl}
                   alt={block.alt}
                   loading="lazy"
+                  referrerPolicy="no-referrer"
                   className={`mx-auto w-auto max-w-full rounded object-contain ${
                     compact ? "max-h-80" : "max-h-[480px]"
                   }`}
@@ -1324,6 +1328,8 @@ export function MarkdownRenderer({
               <img
                 src={lightboxImage.src}
                 alt={lightboxImage.alt}
+                loading="lazy"
+                referrerPolicy="no-referrer"
                 className="mx-auto max-h-[75vh] w-auto max-w-full rounded-lg bg-white object-contain shadow-xs"
               />
             </div>

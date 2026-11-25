@@ -13,7 +13,7 @@ MIN_PRODUCTION_JWT_SECRET_LENGTH: int = 32
 
 
 def _resolve_backend_path(raw_path: Path) -> Path:
-    """Безпечно резолвить відносний шлях контенту/медіа відносно кореня `backend/`."""
+    """Безпечно резолвить відносний шлях (uploads/content/media) відносно кореня `backend/`."""
     if raw_path.is_absolute():
         return raw_path
 
@@ -65,8 +65,9 @@ class Settings(BaseSettings):
         ]
     )
 
-    UPLOADS_DIR: Path = Path("uploads")
+    UPLOADS_DIR: Path = _BACKEND_ROOT / "uploads"
     SUBMISSION_FILE_RETENTION_DAYS: int = Field(default=90, ge=1)
+    SUBMISSION_SUPERSEDED_GRACE_HOURS: int = Field(default=24, ge=0)
     ENABLE_RETENTION_CLEANUP_TASK: bool = True
     COURSE_CONTENT_DIR: Path = _BACKEND_ROOT / "content" / "courses"
     COURSE_MEDIA_DIR: Path = _BACKEND_ROOT / "content" / "media"
@@ -82,9 +83,9 @@ class Settings(BaseSettings):
     MAX_ZIP_SINGLE_ENTRY_BYTES: int = Field(default=20 * 1024 * 1024, ge=1)
     MAX_ZIP_COMPRESSION_RATIO: float = Field(default=100.0, gt=0.0)
 
-    @field_validator("COURSE_CONTENT_DIR", "COURSE_MEDIA_DIR", mode="after")
+    @field_validator("UPLOADS_DIR", "COURSE_CONTENT_DIR", "COURSE_MEDIA_DIR", mode="after")
     @classmethod
-    def _validate_content_paths(cls, value: Path) -> Path:
+    def _validate_backend_paths(cls, value: Path) -> Path:
         return _resolve_backend_path(value)
 
     @model_validator(mode="after")

@@ -237,23 +237,50 @@ class BaseGrader(ABC):
 ### 3.3. Основні REST API Ендпоінти (`/api/v1`)
 | Метод | Шлях | Роль | Призначення |
 | :--- | :--- | :--- | :--- |
+| `GET` | `/health`, `/api/v1/health` | Public | Liveness-перевірка працездатності API-процесу |
+| `GET` | `/api/v1/health/ready` | Public | Readiness-перевірка PostgreSQL (`SELECT 1`) та доступності запису в `UPLOADS_DIR` (`200` / `503`) |
 | `POST` | `/auth/login` | Public | Отримання JWT access + refresh токенів (із sliding-window rate limiting на невдалі спроби) |
 | `POST` | `/auth/refresh` | Public | Оновлення пари JWT-токенів із перевіркою актуальності `token_version` (`tv`) |
 | `POST` | `/auth/change-password` | All Auth | Самостійна зміна пароля, скидання `must_change_password`, інкремент `token_version` та видача нової пари токенів |
-| `GET` | `/courses` | All Auth | Перелік курсів та прогрес поточного студента |
-| `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції та статусу доступу до практичної |
-| `DELETE` | `/modules/{module_id}` | Teacher / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач із диска |
-| `POST` | `/modules/{module_id}/quiz/submit` | Student | Відправка відповідей тесту-допуску та розблокування практичної |
+| `GET` | `/auth/me` | All Auth | Профіль поточного автентифікованого користувача |
+| `GET` | `/courses` | All Auth | Перелік 4 навчальних курсів та прогрес поточного користувача |
+| `GET` | `/courses/{course_id}` | All Auth | Детальна інформація про курс та список його модулів із прогресом |
+| `POST` | `/courses` | Teacher / Admin | Створення навчального курсу (у межах 4 фіксованих дисциплін `word`/`excel`/`access`/`html`) |
+| `PATCH` | `/courses/{course_id}` | Teacher (owner) / Admin | Оновлення назви, опису або (лише для `admin`) викладача курсу |
+| `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції, питань тесту-допуску, cooldown і статусу доступу до практичної |
+| `POST` | `/courses/{course_id}/modules` | Teacher (owner) / Admin | Створення нового навчального модуля з лекцією |
+| `PATCH` | `/modules/{module_id}` | Teacher (owner) / Admin | Оновлення заголовка, порядкового номера або лекції модуля |
+| `DELETE` | `/modules/{module_id}` | Teacher (owner) / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач із диска |
+| `GET` | `/modules/{module_id}/quiz/questions` | Teacher (owner) / Admin | Перелік питань тесту-допуску модуля разом із правильними відповідями |
+| `POST` | `/modules/{module_id}/quiz/questions` | Teacher (owner) / Admin | Додавання тестового питання до модуля |
+| `DELETE` | `/quiz/questions/{question_id}` | Teacher (owner) / Admin | Видалення тестового питання |
+| `POST` | `/modules/{module_id}/quiz/submit` | Student | Відправка відповідей тесту-допуску (з cooldown при невдачі) та розблокування практичної |
 | `GET` | `/practicals/{practical_id}` | Student | Отримання умови та персонального варіанта студента |
-| `DELETE` | `/practicals/{practical_id}` | Teacher / Admin | Видалення практичної роботи та її здач (зі збереженням модуля, лекції й тесту) і безпечне видалення файлів здач із диска |
-| `POST` | `/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML-коду (`JSON`) та миттєва автоперевірка |
-| `PUT` | `/practicals/{practical_id}/rules` | Teacher | Оновлення JSONB правил автоперевірки |
-| `GET` | `/submissions/{submission_id}/download` | Teacher / Admin | Завантаження вихідного файлу (`.docx`/`.xlsx`/`.accdb`) або `.html` (з `raw_code`) здачі студента викладачем курсу або адміністратором |
-| `PATCH` | `/submissions/{submission_id}/grade` | Teacher | Ручне коригування оцінки та додавання коментаря викладача |
-| `GET` | `/analytics/groups/{group_id}/export` | Teacher | Генерація відомості успішності у форматі `.xlsx` або `.pdf` |
+| `GET` | `/practicals/{practical_id}/teacher` | Teacher / Admin | Повна конфігурація практичної роботи з усіма варіантами й правилами перевірки |
+| `POST` | `/modules/{module_id}/practical` | Teacher (owner) / Admin | Створення або повне оновлення практичної роботи модуля |
+| `PATCH` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Часткове оновлення параметрів, варіантів, правил або `needs_rules_review` |
+| `DELETE` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Видалення практичної роботи та її здач (зі збереженням модуля, лекції й тесту) і безпечне видалення файлів здач із диска |
+| `POST` | `/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML-коду (`JSON`) та миттєва автоперевірка з антиплагіатом |
+| `PUT` | `/practicals/{practical_id}/rules` | Teacher (owner) / Admin | Валідація та оновлення JSONB правил автоперевірки (опційно `sync_max_score`) |
+| `GET` | `/submissions/me` | All Auth | Історія здач практичних робіт поточного користувача (електронна заліковка) |
+| `GET` | `/submissions` | All Auth | Перелік здач із фільтрацією за `practical_id`, `student_id`, `group_id`, `plagiarism_only` |
+| `GET` | `/submissions/{submission_id}` | All Auth | Детальний звіт автоперевірки та статус антиплагіату здачі |
+| `GET` | `/submissions/{submission_id}/download` | Teacher (owner) / Admin | Завантаження вихідного файлу (`.docx`/`.xlsx`/`.accdb`) або `.html` (з `raw_code`) здачі студента |
+| `PATCH` | `/submissions/{submission_id}/grade` | Teacher (owner) / Admin | Ручне коригування оцінки та додавання коментаря викладача |
+| `GET` | `/analytics/groups` | Teacher / Admin | Перелік академічних груп коледжу для електронного журналу й експорту |
+| `GET` | `/analytics/groups/{group_id}/journal` | Teacher / Admin | Зведена відомість успішності академічної групи (JSON) та статистика помилок по критеріях |
+| `GET` | `/analytics/groups/{group_id}/export` | Teacher / Admin | Генерація відомості успішності у форматі `.xlsx` або `.pdf` |
+| `GET` | `/admin/groups` | Admin | Перелік усіх академічних груп |
+| `POST` | `/admin/groups` | Admin | Створення нової академічної групи (`course_year` у межах `1..4`) |
+| `PATCH` | `/admin/groups/{group_id}` | Admin | Редагування шифру, спеціальності або курсу академічної групи |
+| `DELETE` | `/admin/groups/{group_id}` | Admin | Видалення академічної групи з відв'язкою студентів |
+| `GET` | `/admin/users` | Admin | Перелік облікових записів користувачів із фільтрацією (`role`, `group_id`, `search`) |
+| `POST` | `/admin/users` | Admin | Створення користувача (`student`, `teacher`, `admin`) |
 | `POST` | `/admin/users/import` | Admin | Масовий імпорт студентів із `.docx` або `.txt` з українським алфавітним сортуванням та звітом (`must_change_password=True`) |
+| `PATCH` | `/admin/users/{user_id}` | Admin | Оновлення профілю, ролі, групи, номера у списку або пароля користувача |
 | `POST` | `/admin/users/{user_id}/reset-password` | Admin | Скидання пароля користувача з інкрементом `token_version` (відкликання сесій) та встановленням `must_change_password=True` |
-| `GET` | `/media/courses/{path}` | Public | Статична роздача медіафайлів навчальних курсів (`.png`, `.webp`, `.jpg`, `.pdf`) із `COURSE_MEDIA_DIR` через `StaticFiles` |
+| `DELETE` | `/admin/users/{user_id}` | Admin | Видалення користувача та безпечне очищення фізичних файлів його здач із `UPLOADS_DIR` |
+| `GET` | `/media/courses/{path}` | Public | Статична роздача медіафайлів курсів із `COURSE_MEDIA_DIR` через `StaticFiles` із заголовками `X-Content-Type-Options: nosniff` і `CSP` |
 
 ### 3.4. Контракт масового імпорту студентів (`POST /api/v1/admin/users/import`)
 * **Запит (`multipart/form-data`):**

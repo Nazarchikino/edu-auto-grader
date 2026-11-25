@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -51,7 +53,6 @@ import {
   MarkdownRenderer,
   renderInlineMarkdown,
 } from "../../components/common/MarkdownRenderer";
-import { HtmlSandbox } from "../../components/sandbox/HtmlSandbox";
 import { extractApiErrorMessage, useAuth } from "../../context/AuthContext";
 import type {
   ErrorResponse,
@@ -69,6 +70,10 @@ import type {
 
 type ModuleSectionTab = "lecture" | "quiz" | "practical";
 type BinaryPracticalFormat = Exclude<PracticalFormat, "html">;
+
+const HtmlSandbox = lazy(
+  () => import("../../components/sandbox/HtmlSandbox")
+);
 
 interface FileUploadFormatMeta {
   extension: string;
@@ -1989,15 +1994,24 @@ export function ModuleViewPage(): ReactElement {
 
                   {/* Гілка Б (HTML): Вбудована HTML-пісочниця (Monaco Editor + <iframe sandbox>) */}
                   {practicalDetail.format_type === "html" ? (
-                    <HtmlSandbox
-                      practicalId={practicalDetail.id}
-                      practicalTitle={practicalDetail.title}
-                      variant={practicalDetail.variant}
-                      variantNumber={practicalDetail.variant_number}
-                      userId={user?.id}
-                      isSubmitting={isSubmittingPractical}
-                      onSubmitCode={handleHtmlSandboxSubmit}
-                    />
+                    <Suspense
+                      fallback={
+                        <div className="flex h-[540px] items-center justify-center rounded-2xl border border-slate-200 bg-white text-sm text-slate-600 shadow-xs">
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" />
+                          Завантаження локального редактора Monaco Editor...
+                        </div>
+                      }
+                    >
+                      <HtmlSandbox
+                        practicalId={practicalDetail.id}
+                        practicalTitle={practicalDetail.title}
+                        variant={practicalDetail.variant}
+                        variantNumber={practicalDetail.variant_number}
+                        userId={user?.id}
+                        isSubmitting={isSubmittingPractical}
+                        onSubmitCode={handleHtmlSandboxSubmit}
+                      />
+                    </Suspense>
                   ) : (
                     /* Гілка А (Word .docx / Excel .xlsx / Access .accdb): Drag-and-drop форма завантаження файлу */
                     (() => {
