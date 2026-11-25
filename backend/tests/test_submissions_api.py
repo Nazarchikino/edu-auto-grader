@@ -1286,3 +1286,306 @@ async def test_submit_html_returns_422_when_raw_code_exceeds_max_length(
     )
     assert form_resp.status_code == 422
     assert form_resp.json()["code"] == "RAW_CODE_TOO_LONG"
+
+
+async def test_best_score_unified_across_student_progress_and_group_journal_export(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє єдиний вибір найкращої спроби (BEST) у прогресі студента, журналі та експорті."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    student_headers = make_auth_headers(student1.id, student1.role)
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+
+    html_course, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
+
+    # 1. Сильна здача на 10.0 балів + ручне коригування викладачем до 8.5 із коментарем
+    strong_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Візитівка ІТ-відділення</title>
+      </head>
+      <body>
+        <h1>ІТ-відділення фахового коледжу</h1>
+        <h2>Освітні програми</h2>
+        <p>Ключова спеціальність — <strong>Інженерія програмного забезпечення</strong>.</p>
+        <h2>Навчальні лабораторії</h2>
+        <p>Акцент на <em>практичній підготовці</em> студентів.</p>
+        <p>Заняття проходять у сучасних аудиторіях.</p>
+        <blockquote>Якісна розмітка — основа вебдодатків.</blockquote>
+      </body>
+    </html>
+    """
+    high_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=student_headers,
+        json={"raw_code": strong_html},
+    )
+    assert high_resp.status_code == 201
+    high_sub = high_resp.json()
+    assert high_sub["auto_score"] == 10.0
+    assert high_sub["final_score"] == 10.0
+    high_sub_id = high_sub["id"]
+
+    adjust_resp = await async_client.patch(
+        f"/api/v1/submissions/{high_sub_id}/grade",
+        headers=teacher_headers,
+        json={
+            "final_score": 8.5,
+            "teacher_comment": "Зараховано основну версію після захисту.",
+        },
+    )
+    assert adjust_resp.status_code == 200
+    assert adjust_resp.json()["final_score"] == 8.5
+
+    # 2. Пізніша слабка чернетка на 2.5 бали (html[lang]=1.0 + body h1=1.5)
+    weak_draft_html = (
+        '<!DOCTYPE html><html lang="uk"><body><h1>Чернетка студента</h1></body></html>'
+    )
+    weak_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=student_headers,
+        json={"raw_code": weak_draft_html},
+    )
+    assert weak_resp.status_code == 201
+    weak_sub = weak_resp.json()
+    assert weak_sub["final_score"] == 2.5
+    weak_sub_id = weak_sub["id"]
+
+    # Фіксуємо чіткий хронологічний порядок submitted_at (слабка здача новіша за сильну)
+    base_time = datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+    high_row = (
+        await db_session.execute(
+            select(Submission).where(Submission.id == uuid.UUID(high_sub_id))
+        )
+    ).scalar_one()
+    weak_row = (
+        await db_session.execute(
+            select(Submission).where(Submission.id == uuid.UUID(weak_sub_id))
+        )
+    ).scalar_one()
+    assert isinstance(high_row, Submission)
+    assert isinstance(weak_row, Submission)
+    high_row.submitted_at = base_time
+    weak_row.submitted_at = base_time + timedelta(minutes=5)
+    await db_session.commit()
+
+    # 3. Прогрес студента у курсі та деталях модуля показує 8.5
+    course_resp = await async_client.get(
+        f"/api/v1/courses/{html_course.id}",
+        headers=student_headers,
+    )
+    assert course_resp.status_code == 200
+    course_modules = course_resp.json()["modules"]
+    target_module_summary = next(
+        mod for mod in course_modules if mod["id"] == str(html_mod.id)
+    )
+    assert target_module_summary["practical_score"] == 8.5
+
+    module_resp = await async_client.get(
+        f"/api/v1/modules/{html_mod.id}",
+        headers=student_headers,
+    )
+    assert module_resp.status_code == 200
+    assert module_resp.json()["practical"]["best_score"] == 8.5
+
+    # 4. Журнал групи та експорт .xlsx/.pdf показують ту саму найкращу здачу (8.5, high_sub_id)
+    group_res = await db_session.execute(
+        select(AcademicGroup).where(AcademicGroup.code == "КН-31")
+    )
+    group = group_res.scalar_one()
+    assert isinstance(group, AcademicGroup)
+
+    journal_resp = await async_client.get(
+        f"/api/v1/analytics/groups/{group.id}/journal?course_id={html_course.id}",
+        headers=teacher_headers,
+    )
+    assert journal_resp.status_code == 200
+    journal_data = journal_resp.json()
+    student1_row = next(
+        row for row in journal_data["rows"] if row["student_id"] == str(student1.id)
+    )
+    assert student1_row["total_score"] == 8.5
+    target_cell = next(
+        cell
+        for cell in student1_row["cells"]
+        if cell["practical_id"] == str(html_prac.id)
+    )
+    assert target_cell["submission_id"] == high_sub_id
+    assert target_cell["final_score"] == 8.5
+    assert target_cell["auto_score"] == 10.0
+
+    # Деталі обраної у журналі здачі містять коментар викладача саме цієї найкращої здачі
+    inspected_sub_resp = await async_client.get(
+        f"/api/v1/submissions/{target_cell['submission_id']}",
+        headers=teacher_headers,
+    )
+    assert inspected_sub_resp.status_code == 200
+    assert (
+        inspected_sub_resp.json()["teacher_comment"]
+        == "Зараховано основну версію після захисту."
+    )
+
+    # Статистика помилок враховує дедупліковані найкращі спроби (0 помилок замість чернетки)
+    assert len(journal_data["error_stats"]) == 9
+    assert all(stat["total_attempts"] == 1 for stat in journal_data["error_stats"])
+    assert all(stat["failure_count"] == 0 for stat in journal_data["error_stats"])
+
+    # Перевірка згенерованої відомості .xlsx: у клітинці та сумі студента стоїть 8.5
+    xlsx_resp = await async_client.get(
+        f"/api/v1/analytics/groups/{group.id}/export?format=xlsx&course_id={html_course.id}",
+        headers=teacher_headers,
+    )
+    assert xlsx_resp.status_code == 200
+    workbook = openpyxl.load_workbook(io.BytesIO(xlsx_resp.content))
+    sheet = workbook.active
+    assert isinstance(sheet, Worksheet)
+    exported_student_row_idx = next(
+        row_idx
+        for row_idx in range(5, sheet.max_row + 1)
+        if sheet.cell(row=row_idx, column=2).value == student1.full_name
+    )
+    assert sheet.cell(row=exported_student_row_idx, column=3).value == 8.5
+    assert sheet.cell(row=exported_student_row_idx, column=sheet.max_column - 1).value == 8.5
+    workbook.close()
+
+    pdf_resp = await async_client.get(
+        f"/api/v1/analytics/groups/{group.id}/export?format=pdf&course_id={html_course.id}",
+        headers=teacher_headers,
+    )
+    assert pdf_resp.status_code == 200
+    assert pdf_resp.content.startswith(b"%PDF-")
+
+    # 5. Tie-break: при рівному final_score (8.5 == 8.5) перемагає новіша за submitted_at здача
+    tie_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Візитівка ІТ-відділення v2</title>
+      </head>
+      <body>
+        <h1>ІТ-відділення фахового коледжу</h1>
+        <h2>Єдиний підрозділ</h2>
+        <p><strong>Інженерія програмного забезпечення</strong>.</p>
+        <p><em>Практична підготовка</em> студентів.</p>
+        <p>Додатковий абзац для перевірки.</p>
+        <blockquote>Новіша версія на 8.5 балів.</blockquote>
+      </body>
+    </html>
+    """
+    tie_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=student_headers,
+        json={"raw_code": tie_html},
+    )
+    assert tie_resp.status_code == 201
+    tie_sub = tie_resp.json()
+    assert tie_sub["final_score"] == 8.5
+    tie_sub_id = tie_sub["id"]
+
+    tie_row = (
+        await db_session.execute(
+            select(Submission).where(Submission.id == uuid.UUID(tie_sub_id))
+        )
+    ).scalar_one()
+    assert isinstance(tie_row, Submission)
+    tie_row.submitted_at = base_time + timedelta(minutes=10)
+    await db_session.commit()
+
+    journal_tie_resp = await async_client.get(
+        f"/api/v1/analytics/groups/{group.id}/journal?course_id={html_course.id}",
+        headers=teacher_headers,
+    )
+    assert journal_tie_resp.status_code == 200
+    student1_tie_row = next(
+        row
+        for row in journal_tie_resp.json()["rows"]
+        if row["student_id"] == str(student1.id)
+    )
+    tie_cell = next(
+        cell
+        for cell in student1_tie_row["cells"]
+        if cell["practical_id"] == str(html_prac.id)
+    )
+    assert tie_cell["final_score"] == 8.5
+    assert tie_cell["submission_id"] == tie_sub_id
+
+
+async def test_submit_html_starter_template_and_empty_body_returns_422(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє відхилення (422) стартового шаблону HtmlSandbox та HTML із порожнім <body>."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    headers = make_auth_headers(student1.id, student1.role)
+    _, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
+
+    expected_detail = (
+        "Тіло HTML-документа (<body>) порожнє. Додайте власну розмітку перед здачею."
+    )
+    starter_template = """<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Практична робота</title>
+</head>
+<body>
+  <!-- Виконайте завдання тут -->
+</body>
+</html>"""
+
+    invalid_payloads = (
+        starter_template,
+        (
+            "<!DOCTYPE html><html lang='uk'><head><title>Test</title></head>"
+            "<body>   \n\t  </body></html>"
+        ),
+        "<!DOCTYPE html><html><body><!-- <h1>Закоментований тег</h1> -->   </body></html>",
+        (
+            "<!DOCTYPE html><html lang='uk'><head><meta charset='UTF-8'>"
+            "<title>Only Head</title></head></html>"
+        ),
+    )
+
+    for raw_code in invalid_payloads:
+        resp = await async_client.post(
+            f"/api/v1/practicals/{html_prac.id}/submit",
+            headers=headers,
+            json={"raw_code": raw_code},
+        )
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["code"] == "EMPTY_HTML_BODY"
+        assert body["detail"] == expected_detail
+
+    # Завантаження порожнього стартового шаблону як .html-файлу також повертає 422
+    file_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=headers,
+        files={
+            "file": (
+                "starter.html",
+                starter_template.encode("utf-8"),
+                "text/html",
+            )
+        },
+    )
+    assert file_resp.status_code == 422
+    assert file_resp.json()["code"] == "EMPTY_HTML_BODY"
+    assert file_resp.json()["detail"] == expected_detail
+
+    # У журналі та БД не створено жодної сміттєвої здачі
+    my_subs_resp = await async_client.get("/api/v1/submissions/me", headers=headers)
+    assert my_subs_resp.status_code == 200
+    assert my_subs_resp.json() == []

@@ -1,7 +1,15 @@
 import re
 from pathlib import Path
 
-from bs4 import BeautifulSoup, Doctype, FeatureNotFound, Tag
+from bs4 import BeautifulSoup, FeatureNotFound
+from bs4.element import (
+    Comment,
+    Declaration,
+    Doctype,
+    NavigableString,
+    ProcessingInstruction,
+    Tag,
+)
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.graders.base import BaseGrader
@@ -11,6 +19,20 @@ from app.schemas.grading import (
     GradingReport,
     GradingRule,
     GradingRuleType,
+)
+
+EMPTY_HTML_BODY_ERROR_MESSAGE: str = (
+    "Тіло HTML-документа (<body>) порожнє. Додайте власну розмітку перед здачею."
+)
+
+_NON_CONTENT_STRING_TYPES = (
+    Comment,
+    Declaration,
+    Doctype,
+    ProcessingInstruction,
+)
+_DOCUMENT_SHELL_TAGS: frozenset[str] = frozenset(
+    {"html", "head", "meta", "title", "link", "style", "base"}
 )
 
 _NUMERIC_CONDITION_CHECK_PATTERN = re.compile(
@@ -88,6 +110,53 @@ _KNOWN_HTML_ATTRIBUTES: frozenset[str] = frozenset(
 )
 
 
+def parse_html_document(html_source: str) -> BeautifulSoup:
+    """Парсить HTML-рядок у DOM-дерево BeautifulSoup через lxml (або html.parser)."""
+    try:
+        return BeautifulSoup(html_source, "lxml")
+    except FeatureNotFound:
+        return BeautifulSoup(html_source, "html.parser")
+    except Exception as exc:
+        raise InvalidFileFormatError(
+            "Не вдалося побудувати DOM-дерево з переданого HTML-коду.",
+            context={"error": str(exc)},
+        ) from exc
+
+
+def _node_has_visible_content(node: object) -> bool:
+    """Перевіряє, чи є вузол DOM HTML-елементом або непорожнім текстом поза коментарями."""
+    if isinstance(node, Tag):
+        return True
+    if isinstance(node, _NON_CONTENT_STRING_TYPES):
+        return False
+    if isinstance(node, NavigableString):
+        return bool(str(node).strip())
+    return False
+
+
+def has_meaningful_html_body(html_or_soup: str | BeautifulSoup) -> bool:
+    """Перевіряє, чи містить <body> хоча б один елемент або непорожній текст поза коментарями."""
+    soup = (
+        html_or_soup
+        if isinstance(html_or_soup, BeautifulSoup)
+        else parse_html_document(html_or_soup)
+    )
+    body = soup.find("body")
+    if isinstance(body, Tag):
+        return any(_node_has_visible_content(child) for child in body.contents)
+
+    html_tag = soup.find("html")
+    root: Tag = html_tag if isinstance(html_tag, Tag) else soup
+    for child in root.contents:
+        if isinstance(child, Tag):
+            if child.name.lower() in _DOCUMENT_SHELL_TAGS:
+                continue
+            return True
+        if _node_has_visible_content(child):
+            return True
+    return False
+
+
 class HtmlGrader(BaseGrader):
     """Стратегія детермінованої автоперевірки HTML5-документів на базі BeautifulSoup4."""
 
@@ -104,6 +173,19 @@ class HtmlGrader(BaseGrader):
         """Виконує валідацію DOM-дерева HTML5 за списком правил."""
         html_source = self._resolve_html_source(file_path=file_path, raw_code=raw_code)
         soup = self._parse_html(html_source)
+
+        if not has_meaningful_html_body(soup):
+            empty_results = [
+                self.build_criterion_result(
+                    rule,
+                    passed=False,
+                    actual=None,
+                    feedback=EMPTY_HTML_BODY_ERROR_MESSAGE,
+                    resolved_expected=self.resolve_expected(rule.expected, variant_data),
+                )
+                for rule in rules
+            ]
+            return self.build_report(empty_results)
 
         results: list[CriterionResult] = []
         for rule in rules:
@@ -154,15 +236,7 @@ class HtmlGrader(BaseGrader):
 
     def _parse_html(self, html_source: str) -> BeautifulSoup:
         """Парсить HTML-рядок у DOM-дерево BeautifulSoup через lxml (або html.parser)."""
-        try:
-            return BeautifulSoup(html_source, "lxml")
-        except FeatureNotFound:
-            return BeautifulSoup(html_source, "html.parser")
-        except Exception as exc:
-            raise InvalidFileFormatError(
-                "Не вдалося побудувати DOM-дерево з переданого HTML-коду.",
-                context={"error": str(exc)},
-            ) from exc
+        return parse_html_document(html_source)
 
     def _evaluate_rule(
         self,

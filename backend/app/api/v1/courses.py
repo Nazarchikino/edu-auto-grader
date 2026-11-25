@@ -103,7 +103,7 @@ async def _fetch_user_progress_maps(
         practical_id: uuid.UUID = row[0]
         max_sub_score: Decimal | None = row[1]
         if max_sub_score is not None:
-            best_practical_by_id[practical_id] = float(max_sub_score)
+            best_practical_by_id[practical_id] = round(float(max_sub_score), 2)
 
     return passed_by_module, best_quiz_by_module, best_practical_by_id
 
@@ -256,7 +256,9 @@ async def _build_module_detail_read(
             format_type=module.practical.format_type,
             max_score=float(module.practical.max_score),
             is_unlocked=practical_unlocked,
-            best_score=float(max_sub_score) if max_sub_score is not None else None,
+            best_score=(
+                round(float(max_sub_score), 2) if max_sub_score is not None else None
+            ),
         )
 
     quiz_questions_read = [

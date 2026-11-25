@@ -12,7 +12,11 @@ from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
 from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
-from app.graders.html_grader import HtmlGrader
+from app.graders.html_grader import (
+    EMPTY_HTML_BODY_ERROR_MESSAGE,
+    HtmlGrader,
+    has_meaningful_html_body,
+)
 from app.graders.metadata import (
     CORE_XML_ARCHIVE_PATH,
     compute_code_sha256,
@@ -863,6 +867,72 @@ def test_html_grader_attribute_filter_selector_and_compound_colspan() -> None:
     )
     assert pass_report_td.passed_count == 1
     assert pass_report_td.total_points == 4.0
+
+
+def test_html_grader_empty_body_and_starter_template_score_zero() -> None:
+    """Перевіряє, що порожнє <body> або мінімальний шаблон набирають 0.0 балів у HtmlGrader."""
+    starter_html = """<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Практична робота</title>
+</head>
+<body>
+  <!-- Виконайте завдання тут -->
+</body>
+</html>"""
+
+    assert has_meaningful_html_body(starter_html) is False
+    assert (
+        has_meaningful_html_body(
+            "<!DOCTYPE html><html><head><title>T</title></head>"
+            "<body><!-- <h1>X</h1> --> \n </body></html>"
+        )
+        is False
+    )
+    assert (
+        has_meaningful_html_body(
+            "<!DOCTYPE html><html lang='uk'><head><meta charset='UTF-8'></head></html>"
+        )
+        is False
+    )
+    assert has_meaningful_html_body("<!DOCTYPE html><body>Текст</body>") is True
+    assert has_meaningful_html_body("<!DOCTYPE html><body><h1>Заголовок</h1></body>") is True
+    assert has_meaningful_html_body("<!DOCTYPE html><header><h1>Фрагмент</h1></header>") is True
+
+    rules = [
+        GradingRule(
+            id="r_lang",
+            type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+            target="html",
+            expected="lang",
+            points=3.0,
+            description="Атрибут lang у html",
+        ),
+        GradingRule(
+            id="r_charset",
+            type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+            target="head meta[charset]",
+            expected="charset",
+            points=3.0,
+            description="Метатег charset",
+        ),
+        GradingRule(
+            id="r_title",
+            type=GradingRuleType.HTML_TAG_EXISTS,
+            target="head > title",
+            expected="true",
+            points=4.0,
+            description="Тег title у head",
+        ),
+    ]
+
+    report = HtmlGrader().evaluate(raw_code=starter_html, rules=rules, variant_data={})
+    assert report.total_points == 0.0
+    assert report.passed_count == 0
+    assert report.failed_count == 3
+    assert all(item.feedback == EMPTY_HTML_BODY_ERROR_MESSAGE for item in report.results)
 
 
 def test_docx_grader_supports_uniform_single_number_margin(tmp_path: Path) -> None:

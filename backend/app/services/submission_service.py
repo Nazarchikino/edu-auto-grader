@@ -13,10 +13,15 @@ from app.api.deps import ensure_course_owner_or_admin
 from app.core.config import settings
 from app.core.exceptions import (
     DomainError,
+    GradingError,
     InvalidFileFormatError,
     PlagiarismDetectedError,
 )
 from app.graders.factory import GraderFactory
+from app.graders.html_grader import (
+    EMPTY_HTML_BODY_ERROR_MESSAGE,
+    has_meaningful_html_body,
+)
 from app.graders.metadata import (
     check_submission_plagiarism,
     compute_submission_hash,
@@ -419,6 +424,14 @@ class SubmissionService:
                 code="RAW_CODE_TOO_LONG",
                 status_code=422,
                 context={"max_length": MAX_HTML_CODE_LENGTH},
+            )
+
+        if not has_meaningful_html_body(resolved_code):
+            raise GradingError(
+                EMPTY_HTML_BODY_ERROR_MESSAGE,
+                code="EMPTY_HTML_BODY",
+                status_code=422,
+                context={"format_type": practical.format_type.value},
             )
 
         file_hash = compute_submission_hash(raw_code=resolved_code)

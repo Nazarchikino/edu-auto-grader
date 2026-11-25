@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.security import hash_password
 from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
+from app.graders.html_grader import HtmlGrader
 from app.graders.xlsx_grader import XlsxGrader, _canonicalize_formula
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
@@ -282,6 +283,52 @@ def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> No
     assert practicals_checked == 37
     assert variants_checked == 254
     assert placeholders_resolved >= 340
+
+
+def test_minimal_html_starter_template_scores_zero_across_all_html_course_modules() -> None:
+    """Перевіряє, що мінімальний шаблон HtmlSandbox набирає 0.0 у всіх 6 модулях html.json."""
+    minimal_starter_html = """<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Практична робота</title>
+</head>
+<body>
+  <!-- Виконайте завдання тут -->
+</body>
+</html>"""
+
+    bundle = build_seed_bundle()
+    html_course = next(
+        course for course in bundle.courses if course.slug == CourseSlug.HTML
+    )
+    html_practicals = [
+        (module, module.practical)
+        for module in html_course.modules
+        if module.practical is not None
+    ]
+    assert len(html_practicals) == 6
+
+    grader = HtmlGrader()
+    for module, practical in html_practicals:
+        parsed_rules = [
+            GradingRule.model_validate(raw_rule)
+            for raw_rule in practical.grading_rules
+        ]
+        assert len(parsed_rules) >= 1
+        for variant in practical.variants:
+            report = grader.evaluate(
+                raw_code=minimal_starter_html,
+                rules=parsed_rules,
+                variant_data=variant,
+            )
+            assert report.total_points == 0.0, (
+                f"HTML Модуль {module.order_index} (Варіант {variant.get('variant_number')}) "
+                f"набрав {report.total_points} балів на порожньому шаблоні замість 0.0"
+            )
+            assert report.passed_count == 0
+            assert report.failed_count == len(parsed_rules)
 
 
 @pytest.mark.asyncio

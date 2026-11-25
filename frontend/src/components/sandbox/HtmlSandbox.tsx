@@ -88,143 +88,20 @@ const QUICK_HTML_SNIPPETS: readonly QuickSnippet[] = [
   },
 ];
 
-function buildStarterHtmlTemplate(
-  variant: PracticalVariant,
-  variantNumber: number
-): string {
-  const rawHeading = variant.parameters["required_heading"];
-  const headingText =
-    typeof rawHeading === "string" && rawHeading.trim().length > 0
-      ? rawHeading.trim()
-      : variant.title;
-
-  return `<!DOCTYPE html>
+const MINIMAL_STARTER_HTML_TEMPLATE = `<!DOCTYPE html>
 <html lang="uk">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Варіант №${variantNumber} — ${headingText}</title>
-  <style>
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      margin: 0;
-      padding: 20px;
-      background-color: #f8fafc;
-      color: #0f172a;
-      line-height: 1.5;
-    }
-    header {
-      background: #1e3a8a;
-      color: #ffffff;
-      padding: 16px 20px;
-      border-radius: 10px;
-      margin-bottom: 20px;
-    }
-    header h1 {
-      margin: 0;
-      font-size: 1.35rem;
-    }
-    main {
-      background: #ffffff;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 20px;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 20px;
-      font-size: 0.9rem;
-    }
-    th, td {
-      border: 1px solid #cbd5e1;
-      padding: 8px 12px;
-      text-align: left;
-    }
-    th {
-      background-color: #f1f5f9;
-      font-weight: 600;
-    }
-    form {
-      display: grid;
-      gap: 10px;
-      max-width: 420px;
-      padding: 14px;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      background: #f8fafc;
-    }
-    input, select, textarea, button {
-      font: inherit;
-      padding: 7px 10px;
-      border-radius: 6px;
-      border: 1px solid #cbd5e1;
-    }
-    button {
-      background: #2563eb;
-      color: #ffffff;
-      border: none;
-      font-weight: 600;
-      cursor: pointer;
-    }
-  </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Практична робота</title>
 </head>
 <body>
-  <header>
-    <h1>${headingText}</h1>
-    <p>Індивідуальний варіант №${variantNumber}</p>
-  </header>
-
-  <main>
-    <section>
-      <h2>Таблиця даних варіанта</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>№</th>
-            <th>Назва показника / дисципліни</th>
-            <th>Категорія</th>
-            <th>Статус</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>1</td>
-            <td>Запис №1 (${headingText})</td>
-            <td>Основний блок</td>
-            <td>Активно</td>
-          </tr>
-          <tr>
-            <td>2</td>
-            <td>Запис №2</td>
-            <td>Практичний модуль</td>
-            <td>Активно</td>
-          </tr>
-          <tr>
-            <td>3</td>
-            <td>Запис №3</td>
-            <td>Підсумковий контроль</td>
-            <td>Заплановано</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section>
-      <h2>Форма зворотного зв'язку</h2>
-      <form action="#" method="post">
-        <label for="full_name">Ваше ім'я та група:</label>
-        <input id="full_name" name="full_name" type="text" placeholder="КН-31, Студент" required />
-
-        <label for="comment">Коментар або запит:</label>
-        <input id="comment" name="comment" type="text" placeholder="Текст повідомлення..." />
-
-        <button type="submit">Надіслати форму</button>
-      </form>
-    </section>
-  </main>
+  <!-- Виконайте завдання тут -->
 </body>
 </html>`;
+
+function buildStarterHtmlTemplate(): string {
+  return MINIMAL_STARTER_HTML_TEMPLATE;
 }
 
 export function HtmlSandbox({
@@ -234,10 +111,7 @@ export function HtmlSandbox({
   isSubmitting,
   onSubmitCode,
 }: HtmlSandboxProps): ReactElement {
-  const starterTemplate = useMemo(
-    () => buildStarterHtmlTemplate(variant, variantNumber),
-    [variant, variantNumber]
-  );
+  const starterTemplate = useMemo(() => buildStarterHtmlTemplate(), []);
 
   const [code, setCode] = useState<string>(starterTemplate);
   const [previewDoc, setPreviewDoc] = useState<string>(starterTemplate);
@@ -248,7 +122,7 @@ export function HtmlSandbox({
   useEffect(() => {
     setCode(starterTemplate);
     setPreviewDoc(starterTemplate);
-  }, [starterTemplate]);
+  }, [starterTemplate, practicalTitle, variant.variant_number, variantNumber]);
 
   useEffect(() => {
     if (!autoPreview) {
@@ -386,7 +260,7 @@ export function HtmlSandbox({
             )}
           </button>
 
-          {/* Кнопка скидання до початкового шаблону варіанта */}
+          {/* Кнопка скидання до початкового мінімального шаблону */}
           <button
             type="button"
             onClick={handleResetTemplate}
@@ -394,7 +268,7 @@ export function HtmlSandbox({
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            <span>Шаблон варіанта</span>
+            <span>Скинути шаблон</span>
           </button>
         </div>
       </div>

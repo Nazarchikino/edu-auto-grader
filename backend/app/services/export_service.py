@@ -4,6 +4,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
 
@@ -228,6 +229,13 @@ def build_content_disposition(filename_ascii: str, filename_utf8: str) -> str:
     return f'attachment; filename="{filename_ascii}"; filename*=UTF-8\'\'{encoded_utf8}'
 
 
+def _normalize_utc_timestamp(value: datetime) -> datetime:
+    """Нормалізує мітку часу до UTC для безпечного порівняння naive/aware значень."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def calculate_criterion_error_stats(
     submissions: Sequence[Submission],
 ) -> list[CriterionErrorStat]:
@@ -236,7 +244,7 @@ def calculate_criterion_error_stats(
 
     ordered_submissions = sorted(
         submissions,
-        key=lambda item: (item.submitted_at, str(item.id)),
+        key=lambda item: (_normalize_utc_timestamp(item.submitted_at), str(item.id)),
     )
     for submission in ordered_submissions:
         raw_report = submission.grading_report
@@ -304,16 +312,20 @@ def build_group_journal(
         ),
     )
 
-    latest_submission_map: dict[tuple[uuid.UUID, uuid.UUID], Submission] = {}
-    ordered_submissions_desc = sorted(
+    best_submission_map: dict[tuple[uuid.UUID, uuid.UUID], Submission] = {}
+    ordered_submissions_best = sorted(
         submissions,
-        key=lambda item: (item.submitted_at, str(item.id)),
+        key=lambda item: (
+            Decimal(str(item.final_score)),
+            _normalize_utc_timestamp(item.submitted_at),
+            str(item.id),
+        ),
         reverse=True,
     )
-    for submission in ordered_submissions_desc:
+    for submission in ordered_submissions_best:
         key = (submission.student_id, submission.practical_id)
-        if key not in latest_submission_map:
-            latest_submission_map[key] = submission
+        if key not in best_submission_map:
+            best_submission_map[key] = submission
 
     rows: list[GroupJournalRow] = []
     for student in ordered_students:
@@ -321,7 +333,7 @@ def build_group_journal(
         total_score = 0.0
 
         for practical_info in practicals:
-            matched = latest_submission_map.get(
+            matched = best_submission_map.get(
                 (student.id, practical_info.practical_id)
             )
             if matched is None:
@@ -362,7 +374,7 @@ def build_group_journal(
             )
         )
 
-    error_stats = calculate_criterion_error_stats(submissions)
+    error_stats = calculate_criterion_error_stats(list(best_submission_map.values()))
     return GroupJournalRead(
         group_id=group.id,
         group_code=group.code,
