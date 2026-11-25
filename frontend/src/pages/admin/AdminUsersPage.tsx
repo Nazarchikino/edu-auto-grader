@@ -157,6 +157,9 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} МБ`;
 }
 
+const VARIANT_FORMULA_NOTE =
+  "Індивідуальний варіант кожної практичної роботи обчислюється автоматично за номером у списку: ((№ - 1) mod K) + 1";
+
 function buildCredentialsReportText(report: StudentImportResponse): string {
   const generatedAt = new Date().toLocaleString("uk-UA", {
     day: "2-digit",
@@ -172,9 +175,9 @@ function buildCredentialsReportText(report: StudentImportResponse): string {
     `Дата імпорту: ${generatedAt}`,
     `Створено студентів: ${report.created_count}`,
     `Пропущено записів: ${report.skipped_count}`,
-    `Кількість варіантів практичних робіт: ${report.total_variants}`,
+    `Примітка: ${VARIANT_FORMULA_NOTE}`,
     "========================================================================================",
-    "№ у групі | Варіант | ПІБ | E-mail | Пароль",
+    "№ у списку | ПІБ | E-mail | Пароль",
     "----------------------------------------------------------------------------------------",
   ];
 
@@ -183,7 +186,7 @@ function buildCredentialsReportText(report: StudentImportResponse): string {
   } else {
     for (const item of report.created) {
       lines.push(
-        `${item.list_number} | Варіант ${item.variant_number} | ${item.full_name} | ${item.email} | ${item.temp_password}`
+        `${item.list_number} | ${item.full_name} | ${item.email} | ${item.temp_password}`
       );
     }
   }
@@ -2330,9 +2333,14 @@ export function AdminUsersPage(): ReactElement {
                         <strong>Алфавітне сортування:</strong> усі валідні
                         записи автоматично сортуються за українською абеткою (з
                         коректним порядком <strong>Ґ, Є, І, Ї</strong>) перед
-                        присвоєнням <strong>№ у групі</strong> та{" "}
-                        <strong>Варіанта</strong>; дублікати e-mail
-                        пропускаються без переривання імпорту.
+                        присвоєнням <strong>№ у списку</strong> (індивідуальний
+                        варіант кожної практичної обчислюється автоматично за
+                        формулою{" "}
+                        <code className="rounded bg-white px-1 py-0.5 text-[11px]">
+                          ((№ - 1) mod K) + 1
+                        </code>
+                        ); дублікати e-mail пропускаються без переривання
+                        імпорту.
                       </li>
                     </ul>
                   </div>
@@ -2369,7 +2377,7 @@ export function AdminUsersPage(): ReactElement {
               ) : (
                 <div className="space-y-5">
                   {/* Зведена статистика імпорту */}
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
                       <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                         Академічна група
@@ -2394,26 +2402,23 @@ export function AdminUsersPage(): ReactElement {
                         {importResult.skipped_count}
                       </p>
                     </div>
-                    <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5">
-                      <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">
-                        База варіантів
-                      </p>
-                      <p className="mt-1 text-lg font-bold text-blue-800">
-                        {importResult.total_variants}
-                      </p>
-                    </div>
                   </div>
 
                   {/* Попередження про збереження паролів + кнопка завантаження звіту */}
                   <div className="flex flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-start gap-2.5 text-xs text-emerald-900">
                       <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
-                      <p>
-                        Список студентів відсортовано за українською абеткою та
-                        збережено в базі даних. Збережіть звіт облікових даних
-                        зараз, оскільки паролі в системі зберігаються у
-                        захешованому вигляді.
-                      </p>
+                      <div className="space-y-1">
+                        <p>
+                          Список студентів відсортовано за українською абеткою
+                          та збережено в базі даних. Збережіть звіт облікових
+                          даних зараз, оскільки паролі в системі зберігаються у
+                          захешованому вигляді.
+                        </p>
+                        <p className="text-emerald-800">
+                          {VARIANT_FORMULA_NOTE}.
+                        </p>
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -2432,8 +2437,7 @@ export function AdminUsersPage(): ReactElement {
                         <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
                           <thead className="sticky top-0 bg-slate-50 font-semibold uppercase tracking-wider text-slate-500">
                             <tr>
-                              <th className="px-3.5 py-2.5">№ у групі</th>
-                              <th className="px-3.5 py-2.5">Варіант</th>
+                              <th className="px-3.5 py-2.5">№ у списку</th>
                               <th className="px-3.5 py-2.5">ПІБ</th>
                               <th className="px-3.5 py-2.5">E-mail</th>
                               <th className="px-3.5 py-2.5">Пароль</th>
@@ -2448,11 +2452,6 @@ export function AdminUsersPage(): ReactElement {
                                 <td className="whitespace-nowrap px-3.5 py-2.5">
                                   <span className="inline-flex items-center rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">
                                     №{student.list_number}
-                                  </span>
-                                </td>
-                                <td className="whitespace-nowrap px-3.5 py-2.5">
-                                  <span className="inline-flex items-center rounded-md border border-purple-200 bg-purple-50 px-2 py-0.5 font-semibold text-purple-700">
-                                    Варіант {student.variant_number}
                                   </span>
                                 </td>
                                 <td className="px-3.5 py-2.5 font-semibold text-slate-900">
