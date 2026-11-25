@@ -7,8 +7,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+.env.production
 uploads/*
 !uploads/.gitkeep
+backend/uploads/*
+!backend/uploads/.gitkeep
+backups/
 
 # Node / Frontend
 frontend/node_modules/
@@ -20,17 +24,12 @@ frontend/.vite/
 Thumbs.db
 .idea/
 .vscode/
+
 # Graphify volatile cache & state
 graphify-out/cache/
 graphify-out/.graphify_build_state.json
 graphify-out/manifest.json
-
 graphify-out/.*
 graphify-out/20*/
-
-# Graphify transient cache
-graphify-out/cache/
-graphify-out/.graphify_build_state.json
-graphify-out/manifest.json
 
 *.egg-info/

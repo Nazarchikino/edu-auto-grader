@@ -19,6 +19,7 @@
 - [Ядро автоперевірки та зберігання робіт](#ядро-автоперевірки-та-зберігання-робіт)
 - [Технологічний стек та архітектура](#технологічний-стек-та-архітектура)
 - [Швидкий старт (локальний запуск)](#швидкий-старт-локальний-запуск)
+- [Production-розгортання (Docker + Nginx + бекапи)](#production-розгортання-docker--nginx--бекапи)
 - [Перевірка якості та тести](#перевірка-якості-та-тести)
 - [Архітектурні обмеження (Out of Scope)](#архітектурні-обмеження-out-of-scope)
 
@@ -204,8 +205,9 @@ npm --prefix frontend run dev
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | Час життя access-токена (хвилини) |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Час життя refresh-токена (дні) |
 | `CORS_ORIGINS` | `["http://localhost:5173","http://127.0.0.1:5173"]` | Дозволені origin-адреси фронтенду (JSON-масив) |
-| `UPLOADS_DIR` | `uploads` | Каталог збереження завантажених файлів студентів |
+| `UPLOADS_DIR` | `backend/uploads` | Каталог збереження завантажених файлів студентів (відносні шляхи прив'язуються до `backend/`) |
 | `SUBMISSION_FILE_RETENTION_DAYS` | `90` | Термін зберігання файлів та `raw_code` робіт у днях (`>= 1`) |
+| `SUBMISSION_SUPERSEDED_GRACE_HOURS` | `24` | Мінімальний вік проміжної перездачі в годинах перед прибиранням зайвого файлу з диска |
 | `ENABLE_RETENTION_CLEANUP_TASK` | `true` | Автозапуск фонового воркера очищення файлів (кожні 24 год) |
 | `COURSE_CONTENT_DIR` | `backend/content/courses` | Шлях до JSON-файлів 4 навчальних курсів |
 | `COURSE_MEDIA_DIR` | `backend/content/media` | Шлях до статичних медіафайлів курсів (`/media/courses`) |
@@ -237,6 +239,46 @@ python -m app.services.retention_service
 
 > [!WARNING]
 > Наведені облікові дані призначені **лише для локальної розробки та первинного налаштування**. Перед розгортанням у продакшні обов'язково змініть паролі всіх облікових записів та встановіть криптостійкий `JWT_SECRET_KEY`.
+
+---
+
+## Production-розгортання (Docker + Nginx + бекапи)
+
+Готовий production-стек описано у [`docker-compose.prod.yml`](docker-compose.prod.yml) та складається з трьох ізольованих контейнерів:
+- **`db` (`postgres:16-alpine`)** — працює лише у внутрішній мережі `internal` без пробросу порту `5432` назовні;
+- **`backend` (`backend/Dockerfile`)** — `python:3.12-slim` із `mdbtools`, шрифтами `fonts-dejavu-core` (для кириличного PDF-експорту через `fpdf2`), непривілейованим користувачем `appuser`, `APP_ENV=production`, `uvicorn --workers 2 --proxy-headers` і `HEALTHCHECK` на `/api/v1/health/ready`;
+- **`frontend` (`frontend/Dockerfile` + `frontend/nginx.conf`)** — multi-stage збірка React SPA з локально вбудованим Monaco Editor (без запитів до зовнішнього CDN) за реверс-проксі Nginx (`client_max_body_size 35m`, `gzip`, заголовки безпеки, проксування `/api/` та `/media/courses/`).
+
+### Запуск у production
+
+```bash
+# 1. Скопіювати шаблон і задати надійні секрети (POSTGRES_PASSWORD, JWT_SECRET_KEY, CORS_ORIGINS)
+cp .env.production.example .env.production
+# Генерація JWT_SECRET_KEY: openssl rand -hex 32
+
+# 2. Зібрати та підняти контейнери
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+
+# 3. Застосувати міграції БД та завантажити контент 4 курсів
+docker compose -f docker-compose.prod.yml --env-file .env.production exec backend alembic upgrade head
+docker compose -f docker-compose.prod.yml --env-file .env.production exec backend python -m app.seed --sync-courses
+
+# 4. Перевірити готовність (БД + UPLOADS_DIR)
+curl -f http://127.0.0.1:8080/api/v1/health/ready
+```
+
+### Резервне копіювання та відновлення
+
+Скрипт [`scripts/backup.sh`](scripts/backup.sh) виконує `pg_dump -Fc` із контейнера `db`, архівує том `uploads/` у `.tar.gz` та автоматично видаляє бекапи старші за `RETENTION_BACKUP_DAYS` (за замовчуванням `14` днів). Для відновлення передбачено [`scripts/restore.sh`](scripts/restore.sh):
+
+```bash
+# Щоденний бекап (рекомендовано додати в cron, напр. о 03:00 щодня)
+chmod +x scripts/backup.sh scripts/restore.sh
+./scripts/backup.sh
+
+# Відновлення БД та файлів робіт із бекапу
+./scripts/restore.sh ./backups/db_YYYYMMDD_HHMMSS.dump ./backups/uploads_YYYYMMDD_HHMMSS.tar.gz
+```
 
 ---
 

@@ -161,6 +161,92 @@ class HtmlGrader(BaseGrader):
     """Стратегія детермінованої автоперевірки HTML5-документів на базі BeautifulSoup4."""
 
     format_type: PracticalFormat = PracticalFormat.HTML
+    supported_rule_types: frozenset[GradingRuleType] = frozenset(
+        {
+            GradingRuleType.HTML_TAG_EXISTS,
+            GradingRuleType.HTML_TAG_COUNT,
+            GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+        }
+    )
+
+    def validate_rule_definition(self, rule: GradingRule) -> None:
+        """Перевіряє коректність CSS-селектора, атрибутів та умови expected у правилі HTML5."""
+        super().validate_rule_definition(rule)
+        empty_soup = parse_html_document("<html><body></body></html>")
+        target_sample = self.substitute_placeholders_for_validation(
+            rule.target,
+            "div",
+        ).strip()
+
+        def _check_selector(selector: str) -> None:
+            try:
+                self._select_elements(empty_soup, rule, selector)
+            except GradingError as exc:
+                raise GradingError(
+                    exc.detail,
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+
+        if rule.type == GradingRuleType.HTML_TAG_EXISTS:
+            if not _is_doctype_target(target_sample):
+                _check_selector(target_sample)
+            expected_clean = rule.expected.strip()
+            expected_lower = expected_clean.lower()
+            if expected_lower.startswith("contains:") and not expected_clean[9:].strip():
+                raise GradingError(
+                    f"Порожній пошуковий рядок після 'contains:' у правилі '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            if expected_lower.startswith("text:") and not expected_clean[5:].strip():
+                raise GradingError(
+                    f"Порожній очікуваний текст після 'text:' у правилі '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            return
+
+        if rule.type == GradingRuleType.HTML_TAG_COUNT:
+            _check_selector(target_sample)
+            self.validate_bool_or_numeric_condition(rule, rule.expected)
+            return
+
+        if rule.type == GradingRuleType.HTML_ATTRIBUTE_EXISTS:
+            expected_sample = self.substitute_placeholders_for_validation(
+                rule.expected,
+                "attr",
+            ).strip()
+            try:
+                selector, attr_names, _ = self._parse_attribute_rule_spec(
+                    soup=empty_soup,
+                    rule=rule,
+                    target=target_sample,
+                    expected=expected_sample,
+                )
+            except GradingError as exc:
+                raise GradingError(
+                    exc.detail,
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            _check_selector(selector)
+            if not attr_names:
+                raise GradingError(
+                    f"Не вдалося визначити цільовий HTML-атрибут у правилі '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={
+                        "rule_id": rule.id,
+                        "target": rule.target,
+                        "expected": rule.expected,
+                    },
+                )
+            return
 
     def evaluate(
         self,

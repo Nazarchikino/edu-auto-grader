@@ -1,5 +1,7 @@
 import re
 import uuid
+from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -8,6 +10,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import ensure_course_owner_or_admin
 from app.core.config import settings
@@ -36,6 +39,7 @@ from app.schemas.grading import (
     GradingReport,
     GradingRule,
     GradingRulesUpdateRequest,
+    PlagiarismCheckResult,
 )
 from app.schemas.submission import (
     MAX_HTML_CODE_LENGTH,
@@ -212,19 +216,85 @@ def _build_submission_download_names(submission: Submission) -> tuple[str, str, 
     return filename_ascii, filename_utf8, content_disposition
 
 
+def _check_files_exist_batch(
+    paths: Iterable[str],
+    uploads_dir: Path,
+) -> set[str]:
+    """Пакетно перевіряє фізичну наявність файлів у межах `uploads_dir` (для threadpool).
+
+    Повертає множину вхідних шляхів, що безпечно резолвляться всередину
+    `uploads_dir` та існують на диску як звичайні файли.
+    """
+    existing: set[str] = set()
+    seen: set[str] = set()
+    for raw_path in paths:
+        if not raw_path or not raw_path.strip() or raw_path in seen:
+            continue
+        seen.add(raw_path)
+        resolved = resolve_submission_file_path(raw_path, uploads_dir)
+        if resolved is not None and resolved.is_file():
+            existing.add(raw_path)
+    return existing
+
+
+def _resolve_existing_submission_file(
+    raw_file_path: str | None,
+    uploads_dir: Path,
+) -> Path | None:
+    """Резолвить шлях до файлу здачі в межах `uploads_dir` та перевіряє наявність на диску."""
+    resolved = resolve_submission_file_path(raw_file_path, uploads_dir)
+    if resolved is None or not resolved.is_file():
+        return None
+    return resolved
+
+
+def _save_uploaded_file(
+    *,
+    uploads_dir: Path,
+    practical_id: uuid.UUID,
+    student_id: uuid.UUID,
+    submission_id: uuid.UUID,
+    expected_suffix: str,
+    file_bytes: bytes,
+) -> tuple[Path, str]:
+    """Зберігає завантажений файл практичної на диск та обчислює його SHA-256 хеш."""
+    target_dir = uploads_dir / str(practical_id) / str(student_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = target_dir / f"{submission_id}{expected_suffix}"
+    saved_path.write_bytes(file_bytes)
+    try:
+        file_hash = compute_submission_hash(file_path=saved_path)
+    except Exception:
+        saved_path.unlink(missing_ok=True)
+        raise
+    return saved_path, file_hash
+
+
+def _unlink_file_quietly(path: Path) -> None:
+    """Видаляє файл із диска без помилки, якщо він уже відсутній."""
+    path.unlink(missing_ok=True)
+
+
 def _is_submission_file_available(
     submission: Submission,
     *,
     format_type: PracticalFormat | None,
     uploads_dir: Path,
+    existing_file_paths: AbstractSet[str] | None = None,
 ) -> bool:
     """Перевіряє фізичну наявність файлу здачі в UPLOADS_DIR або непорожнього raw_code."""
     if format_type == PracticalFormat.HTML:
         return bool(submission.raw_code and submission.raw_code.strip())
     if format_type is not None:
+        if submission.file_path is None:
+            return False
+        if existing_file_paths is not None:
+            return submission.file_path in existing_file_paths
         resolved = resolve_submission_file_path(submission.file_path, uploads_dir)
         return resolved is not None and resolved.is_file()
     if submission.file_path is not None:
+        if existing_file_paths is not None:
+            return submission.file_path in existing_file_paths
         resolved = resolve_submission_file_path(submission.file_path, uploads_dir)
         return resolved is not None and resolved.is_file()
     return bool(submission.raw_code and submission.raw_code.strip())
@@ -241,6 +311,7 @@ def serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
         instructions=practical.instructions,
         format_type=practical.format_type,
         max_score=float(practical.max_score),
+        needs_rules_review=practical.needs_rules_review,
         variants=variants,
         grading_rules=grading_rules,
     )
@@ -251,6 +322,7 @@ def serialize_submission(
     *,
     uploads_dir: Path | None = None,
     retention_days: int | None = None,
+    existing_file_paths: AbstractSet[str] | None = None,
 ) -> SubmissionRead:
     """Перетворює ORM-модель Submission зі зв'язаними сутностями у контракт SubmissionRead."""
     practical: Practical | None = submission.__dict__.get("practical")
@@ -287,6 +359,7 @@ def serialize_submission(
         submission,
         format_type=format_type,
         uploads_dir=effective_uploads_dir,
+        existing_file_paths=existing_file_paths,
     )
     file_expires_at: datetime | None = (
         submission.submitted_at + timedelta(days=effective_retention_days)
@@ -377,17 +450,35 @@ class SubmissionService:
             )
         return submission
 
-    def _evaluate_html_submission(
+    async def _check_submission_files_batch(
+        self,
+        submissions: Sequence[Submission],
+    ) -> set[str]:
+        """Пакетно перевіряє фізичну наявність файлів для списку здач у threadpool."""
+        unique_paths = {
+            item.file_path
+            for item in submissions
+            if item.file_path is not None and item.file_path.strip()
+        }
+        if not unique_paths:
+            return set()
+        return await run_in_threadpool(
+            _check_files_exist_batch,
+            unique_paths,
+            self._uploads_dir,
+        )
+
+    async def _evaluate_html_submission(
         self,
         *,
-        practical: Practical,
+        format_type: PracticalFormat,
         rules: list[GradingRule],
         variant_data: dict[str, object],
         raw_code: str | None,
         file_bytes: bytes | None,
         filename: str | None,
     ) -> tuple[str, str, ExtractedMetadata, GradingReport]:
-        """Виконує перевірку HTML-коду та обчислює його нормалізований SHA-256 хеш."""
+        """Виконує перевірку HTML-коду та обчислює його нормалізований SHA-256 хеш у threadpool."""
         resolved_code = raw_code
 
         if resolved_code is None and file_bytes is not None:
@@ -398,7 +489,7 @@ class SubmissionService:
                     f"Непідтримуване розширення файлу '{actual_suffix or 'невідоме'}' "
                     "для HTML-практичної роботи. Очікується '.html' або JSON із 'raw_code'.",
                     context={
-                        "expected_format": practical.format_type.value,
+                        "expected_format": format_type.value,
                         "actual_suffix": actual_suffix,
                         "file_name": safe_filename,
                     },
@@ -414,7 +505,7 @@ class SubmissionService:
         if resolved_code is None or not resolved_code.strip():
             raise InvalidFileFormatError(
                 "Для здачі HTML-практичної роботи необхідно передати непорожній вихідний код.",
-                context={"format_type": practical.format_type.value},
+                context={"format_type": format_type.value},
             )
 
         if len(resolved_code) > MAX_HTML_CODE_LENGTH:
@@ -426,45 +517,53 @@ class SubmissionService:
                 context={"max_length": MAX_HTML_CODE_LENGTH},
             )
 
-        if not has_meaningful_html_body(resolved_code):
+        if not await run_in_threadpool(has_meaningful_html_body, resolved_code):
             raise GradingError(
                 EMPTY_HTML_BODY_ERROR_MESSAGE,
                 code="EMPTY_HTML_BODY",
                 status_code=422,
-                context={"format_type": practical.format_type.value},
+                context={"format_type": format_type.value},
             )
 
-        file_hash = compute_submission_hash(raw_code=resolved_code)
-        extracted_metadata = ExtractedMetadata()
-        grader = GraderFactory.get_grader(practical.format_type)
-        report = grader.evaluate(
+        file_hash = await run_in_threadpool(
+            compute_submission_hash,
+            raw_code=resolved_code,
+        )
+        extracted_metadata = await run_in_threadpool(
+            extract_document_metadata,
+            raw_code=resolved_code,
+        )
+        grader = GraderFactory.get_grader(format_type)
+        report = await run_in_threadpool(
+            grader.evaluate,
             raw_code=resolved_code,
             rules=rules,
             variant_data=variant_data,
         )
         return resolved_code, file_hash, extracted_metadata, report
 
-    def _evaluate_file_submission(
+    async def _evaluate_file_submission(
         self,
         *,
         submission_id: uuid.UUID,
         student_id: uuid.UUID,
-        practical: Practical,
+        practical_id: uuid.UUID,
+        format_type: PracticalFormat,
         rules: list[GradingRule],
         variant_data: dict[str, object],
         file_bytes: bytes | None,
         filename: str | None,
     ) -> tuple[Path, str, ExtractedMetadata, GradingReport]:
-        """Зберігає файл (.docx/.xlsx/.accdb), витягує метадані та запускає парсер."""
+        """Зберігає файл (.docx/.xlsx/.accdb), витягує метадані та запускає парсер у threadpool."""
         if file_bytes is None:
             raise InvalidFileFormatError(
-                f"Для практичної роботи формату '.{practical.format_type.value}' "
+                f"Для практичної роботи формату '.{format_type.value}' "
                 "необхідно завантажити файл.",
-                context={"expected_format": practical.format_type.value},
+                context={"expected_format": format_type.value},
             )
 
         safe_filename = (filename or "").strip()
-        expected_suffix = f".{practical.format_type.value}"
+        expected_suffix = f".{format_type.value}"
         actual_suffix = Path(safe_filename).suffix.lower()
         if actual_suffix != expected_suffix:
             raise InvalidFileFormatError(
@@ -486,25 +585,52 @@ class SubmissionService:
                 },
             )
 
-        target_dir = self._uploads_dir / str(practical.id) / str(student_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        saved_path = target_dir / f"{submission_id}{expected_suffix}"
-        saved_path.write_bytes(file_bytes)
+        saved_path, file_hash = await run_in_threadpool(
+            _save_uploaded_file,
+            uploads_dir=self._uploads_dir,
+            practical_id=practical_id,
+            student_id=student_id,
+            submission_id=submission_id,
+            expected_suffix=expected_suffix,
+            file_bytes=file_bytes,
+        )
 
         try:
-            file_hash = compute_submission_hash(file_path=saved_path)
-            extracted_metadata = extract_document_metadata(saved_path)
-            grader = GraderFactory.get_grader(practical.format_type)
-            report = grader.evaluate(
+            extracted_metadata = await run_in_threadpool(
+                extract_document_metadata,
+                saved_path,
+            )
+            grader = GraderFactory.get_grader(format_type)
+            report = await run_in_threadpool(
+                grader.evaluate,
                 file_path=saved_path,
                 rules=rules,
                 variant_data=variant_data,
             )
         except Exception:
-            saved_path.unlink(missing_ok=True)
+            await run_in_threadpool(_unlink_file_quietly, saved_path)
             raise
 
         return saved_path, file_hash, extracted_metadata, report
+
+    async def _check_plagiarism(
+        self,
+        *,
+        practical: Practical,
+        student_id: uuid.UUID,
+        file_hash: str | None,
+        extracted_metadata: ExtractedMetadata,
+    ) -> PlagiarismCheckResult:
+        """Перевіряє здачу на академічну доброчесність з урахуванням відбитків та варіантів."""
+        return await check_submission_plagiarism(
+            self._db,
+            practical_id=practical.id,
+            student_id=student_id,
+            file_hash=file_hash,
+            metadata=extracted_metadata,
+            variants_count=len(practical.variants),
+            format_type=practical.format_type,
+        )
 
     async def submit_practical(
         self,
@@ -549,8 +675,8 @@ class SubmissionService:
                 file_hash,
                 extracted_metadata,
                 report,
-            ) = self._evaluate_html_submission(
-                practical=practical,
+            ) = await self._evaluate_html_submission(
+                format_type=practical.format_type,
                 rules=rules,
                 variant_data=variant_data,
                 raw_code=raw_code,
@@ -563,10 +689,11 @@ class SubmissionService:
                 file_hash,
                 extracted_metadata,
                 report,
-            ) = self._evaluate_file_submission(
+            ) = await self._evaluate_file_submission(
                 submission_id=submission_id,
                 student_id=student.id,
-                practical=practical,
+                practical_id=practical.id,
+                format_type=practical.format_type,
                 rules=rules,
                 variant_data=variant_data,
                 file_bytes=file_bytes,
@@ -574,20 +701,19 @@ class SubmissionService:
             )
             stored_file_path = saved_path.as_posix()
 
-        plagiarism_result = await check_submission_plagiarism(
-            self._db,
-            practical_id=practical.id,
+        plagiarism_result = await self._check_plagiarism(
+            practical=practical,
             student_id=student.id,
             file_hash=file_hash,
-            metadata=extracted_metadata,
+            extracted_metadata=extracted_metadata,
         )
 
         if reject_on_plagiarism and plagiarism_result.is_flagged:
             if saved_path is not None:
-                saved_path.unlink(missing_ok=True)
+                await run_in_threadpool(_unlink_file_quietly, saved_path)
             raise PlagiarismDetectedError(
                 plagiarism_result.reason
-                or "Виявлено збіг хешу або метаданих роботи з іншим студентом.",
+                or "Виявлено збіг вмісту, хешу або метаданих роботи з іншим студентом.",
                 context={
                     "practical_id": str(practical.id),
                     "matched_submission_id": (
@@ -633,7 +759,14 @@ class SubmissionService:
         await self._db.commit()
 
         loaded_submission = await self._load_submission_or_404(submission.id)
-        return serialize_submission(loaded_submission, uploads_dir=self._uploads_dir)
+        existing_file_paths = await self._check_submission_files_batch(
+            [loaded_submission]
+        )
+        return serialize_submission(
+            loaded_submission,
+            uploads_dir=self._uploads_dir,
+            existing_file_paths=existing_file_paths,
+        )
 
     async def update_grading_rules(
         self,
@@ -650,6 +783,7 @@ class SubmissionService:
             context={"practical_id": str(practical_id)},
         )
         expected_prefix = f"{practical.format_type.value}_"
+        grader = GraderFactory.get_grader(practical.format_type)
 
         seen_rule_ids: set[str] = set()
         for rule in payload.grading_rules:
@@ -675,13 +809,37 @@ class SubmissionService:
                     },
                 )
 
+            try:
+                grader.validate_rule_definition(rule)
+            except GradingError as exc:
+                context = dict(exc.context)
+                context.setdefault("rule_id", rule.id)
+                context["practical_id"] = str(practical.id)
+                detail = (
+                    exc.detail
+                    if rule.id in exc.detail
+                    else f"Некоректне правило '{rule.id}': {exc.detail}"
+                )
+                raise GradingError(
+                    detail,
+                    code=exc.code if exc.code != "GRADING_ERROR" else "INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context=context,
+                ) from exc
+
         total_points = sum(rule.points for rule in payload.grading_rules)
         practical.grading_rules = [
             rule.model_dump(mode="json") for rule in payload.grading_rules
         ]
-        practical.max_score = Decimal(str(round(total_points, 2))).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_HALF_UP,
+        if payload.sync_max_score:
+            practical.max_score = Decimal(str(round(total_points, 2))).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+        practical.needs_rules_review = (
+            payload.needs_rules_review
+            if payload.needs_rules_review is not None
+            else False
         )
 
         await self._db.commit()
@@ -727,7 +885,12 @@ class SubmissionService:
 
         await self._db.commit()
         refreshed = await self._load_submission_or_404(submission.id)
-        return serialize_submission(refreshed, uploads_dir=self._uploads_dir)
+        existing_file_paths = await self._check_submission_files_batch([refreshed])
+        return serialize_submission(
+            refreshed,
+            uploads_dir=self._uploads_dir,
+            existing_file_paths=existing_file_paths,
+        )
 
     async def prepare_submission_download(
         self,
@@ -774,11 +937,12 @@ class SubmissionService:
                 content=submission.raw_code.encode("utf-8"),
             )
 
-        resolved_path = resolve_submission_file_path(
+        resolved_path = await run_in_threadpool(
+            _resolve_existing_submission_file,
             submission.file_path,
             self._uploads_dir,
         )
-        if resolved_path is None or not resolved_path.is_file():
+        if resolved_path is None:
             raise DomainError(
                 "Файл роботи видалено за терміном зберігання або відсутній на сервері.",
                 code="SUBMISSION_FILE_NOT_FOUND",
@@ -817,7 +981,12 @@ class SubmissionService:
                 code="FORBIDDEN_SUBMISSION_ACCESS",
                 context={"submission_id": str(submission_id)},
             )
-        return serialize_submission(submission, uploads_dir=self._uploads_dir)
+        existing_file_paths = await self._check_submission_files_batch([submission])
+        return serialize_submission(
+            submission,
+            uploads_dir=self._uploads_dir,
+            existing_file_paths=existing_file_paths,
+        )
 
     async def list_submissions(
         self,
@@ -857,8 +1026,13 @@ class SubmissionService:
 
         result = await self._db.execute(stmt)
         submissions = list(result.scalars().all())
+        existing_file_paths = await self._check_submission_files_batch(submissions)
         return [
-            serialize_submission(item, uploads_dir=self._uploads_dir)
+            serialize_submission(
+                item,
+                uploads_dir=self._uploads_dir,
+                existing_file_paths=existing_file_paths,
+            )
             for item in submissions
         ]
 

@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import case, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -48,7 +49,7 @@ from app.schemas.course import (
 )
 from app.schemas.grading import GradingRule
 from app.services.quiz_service import QuizService
-from app.services.retention_service import delete_submission_files_for_paths
+from app.services.retention_service import delete_submission_files_for_paths_async
 
 router = APIRouter(tags=["courses"])
 
@@ -133,6 +134,9 @@ def _serialize_course(
         practical_score = (
             best_practical_by_id.get(practical.id) if practical is not None else None
         )
+        practical_needs_rules_review = (
+            practical.needs_rules_review if practical is not None else False
+        )
 
         if quiz_passed and (practical_id is None or practical_score is not None):
             completed_modules += 1
@@ -148,6 +152,7 @@ def _serialize_course(
                 practical_id=practical_id,
                 practical_format=practical_format,
                 practical_score=practical_score,
+                practical_needs_rules_review=practical_needs_rules_review,
             )
         )
 
@@ -222,19 +227,63 @@ async def _load_module_or_404(
     return module
 
 
+async def _ensure_module_order_index_unique(
+    db: AsyncSession,
+    course_id: uuid.UUID,
+    order_index: int,
+    *,
+    exclude_module_id: uuid.UUID | None = None,
+) -> None:
+    """Перевіряє унікальність порядкового номера модуля в межах навчального курсу."""
+    stmt = select(Module.id).where(
+        Module.course_id == course_id,
+        Module.order_index == order_index,
+    )
+    if exclude_module_id is not None:
+        stmt = stmt.where(Module.id != exclude_module_id)
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is not None:
+        raise DomainError(
+            f"У цьому курсі модуль із порядковим номером {order_index} уже існує.",
+            code="MODULE_ORDER_INDEX_EXISTS",
+            status_code=409,
+            context={
+                "course_id": str(course_id),
+                "order_index": order_index,
+            },
+        )
+
+
 async def _build_module_detail_read(
     db: AsyncSession,
     module: Module,
     current_user: User,
 ) -> ModuleDetailRead:
     """Формує детальне представлення модуля з лекцією, тестом та статусом практичної."""
+    questions_stmt = (
+        select(QuizQuestion)
+        .where(QuizQuestion.module_id == module.id)
+        .order_by(QuizQuestion.order_index.asc(), QuizQuestion.id.asc())
+    )
+    questions_result = await db.execute(questions_stmt)
+    ordered_questions = list(questions_result.scalars().all())
+
     quiz_service = QuizService(db)
-    has_questions = len(module.quiz_questions) > 0
+    has_questions = len(ordered_questions) > 0
     quiz_passed, best_quiz_score = await quiz_service.get_module_quiz_status(
         student_id=current_user.id,
         module_id=module.id,
         has_questions=has_questions,
     )
+    quiz_cooldown_remaining_seconds = 0
+    if current_user.role == UserRole.STUDENT and has_questions and not quiz_passed:
+        quiz_cooldown_remaining_seconds = (
+            await quiz_service.get_quiz_cooldown_remaining_seconds(
+                student_id=current_user.id,
+                module_id=module.id,
+                quiz_passed=quiz_passed,
+            )
+        )
     practical_unlocked = quiz_passed or current_user.role in (
         UserRole.TEACHER,
         UserRole.ADMIN,
@@ -259,6 +308,7 @@ async def _build_module_detail_read(
             best_score=(
                 round(float(max_sub_score), 2) if max_sub_score is not None else None
             ),
+            needs_rules_review=module.practical.needs_rules_review,
         )
 
     quiz_questions_read = [
@@ -268,7 +318,7 @@ async def _build_module_detail_read(
             question_text=question.question_text,
             options=list(question.options),
         )
-        for question in module.quiz_questions
+        for question in ordered_questions
     ]
 
     return ModuleDetailRead(
@@ -280,6 +330,7 @@ async def _build_module_detail_read(
         quiz_questions=quiz_questions_read,
         quiz_passed=quiz_passed,
         best_quiz_score=best_quiz_score,
+        quiz_cooldown_remaining_seconds=quiz_cooldown_remaining_seconds,
         practical_unlocked=practical_unlocked,
         practical=practical_summary,
     )
@@ -318,6 +369,7 @@ def _serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
         instructions=practical.instructions,
         format_type=practical.format_type,
         max_score=float(practical.max_score),
+        needs_rules_review=practical.needs_rules_review,
         variants=variants,
         grading_rules=grading_rules,
     )
@@ -512,6 +564,7 @@ async def create_module(
     """Створює новий навчальний модуль з лекцією в межах курсу."""
     course = await _load_course_or_404(db, course_id)
     ensure_course_owner_or_admin(course, current_user)
+    await _ensure_module_order_index_unique(db, course_id, payload.order_index)
 
     module = Module(
         course_id=course_id,
@@ -520,7 +573,19 @@ async def create_module(
         lecture_content=payload.lecture_content,
     )
     db.add(module)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise DomainError(
+            f"У цьому курсі модуль із порядковим номером {payload.order_index} уже існує.",
+            code="MODULE_ORDER_INDEX_EXISTS",
+            status_code=409,
+            context={
+                "course_id": str(course_id),
+                "order_index": payload.order_index,
+            },
+        ) from exc
 
     loaded_module = await _load_module_or_404(db, module.id)
     return await _build_module_detail_read(db, loaded_module, current_user)
@@ -540,14 +605,32 @@ async def update_module(
         current_user,
         context={"module_id": str(module_id)},
     )
-    if payload.order_index is not None:
+    if payload.order_index is not None and payload.order_index != module.order_index:
+        await _ensure_module_order_index_unique(
+            db,
+            module.course_id,
+            payload.order_index,
+            exclude_module_id=module.id,
+        )
         module.order_index = payload.order_index
     if payload.title is not None:
         module.title = payload.title
     if payload.lecture_content is not None:
         module.lecture_content = payload.lecture_content
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise DomainError(
+            f"У цьому курсі модуль із порядковим номером {module.order_index} уже існує.",
+            code="MODULE_ORDER_INDEX_EXISTS",
+            status_code=409,
+            context={
+                "course_id": str(module.course_id),
+                "order_index": module.order_index,
+            },
+        ) from exc
     refreshed_module = await _load_module_or_404(db, module.id)
     return await _build_module_detail_read(db, refreshed_module, current_user)
 
@@ -616,11 +699,12 @@ async def delete_module(
     ):
         if remaining_module.order_index != new_order_index:
             remaining_module.order_index = new_order_index
+            await db.flush()
 
     await db.commit()
 
     if submission_file_paths:
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths,
             upload_dir=settings.UPLOADS_DIR,
         )
@@ -644,6 +728,13 @@ async def list_module_quiz_questions_teacher(
         current_user,
         context={"module_id": str(module_id)},
     )
+    questions_stmt = (
+        select(QuizQuestion)
+        .where(QuizQuestion.module_id == module.id)
+        .order_by(QuizQuestion.order_index.asc(), QuizQuestion.id.asc())
+    )
+    questions_result = await db.execute(questions_stmt)
+    ordered_questions = questions_result.scalars().all()
     return [
         QuizQuestionTeacherRead(
             id=question.id,
@@ -652,7 +743,7 @@ async def list_module_quiz_questions_teacher(
             options=list(question.options),
             correct_option_index=question.correct_option_index,
         )
-        for question in module.quiz_questions
+        for question in ordered_questions
     ]
 
 
@@ -685,8 +776,17 @@ async def create_quiz_question(
             },
         )
 
+    max_order_result = await db.execute(
+        select(func.max(QuizQuestion.order_index)).where(
+            QuizQuestion.module_id == module_id
+        )
+    )
+    max_order_index = max_order_result.scalar_one_or_none()
+    next_order_index = int(max_order_index) + 1 if max_order_index is not None else 1
+
     question = QuizQuestion(
         module_id=module_id,
+        order_index=next_order_index,
         question_text=payload.question_text,
         options=list(payload.options),
         correct_option_index=payload.correct_option_index,
@@ -890,6 +990,8 @@ async def update_practical(
         practical.grading_rules = [
             rule.model_dump(mode="json") for rule in payload.grading_rules
         ]
+    if payload.needs_rules_review is not None:
+        practical.needs_rules_review = payload.needs_rules_review
 
     await db.commit()
     await db.refresh(practical)
@@ -944,7 +1046,7 @@ async def delete_practical(
     await db.commit()
 
     if submission_file_paths:
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths,
             upload_dir=settings.UPLOADS_DIR,
         )

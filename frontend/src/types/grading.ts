@@ -18,6 +18,10 @@ export const GRADING_RULE_TYPES = [
   "accdb_table_exists",
   "accdb_column_exists",
   "accdb_column_type",
+  "accdb_query_exists",
+  "accdb_form_exists",
+  "accdb_report_exists",
+  "accdb_relationship_exists",
   // HTML5 (BeautifulSoup4 DOM)
   "html_tag_exists",
   "html_tag_count",
@@ -63,6 +67,9 @@ export interface ExtractedMetadata {
   created?: string | null;
   modified?: string | null;
   revision?: string | null;
+  content_fingerprint?: string | null;
+  text_shingles?: string[];
+  has_unique_content?: boolean | null;
   [key: string]: unknown;
 }
 
@@ -75,4 +82,6 @@ export interface PlagiarismCheckResult {
 
 export interface GradingRulesUpdateRequest {
   grading_rules: GradingRule[];
+  sync_max_score?: boolean;
+  needs_rules_review?: boolean | null;
 }

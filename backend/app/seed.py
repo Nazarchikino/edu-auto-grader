@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-import bcrypt
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +14,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.security import hash_password
+from app.graders.factory import GraderFactory
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
     MAX_COURSES_COUNT,
@@ -33,7 +34,7 @@ from app.models.user import (
     UserRole,
 )
 from app.schemas.grading import GradingRule
-from app.services.retention_service import delete_submission_files_for_paths
+from app.services.retention_service import delete_submission_files_for_paths_async
 
 logger = logging.getLogger(__name__)
 
@@ -132,11 +133,11 @@ class SeedBundle:
     courses: list[Course]
 
 
-def hash_password(plain_password: str) -> str:
-    """Генерує bcrypt-хеш пароля користувача."""
-    salt = bcrypt.gensalt(rounds=12)
-    hashed: bytes = bcrypt.hashpw(plain_password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
+def _extract_needs_rules_review(meta: dict[str, object] | None) -> bool:
+    """Витягує прапорець needs_manual_rules_review із JSON-блоку practical.meta."""
+    if not isinstance(meta, dict):
+        return False
+    return meta.get("needs_manual_rules_review") is True
 
 
 def _load_course_from_json(
@@ -177,18 +178,21 @@ def _load_course_from_json(
         )
         module.quiz_questions = [
             QuizQuestion(
+                order_index=idx,
                 question_text=question.question_text,
                 options=list(question.options),
                 correct_option_index=question.correct_option_index,
             )
-            for question in mod_payload.quiz_questions
+            for idx, question in enumerate(mod_payload.quiz_questions, start=1)
         ]
         if mod_payload.practical is not None:
             prac_payload = mod_payload.practical
-            validated_rules: list[dict[str, object]] = [
-                GradingRule.model_validate(rule).model_dump(mode="json")
-                for rule in prac_payload.grading_rules
-            ]
+            grader = GraderFactory.get_grader(prac_payload.format_type)
+            validated_rules: list[dict[str, object]] = []
+            for rule in prac_payload.grading_rules:
+                parsed_rule = GradingRule.model_validate(rule)
+                grader.validate_rule_definition(parsed_rule)
+                validated_rules.append(parsed_rule.model_dump(mode="json"))
             module.practical = Practical(
                 title=prac_payload.title,
                 instructions=prac_payload.instructions,
@@ -196,6 +200,7 @@ def _load_course_from_json(
                 max_score=prac_payload.max_score.quantize(Decimal("0.01")),
                 variants=list(prac_payload.variants),
                 grading_rules=validated_rules,
+                needs_rules_review=_extract_needs_rules_review(prac_payload.meta),
             )
 
     return course
@@ -330,25 +335,25 @@ def _sync_quiz_questions_in_place(
     incoming_questions: Sequence[QuizQuestion],
 ) -> None:
     """Оновлює питання тесту модуля без перестворення ідентичних записів і втрати QuizAttempt."""
-    existing_questions = list(existing_module.quiz_questions)
-    existing_signatures = [_question_signature(item) for item in existing_questions]
-    incoming_signatures = [_question_signature(item) for item in incoming_questions]
-    if existing_signatures == incoming_signatures:
-        return
-
+    existing_questions = sorted(
+        existing_module.quiz_questions,
+        key=lambda item: (item.order_index, str(item.id)),
+    )
     existing_by_sig: dict[_QuizQuestionSignature, list[QuizQuestion]] = {}
     for question in existing_questions:
         existing_by_sig.setdefault(_question_signature(question), []).append(question)
 
     matched_existing_obj_ids: set[int] = set()
-    unmatched_incoming: list[QuizQuestion] = []
-    for incoming in incoming_questions:
+    unmatched_incoming: list[tuple[int, QuizQuestion]] = []
+    for idx, incoming in enumerate(incoming_questions, start=1):
         bucket = existing_by_sig.get(_question_signature(incoming))
         if bucket:
             kept = bucket.pop(0)
             matched_existing_obj_ids.add(id(kept))
+            if kept.order_index != idx:
+                kept.order_index = idx
         else:
-            unmatched_incoming.append(incoming)
+            unmatched_incoming.append((idx, incoming))
 
     unmatched_existing = [
         question
@@ -358,15 +363,23 @@ def _sync_quiz_questions_in_place(
     if not unmatched_incoming and not unmatched_existing:
         return
 
-    for target, source in zip(unmatched_existing, unmatched_incoming, strict=False):
+    for target, (target_order_index, source) in zip(
+        unmatched_existing,
+        unmatched_incoming,
+        strict=False,
+    ):
+        target.order_index = target_order_index
         target.question_text = source.question_text
         target.options = list(source.options)
         target.correct_option_index = source.correct_option_index
 
     if len(unmatched_incoming) > len(unmatched_existing):
-        for source in unmatched_incoming[len(unmatched_existing) :]:
+        for target_order_index, source in unmatched_incoming[
+            len(unmatched_existing) :
+        ]:
             existing_module.quiz_questions.append(
                 QuizQuestion(
+                    order_index=target_order_index,
                     question_text=source.question_text,
                     options=list(source.options),
                     correct_option_index=source.correct_option_index,
@@ -398,6 +411,7 @@ async def _sync_practical_in_place(
                 max_score=incoming_practical.max_score,
                 variants=list(incoming_practical.variants),
                 grading_rules=list(incoming_practical.grading_rules),
+                needs_rules_review=incoming_practical.needs_rules_review,
             )
         else:
             existing_practical.title = incoming_practical.title
@@ -406,6 +420,7 @@ async def _sync_practical_in_place(
             existing_practical.max_score = incoming_practical.max_score
             existing_practical.variants = list(incoming_practical.variants)
             existing_practical.grading_rules = list(incoming_practical.grading_rules)
+            existing_practical.needs_rules_review = incoming_practical.needs_rules_review
         return
 
     if existing_practical is None:
@@ -472,11 +487,12 @@ async def _sync_course_in_place(
             )
             new_module.quiz_questions = [
                 QuizQuestion(
+                    order_index=question.order_index if question.order_index > 0 else idx,
                     question_text=question.question_text,
                     options=list(question.options),
                     correct_option_index=question.correct_option_index,
                 )
-                for question in incoming_mod.quiz_questions
+                for idx, question in enumerate(incoming_mod.quiz_questions, start=1)
             ]
             if incoming_mod.practical is not None:
                 new_module.practical = Practical(
@@ -486,6 +502,7 @@ async def _sync_course_in_place(
                     max_score=incoming_mod.practical.max_score,
                     variants=list(incoming_mod.practical.variants),
                     grading_rules=list(incoming_mod.practical.grading_rules),
+                    needs_rules_review=incoming_mod.practical.needs_rules_review,
                 )
             existing_course.modules.append(new_module)
             continue
@@ -616,7 +633,7 @@ async def seed_database(
         effective_upload_dir = (
             upload_dir if upload_dir is not None else settings.UPLOADS_DIR
         )
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths_to_delete,
             upload_dir=effective_upload_dir,
         )

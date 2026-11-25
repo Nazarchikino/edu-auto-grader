@@ -1542,6 +1542,19 @@ export function CourseEditorPage(): ReactElement {
                         <h3 className="mt-2 text-sm font-bold text-slate-900">
                           {mod.title}
                         </h3>
+                        {mod.practical_id !== null &&
+                          mod.practical_needs_rules_review && (
+                            <span
+                              title="Потребує перевірки правил / ручного дооцінювання"
+                              className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800"
+                            >
+                              <AlertTriangle className="h-3 w-3 shrink-0 text-amber-600" />
+                              <span>
+                                Потребує перевірки правил / ручного
+                                дооцінювання
+                              </span>
+                            </span>
+                          )}
                       </button>
                       <button
                         type="button"
@@ -1647,16 +1660,29 @@ export function CourseEditorPage(): ReactElement {
                     </div>
 
                     {activePracticalId !== null && (
-                      <Link
-                        to={`/teacher/rules?practicalId=${activePracticalId}`}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
-                      >
-                        <SlidersHorizontal className="h-3.5 w-3.5" />
-                        <span>
-                          Правила автоперевірки (
-                          {practicalTeacher?.grading_rules.length ?? 0})
-                        </span>
-                      </Link>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {practicalTeacher?.needs_rules_review === true && (
+                          <span
+                            title="Стартові правила потребують перевірки викладачем або додаткової ручної оцінки"
+                            className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800"
+                          >
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                            <span>
+                              Потребує перевірки правил / ручного дооцінювання
+                            </span>
+                          </span>
+                        )}
+                        <Link
+                          to={`/teacher/rules?practicalId=${activePracticalId}`}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                        >
+                          <SlidersHorizontal className="h-3.5 w-3.5" />
+                          <span>
+                            Правила автоперевірки (
+                            {practicalTeacher?.grading_rules.length ?? 0})
+                          </span>
+                        </Link>
+                      </div>
                     )}
                   </div>
 

@@ -5,16 +5,18 @@ import uuid
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Final
 
 import docx
 from docx.opc.exceptions import PackageNotFoundError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.exceptions import DomainError, InvalidFileFormatError
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.core.upload_utils import format_size_limit_mb
 from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import Practical
@@ -30,6 +32,10 @@ DEFAULT_COLLEGE_EMAIL_DOMAIN: Final[str] = "kpefk.com.ua"
 DEFAULT_TOTAL_VARIANTS: Final[int] = 3
 TEMP_PASSWORD_LENGTH: Final[int] = 8
 MAX_GROUP_LIST_NUMBER: Final[int] = 100
+VARIANT_FORMULA_NOTE: Final[str] = (
+    "Індивідуальний варіант кожної практичної роботи обчислюється "
+    "автоматично за номером у списку: ((№ - 1) mod K) + 1"
+)
 
 UKRAINIAN_ALPHABET: Final[str] = "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя"
 _UKRAINIAN_CHAR_RANK: Final[dict[str, int]] = {
@@ -630,6 +636,62 @@ def parse_txt_students(
     return candidates, skipped
 
 
+def build_credentials_report(
+    report: StudentImportResponse,
+    *,
+    generated_at: datetime | None = None,
+) -> str:
+    """Формує текстову відомість облікових даних імпортованих студентів (.txt).
+
+    Замість фіксованого номера варіанта (який залежить від кількості варіантів K
+    конкретної практичної роботи) виводить стовпець «№ у списку» та примітку формули.
+    """
+    timestamp = (
+        generated_at.astimezone(UTC)
+        if generated_at is not None and generated_at.tzinfo is not None
+        else (generated_at.replace(tzinfo=UTC) if generated_at is not None else datetime.now(UTC))
+    )
+    generated_at_str = timestamp.strftime("%d.%m.%Y %H:%M UTC")
+
+    lines: list[str] = [
+        "ЗВІТ ОБЛІКОВИХ ДАНИХ СТУДЕНТІВ (Edu Auto Grader)",
+        f"Академічна група: {report.group_code}",
+        f"Дата імпорту: {generated_at_str}",
+        f"Створено студентів: {report.created_count}",
+        f"Пропущено записів: {report.skipped_count}",
+        f"Примітка: {VARIANT_FORMULA_NOTE}",
+        "=" * 88,
+        "№ у списку | ПІБ | E-mail | Пароль",
+        "-" * 88,
+    ]
+
+    if not report.created:
+        lines.append("Нових студентів не створено.")
+    else:
+        for item in report.created:
+            lines.append(
+                f"{item.list_number} | {item.full_name} | {item.email} | {item.temp_password}"
+            )
+
+    if report.skipped:
+        lines.extend(
+            [
+                "",
+                "ПРОПУЩЕНІ ЗАПИСИ ТА ПОМИЛКИ:",
+                "-" * 88,
+            ]
+        )
+        for skipped in report.skipped:
+            identity_parts: list[str] = [skipped.full_name or "без ПІБ"]
+            if skipped.email is not None:
+                identity_parts.append(f"<{skipped.email}>")
+            lines.append(
+                f"Рядок #{skipped.row_number} | {' '.join(identity_parts)} | {skipped.reason}"
+            )
+
+    return "\r\n".join(lines) + "\r\n"
+
+
 class StudentImportService:
     """Сервіс масового імпорту студентів академічної групи з .docx або .txt."""
 
@@ -710,9 +772,15 @@ class StudentImportService:
             )
 
         if lower_filename.endswith(".docx"):
-            candidates, skipped_items = parse_docx_students(file_bytes)
+            candidates, skipped_items = await run_in_threadpool(
+                parse_docx_students,
+                file_bytes,
+            )
         else:
-            candidates, skipped_items = parse_txt_students(file_bytes)
+            candidates, skipped_items = await run_in_threadpool(
+                parse_txt_students,
+                file_bytes,
+            )
 
         if not candidates and not skipped_items:
             raise DomainError(
@@ -819,15 +887,17 @@ class StudentImportService:
             variant_index = calculate_variant_index(assigned_list_number, total_variants)
             variant_number = variant_index + 1
 
+            password_hash = await hash_password_async(temp_password)
             user_id = uuid.uuid4()
             user = User(
                 id=user_id,
                 email=resolved_email,
-                password_hash=hash_password(temp_password),
+                password_hash=password_hash,
                 full_name=candidate.full_name,
                 role=UserRole.STUDENT,
                 group_id=group.id,
                 list_number=assigned_list_number,
+                must_change_password=True,
             )
             users_to_create.append(user)
             created_emails_in_batch.add(resolved_email)

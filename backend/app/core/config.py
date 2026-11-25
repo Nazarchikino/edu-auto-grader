@@ -1,15 +1,19 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_ROOT: Path = Path(__file__).resolve().parents[2]
 _PROJECT_ROOT: Path = _BACKEND_ROOT.parent
 
+DEFAULT_JWT_SECRET_KEY: str = "change-me-in-production-super-secret-jwt-key-32b"
+MIN_PRODUCTION_JWT_SECRET_LENGTH: int = 32
+
 
 def _resolve_backend_path(raw_path: Path) -> Path:
-    """Безпечно резолвить відносний шлях контенту/медіа відносно кореня `backend/`."""
+    """Безпечно резолвить відносний шлях (uploads/content/media) відносно кореня `backend/`."""
     if raw_path.is_absolute():
         return raw_path
 
@@ -36,6 +40,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Edu Auto Grader"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
+    APP_ENV: Literal["development", "test", "production"] = "development"
 
     POSTGRES_USER: str = "postgres"
     POSTGRES_PASSWORD: str = "postgres"
@@ -44,10 +49,14 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "edu_auto_grader"
     DATABASE_URL: str | None = None
 
-    JWT_SECRET_KEY: str = "change-me-in-production-super-secret-jwt-key-32b"
+    JWT_SECRET_KEY: str = DEFAULT_JWT_SECRET_KEY
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    ENABLE_LOGIN_RATE_LIMIT: bool = True
+    LOGIN_RATE_LIMIT_MAX_ATTEMPTS: int = Field(default=10, ge=1)
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=60, ge=1)
 
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: [
@@ -56,12 +65,14 @@ class Settings(BaseSettings):
         ]
     )
 
-    UPLOADS_DIR: Path = Path("uploads")
+    UPLOADS_DIR: Path = _BACKEND_ROOT / "uploads"
     SUBMISSION_FILE_RETENTION_DAYS: int = Field(default=90, ge=1)
+    SUBMISSION_SUPERSEDED_GRACE_HOURS: int = Field(default=24, ge=0)
     ENABLE_RETENTION_CLEANUP_TASK: bool = True
     COURSE_CONTENT_DIR: Path = _BACKEND_ROOT / "content" / "courses"
     COURSE_MEDIA_DIR: Path = _BACKEND_ROOT / "content" / "media"
-    QUIZ_PASS_THRESHOLD_PERCENT: float = 70.0
+    QUIZ_PASS_THRESHOLD_PERCENT: float = Field(default=70.0, ge=0.0, le=100.0)
+    QUIZ_RETRY_COOLDOWN_SECONDS: int = Field(default=300, ge=0)
 
     MAX_OFFICE_UPLOAD_BYTES: int = Field(default=15 * 1024 * 1024, ge=1)
     MAX_ACCDB_UPLOAD_BYTES: int = Field(default=30 * 1024 * 1024, ge=1)
@@ -72,10 +83,27 @@ class Settings(BaseSettings):
     MAX_ZIP_SINGLE_ENTRY_BYTES: int = Field(default=20 * 1024 * 1024, ge=1)
     MAX_ZIP_COMPRESSION_RATIO: float = Field(default=100.0, gt=0.0)
 
-    @field_validator("COURSE_CONTENT_DIR", "COURSE_MEDIA_DIR", mode="after")
+    @field_validator("UPLOADS_DIR", "COURSE_CONTENT_DIR", "COURSE_MEDIA_DIR", mode="after")
     @classmethod
-    def _validate_content_paths(cls, value: Path) -> Path:
+    def _validate_backend_paths(cls, value: Path) -> Path:
         return _resolve_backend_path(value)
+
+    @model_validator(mode="after")
+    def _validate_production_security(self) -> "Settings":
+        """Блокує запуск у production із дефолтним або закоротким JWT_SECRET_KEY."""
+        if self.APP_ENV == "production":
+            stripped_secret = self.JWT_SECRET_KEY.strip()
+            if (
+                self.JWT_SECRET_KEY == DEFAULT_JWT_SECRET_KEY
+                or stripped_secret == DEFAULT_JWT_SECRET_KEY
+                or len(stripped_secret) < MIN_PRODUCTION_JWT_SECRET_LENGTH
+            ):
+                raise ValueError(
+                    "У режимі production необхідно задати надійний JWT_SECRET_KEY "
+                    f"довжиною щонайменше {MIN_PRODUCTION_JWT_SECRET_LENGTH} символів, "
+                    "відмінний від значення за замовчуванням."
+                )
+        return self
 
     @property
     def async_database_url(self) -> str:

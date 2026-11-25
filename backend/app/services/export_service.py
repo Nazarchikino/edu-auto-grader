@@ -22,6 +22,7 @@ from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untype
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.core.exceptions import DomainError
 from app.models.course import Course, CourseSlug, Module, Practical
@@ -32,6 +33,7 @@ from app.schemas.grading import GradingReport
 from app.schemas.submission import (
     CriterionErrorStat,
     ExportFormat,
+    GroupJournalPracticalRead,
     GroupJournalRead,
     GroupJournalRow,
     GroupJournalStudentCell,
@@ -41,12 +43,22 @@ XLSX_MEDIA_TYPE: str = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 PDF_MEDIA_TYPE: str = "application/pdf"
+MAX_PRACTICALS_PER_PDF_PAGE: int = 10
+
+_FORMULA_INJECTION_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
 
 _COURSE_SLUG_ORDER: dict[CourseSlug, int] = {
     CourseSlug.WORD: 0,
     CourseSlug.EXCEL: 1,
     CourseSlug.ACCESS: 2,
     CourseSlug.HTML: 3,
+}
+
+_COURSE_SHORT_LABELS: dict[CourseSlug, str] = {
+    CourseSlug.WORD: "W",
+    CourseSlug.EXCEL: "E",
+    CourseSlug.ACCESS: "A",
+    CourseSlug.HTML: "H",
 }
 
 _FONT_CANDIDATE_PAIRS: tuple[tuple[str, str], ...] = (
@@ -171,6 +183,7 @@ class PracticalColumnInfo:
     course_title: str
     module_order_index: int
     max_score: float
+    needs_rules_review: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +307,79 @@ def calculate_criterion_error_stats(
     return stats
 
 
+def sanitize_spreadsheet_text(value: str) -> str:
+    """Нейтралізує провідні символи формул для захисту від Spreadsheet Formula Injection."""
+    if not value:
+        return value
+    if value.startswith(_FORMULA_INJECTION_PREFIXES) or value.lstrip().startswith(
+        _FORMULA_INJECTION_PREFIXES
+    ):
+        return f"'{value}"
+    return value
+
+
+def _set_xlsx_text_cell(
+    worksheet: Worksheet,
+    *,
+    row: int,
+    column: int,
+    text: str,
+    font: Font | None = None,
+    fill: PatternFill | None = None,
+    border: Border | None = None,
+    alignment: Alignment | None = None,
+) -> None:
+    """Записує екранований текст у клітинку XLSX із явним строковим типом даних 's'."""
+    cell = worksheet.cell(row=row, column=column)
+    cell.value = sanitize_spreadsheet_text(text)
+    cell.data_type = "s"
+    if font is not None:
+        cell.font = font
+    if fill is not None:
+        cell.fill = fill
+    if border is not None:
+        cell.border = border
+    if alignment is not None:
+        cell.alignment = alignment
+
+
+def _resolve_practical_columns(
+    journal: GroupJournalRead,
+    practicals: Sequence[PracticalColumnInfo] | None,
+) -> list[PracticalColumnInfo]:
+    """Визначає впорядкований перелік колонок практичних робіт для експорту відомості."""
+    if practicals is not None and len(practicals) > 0:
+        return list(practicals)
+    if practicals is None and journal.practicals:
+        return [
+            PracticalColumnInfo(
+                practical_id=item.practical_id,
+                practical_title=item.title,
+                course_slug=item.course_slug,
+                course_title=item.course_slug.value.upper(),
+                module_order_index=item.module_order_index,
+                max_score=item.max_score,
+                needs_rules_review=item.needs_rules_review,
+            )
+            for item in journal.practicals
+        ]
+    if practicals is not None:
+        return []
+    if journal.rows:
+        return [
+            PracticalColumnInfo(
+                practical_id=cell.practical_id,
+                practical_title=f"Практична робота №{idx}",
+                course_slug=CourseSlug.WORD,
+                course_title="Курс",
+                module_order_index=idx,
+                max_score=10.0,
+            )
+            for idx, cell in enumerate(journal.rows[0].cells, start=1)
+        ]
+    return []
+
+
 def build_group_journal(
     *,
     group: AcademicGroup,
@@ -312,7 +398,9 @@ def build_group_journal(
         ),
     )
 
-    best_submission_map: dict[tuple[uuid.UUID, uuid.UUID], Submission] = {}
+    allowed_student_ids = {student.id for student in ordered_students}
+    allowed_practical_ids = {info.practical_id for info in practicals}
+    best_by_pair: dict[tuple[uuid.UUID, uuid.UUID], Submission] = {}
     ordered_submissions_best = sorted(
         submissions,
         key=lambda item: (
@@ -323,9 +411,14 @@ def build_group_journal(
         reverse=True,
     )
     for submission in ordered_submissions_best:
+        if (
+            submission.student_id not in allowed_student_ids
+            or submission.practical_id not in allowed_practical_ids
+        ):
+            continue
         key = (submission.student_id, submission.practical_id)
-        if key not in best_submission_map:
-            best_submission_map[key] = submission
+        if key not in best_by_pair:
+            best_by_pair[key] = submission
 
     rows: list[GroupJournalRow] = []
     for student in ordered_students:
@@ -333,9 +426,7 @@ def build_group_journal(
         total_score = 0.0
 
         for practical_info in practicals:
-            matched = best_submission_map.get(
-                (student.id, practical_info.practical_id)
-            )
+            matched = best_by_pair.get((student.id, practical_info.practical_id))
             if matched is None:
                 cells.append(
                     GroupJournalStudentCell(
@@ -374,11 +465,24 @@ def build_group_journal(
             )
         )
 
-    error_stats = calculate_criterion_error_stats(list(best_submission_map.values()))
+    # Передаємо виключно дедупліковані актуальні здачі (1 найкраща здача на пару студент–практична).
+    error_stats = calculate_criterion_error_stats(list(best_by_pair.values()))
+    practical_headers = [
+        GroupJournalPracticalRead(
+            practical_id=info.practical_id,
+            title=info.practical_title,
+            course_slug=info.course_slug,
+            module_order_index=info.module_order_index,
+            max_score=info.max_score,
+            needs_rules_review=info.needs_rules_review,
+        )
+        for info in practicals
+    ]
     return GroupJournalRead(
         group_id=group.id,
         group_code=group.code,
         specialty=group.specialty,
+        practicals=practical_headers,
         rows=rows,
         error_stats=error_stats,
     )
@@ -403,19 +507,7 @@ def render_group_journal_xlsx(
     practicals: Sequence[PracticalColumnInfo] | None = None,
 ) -> bytes:
     """Генерує зведену відомість успішності групи та статистику помилок у форматі .xlsx."""
-    resolved_practicals = list(practicals) if practicals is not None else []
-    if not resolved_practicals and journal.rows:
-        for idx, cell in enumerate(journal.rows[0].cells, start=1):
-            resolved_practicals.append(
-                PracticalColumnInfo(
-                    practical_id=cell.practical_id,
-                    practical_title=f"Практична робота №{idx}",
-                    course_slug=CourseSlug.WORD,
-                    course_title="Курс",
-                    module_order_index=idx,
-                    max_score=10.0,
-                )
-            )
+    resolved_practicals = _resolve_practical_columns(journal, practicals)
 
     workbook = openpyxl.Workbook()
     sheet: Worksheet = workbook.active
@@ -445,20 +537,29 @@ def render_group_journal_xlsx(
     )
     plagiarism_font = Font(name="Calibri", size=11, bold=True, color="991B1B")
 
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center")
+    left_wrap_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
     generated_at_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    sheet.cell(
+    _set_xlsx_text_cell(
+        sheet,
         row=1,
         column=1,
-        value=(
+        text=(
             f"Зведена відомість успішності групи {journal.group_code} "
             f"({journal.specialty})"
         ),
-    ).font = title_font
-    sheet.cell(
+        font=title_font,
+    )
+    _set_xlsx_text_cell(
+        sheet,
         row=2,
         column=1,
-        value=f"Сформовано: {generated_at_str} | Студентів: {len(journal.rows)}",
-    ).font = subtitle_font
+        text=f"Сформовано: {generated_at_str} | Студентів: {len(journal.rows)}",
+        font=subtitle_font,
+    )
 
     practical_headers = [
         (
@@ -477,21 +578,21 @@ def render_group_journal_xlsx(
 
     header_row_idx = 4
     for col_idx, header_text in enumerate(headers, start=1):
-        header_cell = sheet.cell(
+        _set_xlsx_text_cell(
+            sheet,
             row=header_row_idx,
             column=col_idx,
-            value=header_text,
-        )
-        header_cell.font = header_font
-        header_cell.fill = header_fill
-        header_cell.border = cell_border
-        header_cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True,
+            text=header_text,
+            font=header_font,
+            fill=header_fill,
+            border=cell_border,
+            alignment=header_align,
         )
 
+    plagiarism_incidents: list[tuple[int, str, str, str, float | None, str]] = []
     cell_by_practical_for_row: dict[uuid.UUID, GroupJournalStudentCell]
+    resolved_practical_ids = {p.practical_id for p in resolved_practicals}
+
     for student_idx, row_data in enumerate(journal.rows, start=1):
         excel_row = header_row_idx + student_idx
         list_num = (
@@ -503,16 +604,17 @@ def render_group_journal_xlsx(
         num_cell = sheet.cell(row=excel_row, column=1, value=list_num)
         num_cell.font = data_font
         num_cell.border = cell_border
-        num_cell.alignment = Alignment(horizontal="center", vertical="center")
+        num_cell.alignment = center_align
 
-        name_cell = sheet.cell(
+        _set_xlsx_text_cell(
+            sheet,
             row=excel_row,
             column=2,
-            value=row_data.student_full_name,
+            text=row_data.student_full_name,
+            font=data_font,
+            border=cell_border,
+            alignment=left_align,
         )
-        name_cell.font = data_font
-        name_cell.border = cell_border
-        name_cell.alignment = Alignment(horizontal="left", vertical="center")
 
         cell_by_practical_for_row = {
             item.practical_id: item for item in row_data.cells
@@ -523,28 +625,46 @@ def render_group_journal_xlsx(
             student_cell = cell_by_practical_for_row.get(
                 practical_info.practical_id
             )
-            score_cell = sheet.cell(row=excel_row, column=p_idx)
-            score_cell.border = cell_border
-            score_cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center",
-            )
 
             if student_cell is None or student_cell.final_score is None:
-                score_cell.value = "—"
-                score_cell.font = data_font
+                _set_xlsx_text_cell(
+                    sheet,
+                    row=excel_row,
+                    column=p_idx,
+                    text="—",
+                    font=data_font,
+                    border=cell_border,
+                    alignment=center_align,
+                )
             else:
-                score_cell.value = round(student_cell.final_score, 2)
+                score_cell = sheet.cell(
+                    row=excel_row,
+                    column=p_idx,
+                    value=round(student_cell.final_score, 2),
+                )
+                score_cell.border = cell_border
+                score_cell.alignment = center_align
                 score_cell.number_format = "0.00"
                 if student_cell.is_plagiarism_flagged:
                     score_cell.fill = plagiarism_fill
                     score_cell.font = plagiarism_font
-                    reason_text = (
+                    raw_reason = (
                         student_cell.plagiarism_reason
                         or "Підозра на академічний плагіат"
                     )
+                    safe_reason = sanitize_spreadsheet_text(raw_reason)
                     flagged_reasons.append(
-                        f"{practical_info.course_slug.value.upper()}: {reason_text}"
+                        f"{practical_info.course_slug.value.upper()}: {safe_reason}"
+                    )
+                    plagiarism_incidents.append(
+                        (
+                            list_num,
+                            row_data.student_full_name,
+                            practical_info.course_slug.value.upper(),
+                            practical_info.practical_title,
+                            round(student_cell.final_score, 2),
+                            raw_reason,
+                        )
                     )
                 else:
                     score_cell.font = data_font
@@ -552,12 +672,26 @@ def render_group_journal_xlsx(
         for extra_cell in row_data.cells:
             if (
                 extra_cell.is_plagiarism_flagged
-                and extra_cell.practical_id
-                not in {p.practical_id for p in resolved_practicals}
+                and extra_cell.practical_id not in resolved_practical_ids
             ):
-                flagged_reasons.append(
+                raw_extra_reason = (
                     extra_cell.plagiarism_reason
                     or "Підозра на академічний плагіат"
+                )
+                flagged_reasons.append(sanitize_spreadsheet_text(raw_extra_reason))
+                plagiarism_incidents.append(
+                    (
+                        list_num,
+                        row_data.student_full_name,
+                        "—",
+                        str(extra_cell.practical_id),
+                        (
+                            round(extra_cell.final_score, 2)
+                            if extra_cell.final_score is not None
+                            else None
+                        ),
+                        raw_extra_reason,
+                    )
                 )
 
         total_col_idx = 3 + len(resolved_practicals)
@@ -569,26 +703,29 @@ def render_group_journal_xlsx(
         total_cell.font = total_font
         total_cell.border = cell_border
         total_cell.number_format = "0.00"
-        total_cell.alignment = Alignment(horizontal="center", vertical="center")
+        total_cell.alignment = center_align
 
         status_col_idx = total_col_idx + 1
-        status_cell = sheet.cell(row=excel_row, column=status_col_idx)
-        status_cell.border = cell_border
         if flagged_reasons:
-            status_cell.value = f"ПЛАГІАТ: {'; '.join(flagged_reasons)}"
-            status_cell.fill = plagiarism_fill
-            status_cell.font = plagiarism_font
-            status_cell.alignment = Alignment(
-                horizontal="left",
-                vertical="center",
-                wrap_text=True,
+            _set_xlsx_text_cell(
+                sheet,
+                row=excel_row,
+                column=status_col_idx,
+                text=f"ПЛАГІАТ: {'; '.join(flagged_reasons)}",
+                font=plagiarism_font,
+                fill=plagiarism_fill,
+                border=cell_border,
+                alignment=left_wrap_align,
             )
         else:
-            status_cell.value = "ОК"
-            status_cell.font = data_font
-            status_cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center",
+            _set_xlsx_text_cell(
+                sheet,
+                row=excel_row,
+                column=status_col_idx,
+                text="ОК",
+                font=data_font,
+                border=cell_border,
+                alignment=center_align,
             )
 
     _auto_adjust_worksheet_columns(sheet)
@@ -602,24 +739,36 @@ def render_group_journal_xlsx(
         "Частка помилок (%)",
     ]
     for col_idx, header_text in enumerate(stats_headers, start=1):
-        h_cell = stats_sheet.cell(row=1, column=col_idx, value=header_text)
-        h_cell.font = header_font
-        h_cell.fill = header_fill
-        h_cell.border = cell_border
-        h_cell.alignment = Alignment(horizontal="center", vertical="center")
+        _set_xlsx_text_cell(
+            stats_sheet,
+            row=1,
+            column=col_idx,
+            text=header_text,
+            font=header_font,
+            fill=header_fill,
+            border=cell_border,
+            alignment=center_align,
+        )
 
     for stat_idx, stat in enumerate(journal.error_stats, start=2):
-        rule_cell = stats_sheet.cell(row=stat_idx, column=1, value=stat.rule_id)
-        rule_cell.font = data_font
-        rule_cell.border = cell_border
-
-        desc_cell = stats_sheet.cell(
+        _set_xlsx_text_cell(
+            stats_sheet,
+            row=stat_idx,
+            column=1,
+            text=stat.rule_id,
+            font=data_font,
+            border=cell_border,
+            alignment=left_align,
+        )
+        _set_xlsx_text_cell(
+            stats_sheet,
             row=stat_idx,
             column=2,
-            value=stat.description,
+            text=stat.description,
+            font=data_font,
+            border=cell_border,
+            alignment=left_wrap_align,
         )
-        desc_cell.font = data_font
-        desc_cell.border = cell_border
 
         attempts_cell = stats_sheet.cell(
             row=stat_idx,
@@ -628,10 +777,7 @@ def render_group_journal_xlsx(
         )
         attempts_cell.font = data_font
         attempts_cell.border = cell_border
-        attempts_cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-        )
+        attempts_cell.alignment = center_align
 
         failures_cell = stats_sheet.cell(
             row=stat_idx,
@@ -640,10 +786,7 @@ def render_group_journal_xlsx(
         )
         failures_cell.font = data_font
         failures_cell.border = cell_border
-        failures_cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-        )
+        failures_cell.alignment = center_align
 
         rate_cell = stats_sheet.cell(
             row=stat_idx,
@@ -653,9 +796,104 @@ def render_group_journal_xlsx(
         rate_cell.font = data_font
         rate_cell.border = cell_border
         rate_cell.number_format = "0.00"
-        rate_cell.alignment = Alignment(horizontal="center", vertical="center")
+        rate_cell.alignment = center_align
 
     _auto_adjust_worksheet_columns(stats_sheet)
+
+    plagiarism_sheet: Worksheet = workbook.create_sheet(title="Антиплагіат")
+    plagiarism_headers = [
+        "№ з/п",
+        "ПІБ студента",
+        "Курс",
+        "Практична робота",
+        "Бал",
+        "Причина підозри",
+    ]
+    for col_idx, header_text in enumerate(plagiarism_headers, start=1):
+        _set_xlsx_text_cell(
+            plagiarism_sheet,
+            row=1,
+            column=col_idx,
+            text=header_text,
+            font=header_font,
+            fill=header_fill,
+            border=cell_border,
+            alignment=center_align,
+        )
+
+    for incident_idx, incident in enumerate(plagiarism_incidents, start=2):
+        inc_list_num, inc_name, inc_course, inc_title, inc_score, inc_reason = incident
+
+        inc_num_cell = plagiarism_sheet.cell(
+            row=incident_idx,
+            column=1,
+            value=inc_list_num,
+        )
+        inc_num_cell.font = data_font
+        inc_num_cell.border = cell_border
+        inc_num_cell.alignment = center_align
+
+        _set_xlsx_text_cell(
+            plagiarism_sheet,
+            row=incident_idx,
+            column=2,
+            text=inc_name,
+            font=data_font,
+            border=cell_border,
+            alignment=left_align,
+        )
+        _set_xlsx_text_cell(
+            plagiarism_sheet,
+            row=incident_idx,
+            column=3,
+            text=inc_course,
+            font=data_font,
+            border=cell_border,
+            alignment=center_align,
+        )
+        _set_xlsx_text_cell(
+            plagiarism_sheet,
+            row=incident_idx,
+            column=4,
+            text=inc_title,
+            font=data_font,
+            border=cell_border,
+            alignment=left_wrap_align,
+        )
+        if inc_score is None:
+            _set_xlsx_text_cell(
+                plagiarism_sheet,
+                row=incident_idx,
+                column=5,
+                text="—",
+                font=data_font,
+                border=cell_border,
+                alignment=center_align,
+            )
+        else:
+            inc_score_cell = plagiarism_sheet.cell(
+                row=incident_idx,
+                column=5,
+                value=inc_score,
+            )
+            inc_score_cell.font = plagiarism_font
+            inc_score_cell.fill = plagiarism_fill
+            inc_score_cell.border = cell_border
+            inc_score_cell.number_format = "0.00"
+            inc_score_cell.alignment = center_align
+
+        _set_xlsx_text_cell(
+            plagiarism_sheet,
+            row=incident_idx,
+            column=6,
+            text=inc_reason,
+            font=plagiarism_font,
+            fill=plagiarism_fill,
+            border=cell_border,
+            alignment=left_wrap_align,
+        )
+
+    _auto_adjust_worksheet_columns(plagiarism_sheet)
 
     buffer = io.BytesIO()
     workbook.save(buffer)
@@ -684,179 +922,412 @@ def _prepare_pdf_text(text: str, *, unicode_supported: bool) -> str:
     return _transliterate_to_ascii(text)
 
 
+def _format_pdf_score(score: float, *, flagged: bool = False) -> str:
+    """Форматує бал компактно для PDF-клітинок (наприклад: 10, 8.5, 8.5*)."""
+    rounded = round(score, 2)
+    if rounded == 0:
+        rounded = 0.0
+    formatted = f"{rounded:.2f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return f"{formatted}*" if flagged else formatted
+
+
+def _fit_pdf_text(pdf: FPDF, text: str, max_width_mm: float) -> str:
+    """Обрізає текст із трикрапкою так, щоб він гарантовано вміщався у ширину клітинки PDF."""
+    normalized = re.sub(r"[\r\n\t]+", " ", text).strip()
+    available_width = max_width_mm - (2.0 * float(pdf.c_margin)) - 0.2
+    if not normalized or available_width <= 0.0:
+        return ""
+    if float(pdf.get_string_width(normalized)) <= available_width:
+        return normalized
+
+    ellipsis = "..."
+    if float(pdf.get_string_width(ellipsis)) > available_width:
+        low, high = 0, len(normalized)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if float(pdf.get_string_width(normalized[:mid])) <= available_width:
+                low = mid
+            else:
+                high = mid - 1
+        return normalized[:low]
+
+    low, high = 0, len(normalized)
+    while low < high:
+        mid = (low + high + 1) // 2
+        candidate = f"{normalized[:mid].rstrip()}{ellipsis}"
+        if float(pdf.get_string_width(candidate)) <= available_width:
+            low = mid
+        else:
+            high = mid - 1
+    if low == 0:
+        return ellipsis
+    return f"{normalized[:low].rstrip()}{ellipsis}"
+
+
 def render_group_journal_pdf(
     journal: GroupJournalRead,
     practicals: Sequence[PracticalColumnInfo] | None = None,
 ) -> bytes:
     """Генерує зведену відомість успішності групи та аналітику помилок у форматі .pdf."""
-    resolved_practicals = list(practicals) if practicals is not None else []
-    if not resolved_practicals and journal.rows:
-        for idx, cell in enumerate(journal.rows[0].cells, start=1):
-            resolved_practicals.append(
-                PracticalColumnInfo(
-                    practical_id=cell.practical_id,
-                    practical_title=f"Практична робота №{idx}",
-                    course_slug=CourseSlug.WORD,
-                    course_title="Курс",
-                    module_order_index=idx,
-                    max_score=10.0,
-                )
-            )
+    resolved_practicals = _resolve_practical_columns(journal, practicals)
+    indexed_practicals: list[tuple[int, PracticalColumnInfo]] = list(
+        enumerate(resolved_practicals, start=1)
+    )
+    if indexed_practicals:
+        practical_chunks: list[list[tuple[int, PracticalColumnInfo]]] = [
+            indexed_practicals[start : start + MAX_PRACTICALS_PER_PDF_PAGE]
+            for start in range(0, len(indexed_practicals), MAX_PRACTICALS_PER_PDF_PAGE)
+        ]
+    else:
+        practical_chunks = [[]]
+
+    total_chunks = len(practical_chunks)
+    generated_at_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
     font_family, unicode_ok = _configure_pdf_font(pdf)
-    pdf.add_page()
 
-    pdf.set_font(font_family, style="B", size=14)
-    title_text = _prepare_pdf_text(
-        f"ЗВЕДЕНА ВІДОМІСТЬ УСПІШНОСТІ ГРУПИ {journal.group_code}",
-        unicode_supported=unicode_ok,
-    )
-    pdf.cell(w=0, h=9, text=title_text, new_x="LMARGIN", new_y="NEXT")
+    usable_w = float(pdf.epw)
+    num_w = 11.0
+    base_name_w = 60.0
+    total_w = 18.0
+    avg_w = 18.0
+    notes_w = 28.0
+    header_h = 8.0
+    row_h = 7.0
 
-    pdf.set_font(font_family, style="", size=10)
-    generated_at_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    subtitle_text = _prepare_pdf_text(
-        f"Спеціальність: {journal.specialty} | Студентів: {len(journal.rows)} | "
-        f"Дата формування: {generated_at_str}",
-        unicode_supported=unicode_ok,
-    )
-    pdf.cell(w=0, h=6, text=subtitle_text, new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+    def _draw_page_header(
+        *,
+        chunk_index: int,
+        chunk_items: list[tuple[int, PracticalColumnInfo]],
+    ) -> None:
+        pdf.set_text_color(15, 23, 42)
+        pdf.set_font(font_family, style="B", size=13)
+        title_raw = f"ЗВЕДЕНА ВІДОМІСТЬ УСПІШНОСТІ ГРУПИ {journal.group_code}"
+        title_text = _fit_pdf_text(
+            pdf,
+            _prepare_pdf_text(title_raw, unicode_supported=unicode_ok),
+            usable_w,
+        )
+        pdf.cell(w=usable_w, h=8, text=title_text, new_x="LMARGIN", new_y="NEXT")
 
-    num_w = 14.0
-    name_w = 72.0
-    total_w = 24.0
-    status_w = 38.0
-    available_practicals_w = 277.0 - (num_w + name_w + total_w + status_w)
-    practical_count = len(resolved_practicals)
-    single_practical_w = (
-        round(available_practicals_w / practical_count, 2)
-        if practical_count > 0
-        else 0.0
-    )
+        pdf.set_font(font_family, style="", size=9.5)
+        subtitle_raw = (
+            f"Спеціальність: {journal.specialty} | Студентів: {len(journal.rows)} | "
+            f"Дата формування: {generated_at_str}"
+        )
+        subtitle_text = _fit_pdf_text(
+            pdf,
+            _prepare_pdf_text(subtitle_raw, unicode_supported=unicode_ok),
+            usable_w,
+        )
+        pdf.cell(w=usable_w, h=5.5, text=subtitle_text, new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_font(font_family, style="B", size=9)
-    pdf.set_fill_color(30, 58, 138)
-    pdf.set_text_color(255, 255, 255)
+        if total_chunks > 1 and chunk_items:
+            first_num = chunk_items[0][0]
+            last_num = chunk_items[-1][0]
+            pdf.set_font(font_family, style="B", size=9.5)
+            part_raw = (
+                f"Частина {chunk_index + 1} з {total_chunks} "
+                f"(роботи {first_num}–{last_num})"
+            )
+            part_text = _fit_pdf_text(
+                pdf,
+                _prepare_pdf_text(part_raw, unicode_supported=unicode_ok),
+                usable_w,
+            )
+            pdf.cell(w=usable_w, h=5.5, text=part_text, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2.5)
 
-    pdf.cell(
-        w=num_w,
-        h=8,
-        text=_prepare_pdf_text("№", unicode_supported=unicode_ok),
-        border=1,
-        align="C",
-        fill=True,
-    )
-    pdf.cell(
-        w=name_w,
-        h=8,
-        text=_prepare_pdf_text("ПІБ студента", unicode_supported=unicode_ok),
-        border=1,
-        align="L",
-        fill=True,
-    )
-    for idx, p_info in enumerate(resolved_practicals, start=1):
-        col_label = f"П{idx} ({p_info.course_slug.value.upper()})"
+    def _draw_table_header(
+        *,
+        chunk_items: list[tuple[int, PracticalColumnInfo]],
+        name_w: float,
+        single_practical_w: float,
+        include_summary: bool,
+    ) -> None:
+        pdf.set_font(font_family, style="B", size=8.5)
+        pdf.set_fill_color(30, 58, 138)
+        pdf.set_text_color(255, 255, 255)
+
         pdf.cell(
-            w=single_practical_w,
-            h=8,
-            text=_prepare_pdf_text(col_label, unicode_supported=unicode_ok),
+            w=num_w,
+            h=header_h,
+            text=_fit_pdf_text(
+                pdf,
+                _prepare_pdf_text("№", unicode_supported=unicode_ok),
+                num_w,
+            ),
             border=1,
             align="C",
             fill=True,
         )
-    pdf.cell(
-        w=total_w,
-        h=8,
-        text=_prepare_pdf_text("Сума", unicode_supported=unicode_ok),
-        border=1,
-        align="C",
-        fill=True,
-    )
-    pdf.cell(
-        w=status_w,
-        h=8,
-        text=_prepare_pdf_text("Антиплагіат", unicode_supported=unicode_ok),
-        border=1,
-        align="C",
-        fill=True,
-        new_x="LMARGIN",
-        new_y="NEXT",
-    )
-
-    pdf.set_text_color(15, 23, 42)
-    pdf.set_font(font_family, style="", size=9)
-
-    for idx, row_data in enumerate(journal.rows, start=1):
-        list_num = (
-            row_data.list_number if row_data.list_number is not None else idx
-        )
-        cell_map = {item.practical_id: item for item in row_data.cells}
-        has_plagiarism = any(item.is_plagiarism_flagged for item in row_data.cells)
-
-        pdf.cell(
-            w=num_w,
-            h=7,
-            text=str(list_num),
-            border=1,
-            align="C",
-        )
-        truncated_name = row_data.student_full_name[:38]
         pdf.cell(
             w=name_w,
-            h=7,
-            text=_prepare_pdf_text(truncated_name, unicode_supported=unicode_ok),
+            h=header_h,
+            text=_fit_pdf_text(
+                pdf,
+                _prepare_pdf_text("ПІБ студента", unicode_supported=unicode_ok),
+                name_w,
+            ),
             border=1,
             align="L",
+            fill=True,
         )
 
-        for p_info in resolved_practicals:
-            st_cell = cell_map.get(p_info.practical_id)
-            if st_cell is None or st_cell.final_score is None:
-                val_text = "-"
-            else:
-                flag_suffix = " *" if st_cell.is_plagiarism_flagged else ""
-                val_text = f"{st_cell.final_score:.2f}{flag_suffix}"
+        inner_practical_w = single_practical_w - (2.0 * float(pdf.c_margin)) - 0.2
+        for item_idx, (p_num, p_info) in enumerate(chunk_items):
+            is_rightmost = not include_summary and item_idx == len(chunk_items) - 1
+            full_label = _prepare_pdf_text(
+                f"П{p_num} ({p_info.course_slug.value.upper()})",
+                unicode_supported=unicode_ok,
+            )
+            short_code = _COURSE_SHORT_LABELS.get(
+                p_info.course_slug,
+                p_info.course_slug.value[:1].upper(),
+            )
+            compact_label = _prepare_pdf_text(
+                f"П{p_num} ({short_code})",
+                unicode_supported=unicode_ok,
+            )
+            chosen_label = (
+                full_label
+                if float(pdf.get_string_width(full_label)) <= inner_practical_w
+                else compact_label
+            )
+            fitted_label = _fit_pdf_text(pdf, chosen_label, single_practical_w)
             pdf.cell(
                 w=single_practical_w,
-                h=7,
-                text=_prepare_pdf_text(val_text, unicode_supported=unicode_ok),
+                h=header_h,
+                text=fitted_label,
+                border=1,
+                align="C",
+                fill=True,
+                new_x="LMARGIN" if is_rightmost else "RIGHT",
+                new_y="NEXT" if is_rightmost else "TOP",
+            )
+
+        if include_summary:
+            pdf.cell(
+                w=total_w,
+                h=header_h,
+                text=_fit_pdf_text(
+                    pdf,
+                    _prepare_pdf_text("Сума", unicode_supported=unicode_ok),
+                    total_w,
+                ),
+                border=1,
+                align="C",
+                fill=True,
+            )
+            pdf.cell(
+                w=avg_w,
+                h=header_h,
+                text=_fit_pdf_text(
+                    pdf,
+                    _prepare_pdf_text("Середній", unicode_supported=unicode_ok),
+                    avg_w,
+                ),
+                border=1,
+                align="C",
+                fill=True,
+            )
+            pdf.cell(
+                w=notes_w,
+                h=header_h,
+                text=_fit_pdf_text(
+                    pdf,
+                    _prepare_pdf_text("Примітки", unicode_supported=unicode_ok),
+                    notes_w,
+                ),
+                border=1,
+                align="C",
+                fill=True,
+                new_x="LMARGIN",
+                new_y="NEXT",
+            )
+
+    for chunk_idx, chunk_items in enumerate(practical_chunks):
+        pdf.add_page()
+        include_summary = chunk_idx == total_chunks - 1
+        summary_w = (total_w + avg_w + notes_w) if include_summary else 0.0
+        chunk_count = len(chunk_items)
+        if chunk_count > 0:
+            name_w = base_name_w
+            available_practicals_w = usable_w - (num_w + name_w + summary_w)
+            single_practical_w = available_practicals_w / chunk_count
+        else:
+            name_w = usable_w - (num_w + summary_w)
+            single_practical_w = 0.0
+
+        _draw_page_header(chunk_index=chunk_idx, chunk_items=chunk_items)
+        _draw_table_header(
+            chunk_items=chunk_items,
+            name_w=name_w,
+            single_practical_w=single_practical_w,
+            include_summary=include_summary,
+        )
+
+        pdf.set_text_color(15, 23, 42)
+        pdf.set_font(font_family, style="", size=8.5)
+
+        for row_idx, row_data in enumerate(journal.rows, start=1):
+            if float(pdf.get_y()) + row_h > float(pdf.page_break_trigger):
+                pdf.add_page()
+                _draw_page_header(chunk_index=chunk_idx, chunk_items=chunk_items)
+                _draw_table_header(
+                    chunk_items=chunk_items,
+                    name_w=name_w,
+                    single_practical_w=single_practical_w,
+                    include_summary=include_summary,
+                )
+                pdf.set_text_color(15, 23, 42)
+                pdf.set_font(font_family, style="", size=8.5)
+
+            list_num = (
+                row_data.list_number
+                if row_data.list_number is not None
+                else row_idx
+            )
+            cell_map = {item.practical_id: item for item in row_data.cells}
+
+            pdf.cell(
+                w=num_w,
+                h=row_h,
+                text=_fit_pdf_text(pdf, str(list_num), num_w),
                 border=1,
                 align="C",
             )
+            prepared_name = _prepare_pdf_text(
+                row_data.student_full_name,
+                unicode_supported=unicode_ok,
+            )
+            pdf.cell(
+                w=name_w,
+                h=row_h,
+                text=_fit_pdf_text(pdf, prepared_name, name_w),
+                border=1,
+                align="L",
+            )
 
-        pdf.set_font(font_family, style="B", size=9)
-        pdf.cell(
-            w=total_w,
-            h=7,
-            text=f"{row_data.total_score:.2f}",
-            border=1,
-            align="C",
-        )
-        status_label = "ПЛАГІАТ" if has_plagiarism else "ОК"
-        pdf.set_font(
-            font_family,
-            style="B" if has_plagiarism else "",
-            size=9,
-        )
-        pdf.cell(
-            w=status_w,
-            h=7,
-            text=_prepare_pdf_text(status_label, unicode_supported=unicode_ok),
-            border=1,
-            align="C",
-            new_x="LMARGIN",
-            new_y="NEXT",
-        )
-        pdf.set_font(font_family, style="", size=9)
+            for item_idx, (_p_num, p_info) in enumerate(chunk_items):
+                is_rightmost = (
+                    not include_summary and item_idx == len(chunk_items) - 1
+                )
+                st_cell = cell_map.get(p_info.practical_id)
+                if st_cell is None or st_cell.final_score is None:
+                    val_text = "-"
+                else:
+                    val_text = _format_pdf_score(
+                        st_cell.final_score,
+                        flagged=st_cell.is_plagiarism_flagged,
+                    )
+                pdf.cell(
+                    w=single_practical_w,
+                    h=row_h,
+                    text=_fit_pdf_text(
+                        pdf,
+                        _prepare_pdf_text(val_text, unicode_supported=unicode_ok),
+                        single_practical_w,
+                    ),
+                    border=1,
+                    align="C",
+                    new_x="LMARGIN" if is_rightmost else "RIGHT",
+                    new_y="NEXT" if is_rightmost else "TOP",
+                )
+
+            if include_summary:
+                scored_values = [
+                    st_cell.final_score
+                    for p_info in resolved_practicals
+                    if (st_cell := cell_map.get(p_info.practical_id)) is not None
+                    and st_cell.final_score is not None
+                ]
+                avg_text = (
+                    _format_pdf_score(sum(scored_values) / len(scored_values))
+                    if scored_values
+                    else "-"
+                )
+                flagged_count = sum(
+                    1 for item in row_data.cells if item.is_plagiarism_flagged
+                )
+                has_plagiarism = flagged_count > 0
+
+                pdf.set_font(font_family, style="B", size=8.5)
+                pdf.cell(
+                    w=total_w,
+                    h=row_h,
+                    text=_fit_pdf_text(
+                        pdf,
+                        _format_pdf_score(row_data.total_score),
+                        total_w,
+                    ),
+                    border=1,
+                    align="C",
+                )
+                pdf.set_font(font_family, style="", size=8.5)
+                pdf.cell(
+                    w=avg_w,
+                    h=row_h,
+                    text=_fit_pdf_text(pdf, avg_text, avg_w),
+                    border=1,
+                    align="C",
+                )
+
+                if flagged_count > 1:
+                    notes_label = f"ПЛАГІАТ ({flagged_count})"
+                elif has_plagiarism:
+                    notes_label = "ПЛАГІАТ"
+                else:
+                    notes_label = "ОК"
+
+                pdf.set_font(
+                    font_family,
+                    style="B" if has_plagiarism else "",
+                    size=8.5,
+                )
+                pdf.cell(
+                    w=notes_w,
+                    h=row_h,
+                    text=_fit_pdf_text(
+                        pdf,
+                        _prepare_pdf_text(notes_label, unicode_supported=unicode_ok),
+                        notes_w,
+                    ),
+                    border=1,
+                    align="C",
+                    new_x="LMARGIN",
+                    new_y="NEXT",
+                )
+                pdf.set_font(font_family, style="", size=8.5)
+
+    pdf.ln(3)
+    pdf.set_font(font_family, style="", size=8)
+    pdf.set_text_color(71, 85, 105)
+    pdf.cell(
+        w=usable_w,
+        h=5,
+        text=_fit_pdf_text(
+            pdf,
+            _prepare_pdf_text(
+                "Примітка: позначка * біля бала вказує на підозру щодо академічного плагіату.",
+                unicode_supported=unicode_ok,
+            ),
+            usable_w,
+        ),
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+    pdf.set_text_color(15, 23, 42)
 
     if resolved_practicals:
-        pdf.ln(4)
+        pdf.ln(2)
         pdf.set_font(font_family, style="B", size=9)
         pdf.cell(
-            w=0,
+            w=usable_w,
             h=6,
             text=_prepare_pdf_text(
                 "Перелік практичних робіт:",
@@ -869,21 +1340,23 @@ def render_group_journal_pdf(
         for idx, p_info in enumerate(resolved_practicals, start=1):
             legend_line = (
                 f"П{idx} ({p_info.course_slug.value.upper()}) — "
-                f"{p_info.practical_title} (макс. {p_info.max_score:.2f} б.)"
+                f"{p_info.practical_title} "
+                f"(макс. {_format_pdf_score(p_info.max_score)} б.)"
             )
-            pdf.cell(
-                w=0,
-                h=5,
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(
+                w=usable_w,
+                h=4.8,
                 text=_prepare_pdf_text(legend_line, unicode_supported=unicode_ok),
                 new_x="LMARGIN",
                 new_y="NEXT",
             )
 
-    pdf.ln(4)
-    pdf.set_font(font_family, style="B", size=10)
+    pdf.ln(3)
+    pdf.set_font(font_family, style="B", size=9.5)
     pdf.cell(
-        w=0,
-        h=7,
+        w=usable_w,
+        h=6.5,
         text=_prepare_pdf_text(
             "Статистика помилок за критеріями автоперевірки:",
             unicode_supported=unicode_ok,
@@ -893,10 +1366,10 @@ def render_group_journal_pdf(
     )
 
     if not journal.error_stats:
-        pdf.set_font(font_family, style="", size=9)
+        pdf.set_font(font_family, style="", size=8.5)
         pdf.cell(
-            w=0,
-            h=6,
+            w=usable_w,
+            h=5.5,
             text=_prepare_pdf_text(
                 "Дані про типові помилки відсутні.",
                 unicode_supported=unicode_ok,
@@ -912,9 +1385,10 @@ def render_group_journal_pdf(
                 f"{stat.failure_count}/{stat.total_attempts} "
                 f"({stat.failure_rate_percent:.2f}%)"
             )
-            pdf.cell(
-                w=0,
-                h=5,
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(
+                w=usable_w,
+                h=4.8,
                 text=_prepare_pdf_text(stat_line, unicode_supported=unicode_ok),
                 new_x="LMARGIN",
                 new_y="NEXT",
@@ -1002,6 +1476,7 @@ class ExportService:
                 course_title=practical.module.course.title,
                 module_order_index=practical.module.order_index,
                 max_score=float(practical.max_score),
+                needs_rules_review=practical.needs_rules_review,
             )
             for practical in practicals
         ]
@@ -1097,13 +1572,15 @@ class ExportService:
         )
 
         if export_format == ExportFormat.XLSX:
-            content = render_group_journal_xlsx(
+            content = await run_in_threadpool(
+                render_group_journal_xlsx,
                 journal=bundle.journal,
                 practicals=bundle.practicals,
             )
             media_type = XLSX_MEDIA_TYPE
         else:
-            content = render_group_journal_pdf(
+            content = await run_in_threadpool(
+                render_group_journal_pdf,
                 journal=bundle.journal,
                 practicals=bundle.practicals,
             )
@@ -1122,6 +1599,7 @@ __all__ = [
     "ExportService",
     "ExportedDocument",
     "GroupJournalBundle",
+    "MAX_PRACTICALS_PER_PDF_PAGE",
     "PDF_MEDIA_TYPE",
     "PracticalColumnInfo",
     "XLSX_MEDIA_TYPE",
@@ -1130,4 +1608,5 @@ __all__ = [
     "calculate_criterion_error_stats",
     "render_group_journal_pdf",
     "render_group_journal_xlsx",
+    "sanitize_spreadsheet_text",
 ]

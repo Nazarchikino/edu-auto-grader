@@ -30,6 +30,7 @@ _W_TAG_NUMPR = f"{{{_W_NS}}}numPr"
 _W_TAG_NUMID = f"{{{_W_NS}}}numId"
 _W_TAG_RFONTS = f"{{{_W_NS}}}rFonts"
 _W_TAG_SZ = f"{{{_W_NS}}}sz"
+_W_TAG_SZ_CS = f"{{{_W_NS}}}szCs"
 _W_TAG_SPACING = f"{{{_W_NS}}}spacing"
 _W_TAG_JC = f"{{{_W_NS}}}jc"
 _W_TAG_DOC_DEFAULTS = f"{{{_W_NS}}}docDefaults"
@@ -39,6 +40,7 @@ _W_ATTR_VAL = f"{{{_W_NS}}}val"
 _W_ATTR_ASCII = f"{{{_W_NS}}}ascii"
 _W_ATTR_HANSI = f"{{{_W_NS}}}hAnsi"
 _W_ATTR_CS = f"{{{_W_NS}}}cs"
+_W_ATTR_EAST_ASIA = f"{{{_W_NS}}}eastAsia"
 _W_ATTR_LINE = f"{{{_W_NS}}}line"
 _W_ATTR_LINE_RULE = f"{{{_W_NS}}}lineRule"
 
@@ -54,6 +56,12 @@ _TABLE_TARGET_PATTERN = re.compile(
     r"^(?:table_(\d+)|document|table)(?:\.(rows|cols|columns))?$",
     re.IGNORECASE,
 )
+_TABLE_DIM_MATRIX_PATTERN = re.compile(r"^\s*(\d+)\s*[xXхХ×]\s*(\d+)\s*$")
+_TABLE_DIM_COND_PATTERN = re.compile(
+    r"^\s*(rows|cols|columns)\s*(>=|<=|!=|==|>|<|=)\s*(\d+)\s*$",
+    re.IGNORECASE,
+)
+_FONT_KEY_ALIASES: frozenset[str] = frozenset({"name", "font", "family", "size", "pt"})
 
 _ALIGNMENT_ENUM_TO_NAME: dict[WD_ALIGN_PARAGRAPH, str] = {
     WD_ALIGN_PARAGRAPH.LEFT: "LEFT",
@@ -77,6 +85,151 @@ class DocxGrader(BaseGrader):
     """Стратегія детермінованої автоперевірки документів Microsoft Word (.docx)."""
 
     format_type: PracticalFormat = PracticalFormat.DOCX
+    supported_rule_types: frozenset[GradingRuleType] = frozenset(
+        {
+            GradingRuleType.DOCX_PAGE_MARGINS,
+            GradingRuleType.DOCX_FONT,
+            GradingRuleType.DOCX_LINE_SPACING,
+            GradingRuleType.DOCX_ALIGNMENT,
+            GradingRuleType.DOCX_TABLE_EXISTS,
+            GradingRuleType.DOCX_LIST_EXISTS,
+        }
+    )
+
+    def validate_rule_definition(self, rule: GradingRule) -> None:
+        """Перевіряє синтаксис правила Microsoft Word (.docx) перед збереженням у БД."""
+        super().validate_rule_definition(rule)
+
+        if rule.type == GradingRuleType.DOCX_PAGE_MARGINS:
+            expected_sample = self.substitute_placeholders_for_validation(rule.expected, "20")
+            try:
+                self._parse_expected_margins(expected_sample)
+            except GradingError as exc:
+                raise GradingError(
+                    f"Помилка у правилі '{rule.id}': {exc.detail}",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            return
+
+        if rule.type == GradingRuleType.DOCX_FONT:
+            cleaned = rule.expected.strip()
+            if self.is_whole_placeholder(cleaned):
+                return
+            if "=" in cleaned:
+                sanitized_parts: list[str] = []
+                for raw_part in re.split(r"[,;]", cleaned):
+                    part = raw_part.strip()
+                    if not part:
+                        continue
+                    if "=" not in part:
+                        raise GradingError(
+                            f"Некоректний фрагмент шрифту '{part}' у правилі '{rule.id}'. "
+                            "Використовуйте формат 'Times New Roman:14' або 'name=Arial,size=12'.",
+                            code="INVALID_RULE_DEFINITION",
+                            status_code=422,
+                            context={"rule_id": rule.id, "expected": rule.expected},
+                        )
+                    key_raw, val_raw = part.split("=", maxsplit=1)
+                    key = key_raw.strip().lower()
+                    if key not in _FONT_KEY_ALIASES:
+                        raise GradingError(
+                            f"Невідомий параметр шрифту '{key}' у правилі '{rule.id}'. "
+                            "Дозволені ключі: name, font, family, size, pt.",
+                            code="INVALID_RULE_DEFINITION",
+                            status_code=422,
+                            context={"rule_id": rule.id, "expected": rule.expected, "key": key},
+                        )
+                    sample_val = "14" if key in {"size", "pt"} else "Arial"
+                    substituted_val = self.substitute_placeholders_for_validation(
+                        val_raw,
+                        sample_val,
+                    )
+                    sanitized_parts.append(f"{key}={substituted_val}")
+                expected_sample = ",".join(sanitized_parts)
+            elif ":" in cleaned:
+                name_part, size_part = cleaned.rsplit(":", maxsplit=1)
+                sub_name = self.substitute_placeholders_for_validation(name_part, "Arial")
+                sub_size = self.substitute_placeholders_for_validation(size_part, "14")
+                expected_sample = f"{sub_name}:{sub_size}"
+            else:
+                expected_sample = self.substitute_placeholders_for_validation(cleaned, "Arial")
+
+            try:
+                self._parse_expected_font(expected_sample)
+            except GradingError as exc:
+                raise GradingError(
+                    f"Помилка у правилі '{rule.id}': {exc.detail}",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            return
+
+        if rule.type == GradingRuleType.DOCX_LINE_SPACING:
+            self.validate_numeric_condition(rule, rule.expected, sample_number="1.5")
+            return
+
+        if rule.type == GradingRuleType.DOCX_ALIGNMENT:
+            cleaned = rule.expected.strip()
+            if self.is_whole_placeholder(cleaned):
+                return
+            if cleaned.upper() not in _ALIGNMENT_ALIASES:
+                raise GradingError(
+                    f"Невідомий тип вирівнювання '{rule.expected}' у правилі '{rule.id}'. "
+                    "Дозволені значення: LEFT, CENTER, RIGHT, JUSTIFY, DISTRIBUTE.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            return
+
+        if rule.type == GradingRuleType.DOCX_TABLE_EXISTS:
+            target_sample = self.substitute_placeholders_for_validation(rule.target, "0").strip()
+            target_match = _TABLE_TARGET_PATTERN.match(target_sample)
+            if target_match is not None and target_match.group(2) is not None:
+                self.validate_numeric_condition(rule, rule.expected, sample_number="4")
+                return
+
+            if self.is_whole_placeholder(rule.expected):
+                return
+
+            expected_sample = self.substitute_placeholders_for_validation(
+                rule.expected,
+                "4",
+            ).strip()
+            lowered = expected_sample.lower()
+            if lowered in {"true", "false", "yes", "no"}:
+                return
+            if self.is_valid_numeric_condition(expected_sample):
+                return
+            matrix_match = _TABLE_DIM_MATRIX_PATTERN.match(expected_sample)
+            if (
+                matrix_match is not None
+                and int(matrix_match.group(1)) >= 1
+                and int(matrix_match.group(2)) >= 1
+            ):
+                return
+            if _TABLE_DIM_COND_PATTERN.match(expected_sample) is not None:
+                return
+
+            raise GradingError(
+                f"Некоректний вираз expected='{rule.expected}' у правилі '{rule.id}' "
+                "типу 'docx_table_exists'. Дозволені формати: 'true', 'false', '3x4', "
+                "'rows>=4', 'cols>=3' або числова умова кількості таблиць (напр. '>=1').",
+                code="INVALID_RULE_DEFINITION",
+                status_code=422,
+                context={
+                    "rule_id": rule.id,
+                    "rule_type": rule.type.value,
+                    "expected": rule.expected,
+                },
+            )
+
+        if rule.type == GradingRuleType.DOCX_LIST_EXISTS:
+            self.validate_bool_or_numeric_condition(rule, rule.expected, sample_number="1")
+            return
 
     def evaluate(
         self,
@@ -436,13 +589,98 @@ class DocxGrader(BaseGrader):
             )
 
         normalized_expected = expected.strip().lower()
+        target_table_idx = (
+            int(target_match.group(1))
+            if target_match is not None and target_match.group(1) is not None
+            else None
+        )
+        candidate_tables = (
+            [tables[target_table_idx]]
+            if target_table_idx is not None and target_table_idx < table_count
+            else ([] if target_table_idx is not None else list(tables))
+        )
+
+        # Формат 'RxC' (напр. '3x4': щонайменше 3 рядки та 4 стовпці)
+        matrix_match = _TABLE_DIM_MATRIX_PATTERN.match(expected.strip())
+        if matrix_match is not None:
+            req_rows = int(matrix_match.group(1))
+            req_cols = int(matrix_match.group(2))
+            if req_rows < 1 or req_cols < 1:
+                raise GradingError(
+                    f"Некоректна розмірність таблиці '{expected}' у правилі '{rule.id}': "
+                    "рядки та стовпці мають бути >= 1.",
+                    code="INVALID_RULE_DEFINITION",
+                    context={"rule_id": rule.id, "expected": expected},
+                )
+            dims_list = [f"{len(tbl.rows)}x{len(tbl.columns)}" for tbl in candidate_tables]
+            passed = any(
+                len(tbl.rows) >= req_rows and len(tbl.columns) >= req_cols
+                for tbl in candidate_tables
+            )
+            actual_str = ", ".join(dims_list) if dims_list else "0"
+            feedback = (
+                f"Таблиця відповідає мінімальній розмірності {req_rows}x{req_cols} "
+                f"(знайдено: {actual_str})."
+                if passed
+                else (
+                    f"Не знайдено таблиці розмірністю не менше {req_rows}x{req_cols} "
+                    f"(фактично: {actual_str})."
+                )
+            )
+            return self.build_criterion_result(
+                rule,
+                passed=passed,
+                actual=actual_str,
+                feedback=feedback,
+                resolved_expected=expected,
+            )
+
+        # Формат 'rows>=4' або 'cols>=3' / 'columns>=3'
+        dim_cond_match = _TABLE_DIM_COND_PATTERN.match(expected.strip())
+        if dim_cond_match is not None:
+            dim_kind = dim_cond_match.group(1).lower()
+            cond_expr = f"{dim_cond_match.group(2)}{dim_cond_match.group(3)}"
+            dim_label = "рядків" if dim_kind == "rows" else "стовпців"
+            dim_values = [
+                len(tbl.rows) if dim_kind == "rows" else len(tbl.columns)
+                for tbl in candidate_tables
+            ]
+            passed = any(
+                self.compare_numeric_condition(val, cond_expr) for val in dim_values
+            )
+            actual_str = ", ".join(str(v) for v in dim_values) if dim_values else "0"
+            feedback = (
+                f"Кількість {dim_label} у таблиці ({actual_str}) відповідає умові '{expected}'."
+                if passed
+                else (
+                    f"Умову '{expected}' щодо кількості {dim_label} не виконано "
+                    f"(фактично: {actual_str})."
+                )
+            )
+            return self.build_criterion_result(
+                rule,
+                passed=passed,
+                actual=actual_str,
+                feedback=feedback,
+                resolved_expected=expected,
+            )
+
         if normalized_expected in {"true", "false", "yes", "no"}:
             expected_bool = self.parse_bool_expected(expected)
             actual_bool = table_count > 0
             passed = actual_bool == expected_bool
             actual_str = "true" if actual_bool else "false"
         else:
-            passed = self.compare_numeric_condition(table_count, expected)
+            try:
+                passed = self.compare_numeric_condition(table_count, expected)
+            except GradingError as exc:
+                raise GradingError(
+                    f"Некоректний вираз expected='{expected}' у правилі '{rule.id}' "
+                    "типу 'docx_table_exists'. Дозволені формати: 'true', 'false', '3x4', "
+                    "'rows>=4', 'cols>=3' або числова умова кількості таблиць (напр. '>=1').",
+                    code="INVALID_RULE_DEFINITION",
+                    context={"rule_id": rule.id, "expected": expected},
+                ) from exc
             actual_str = str(table_count)
 
         if passed:
@@ -737,8 +975,42 @@ class DocxGrader(BaseGrader):
 
         return results
 
+    def _resolve_paragraph_font_name(
+        self,
+        document: DocxDocument,
+        paragraph: Paragraph,
+        run: Run | None = None,
+    ) -> str | None:
+        """Визначає ефективну гарнітуру шрифту абзацу або конкретного Run із повним спадкуванням."""
+        if run is not None:
+            run_name, _ = self._resolve_run_font(run)
+            if run_name is not None:
+                return run_name
+            fallback_name, _ = self._resolve_paragraph_level_font(document, paragraph)
+            return fallback_name
+
+        resolved_fonts = self._resolve_paragraph_fonts(document, paragraph)
+        return resolved_fonts[0][0] if resolved_fonts else None
+
+    def _resolve_paragraph_font_size(
+        self,
+        document: DocxDocument,
+        paragraph: Paragraph,
+        run: Run | None = None,
+    ) -> float | None:
+        """Визначає ефективний кегль (у пт) абзацу або конкретного Run із повним спадкуванням."""
+        if run is not None:
+            _, run_size = self._resolve_run_font(run)
+            if run_size is not None:
+                return run_size
+            _, fallback_size = self._resolve_paragraph_level_font(document, paragraph)
+            return fallback_size
+
+        resolved_fonts = self._resolve_paragraph_fonts(document, paragraph)
+        return resolved_fonts[0][1] if resolved_fonts else None
+
     def _resolve_run_font(self, run: Run) -> tuple[str | None, float | None]:
-        """Витягує ім'я та розмір шрифту безпосередньо з Run та його стилю."""
+        """Витягує ім'я та розмір шрифту безпосередньо з Run та ланцюжка його стилю."""
         name: str | None = run.font.name
         size_pt: float | None = float(run.font.size.pt) if run.font.size is not None else None
 
@@ -763,7 +1035,7 @@ class DocxGrader(BaseGrader):
         document: DocxDocument,
         paragraph: Paragraph,
     ) -> tuple[str | None, float | None]:
-        """Визначає шрифт на рівні абзацу, ланцюжка його стилів, Normal та docDefaults."""
+        """Визначає шрифт на рівні абзацу, ланцюжка style.base_style, Normal та w:docDefaults."""
         name: str | None = None
         size_pt: float | None = None
 
@@ -778,7 +1050,8 @@ class DocxGrader(BaseGrader):
             if size_pt is None:
                 size_pt = style_size
 
-        if name is None or size_pt is None:
+        # Якщо стиль абзацу не вказаний явно, успадковуємо від дефолтного стилю абзаців (Normal)
+        if (name is None or size_pt is None) and paragraph.style is None:
             try:
                 normal_style = document.styles["Normal"]
             except KeyError:
@@ -803,17 +1076,22 @@ class DocxGrader(BaseGrader):
         self,
         style: BaseStyle,
     ) -> tuple[str | None, float | None]:
-        """Проходить ланцюжок base_style для пошуку успадкованої гарнітури та кегля."""
+        """Рекурсивно проходить ланцюжок style.base_style із захистом від циклів seen_style_ids."""
         name: str | None = None
         size_pt: float | None = None
         current: BaseStyle | None = style
-        visited: set[str] = set()
+        seen_style_ids: set[str] = set()
 
         while current is not None:
-            style_id = str(getattr(current, "style_id", id(current)))
-            if style_id in visited:
+            raw_style_id = getattr(current, "style_id", None)
+            style_key = (
+                raw_style_id
+                if isinstance(raw_style_id, str) and raw_style_id
+                else f"id:{id(current)}"
+            )
+            if style_key in seen_style_ids:
                 break
-            visited.add(style_id)
+            seen_style_ids.add(style_key)
 
             font = getattr(current, "font", None)
             if font is not None:
@@ -865,13 +1143,15 @@ class DocxGrader(BaseGrader):
 
         rfonts = rpr_element.find(_W_TAG_RFONTS)
         if rfonts is not None and hasattr(rfonts, "get"):
-            for attr in (_W_ATTR_ASCII, _W_ATTR_HANSI, _W_ATTR_CS):
+            for attr in (_W_ATTR_ASCII, _W_ATTR_HANSI, _W_ATTR_CS, _W_ATTR_EAST_ASIA):
                 candidate = rfonts.get(attr)
                 if isinstance(candidate, str) and candidate.strip():
                     name = candidate.strip()
                     break
 
         sz = rpr_element.find(_W_TAG_SZ)
+        if sz is None:
+            sz = rpr_element.find(_W_TAG_SZ_CS)
         if sz is not None and hasattr(sz, "get"):
             raw_half_points = sz.get(_W_ATTR_VAL)
             if isinstance(raw_half_points, str):

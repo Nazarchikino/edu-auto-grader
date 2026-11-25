@@ -1,7 +1,7 @@
 import uuid
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.course import PracticalFormat
 
@@ -26,6 +26,10 @@ class GradingRuleType(StrEnum):
     ACCDB_TABLE_EXISTS = "accdb_table_exists"
     ACCDB_COLUMN_EXISTS = "accdb_column_exists"
     ACCDB_COLUMN_TYPE = "accdb_column_type"
+    ACCDB_QUERY_EXISTS = "accdb_query_exists"
+    ACCDB_FORM_EXISTS = "accdb_form_exists"
+    ACCDB_REPORT_EXISTS = "accdb_report_exists"
+    ACCDB_RELATIONSHIP_EXISTS = "accdb_relationship_exists"
 
     # HTML5 (BeautifulSoup4 DOM)
     HTML_TAG_EXISTS = "html_tag_exists"
@@ -138,7 +142,7 @@ class GradingReport(BaseModel):
 
 
 class ExtractedMetadata(BaseModel):
-    """Метадані документа (docProps/core.xml або властивості файлу) для контролю авторства."""
+    """Метадані документа (docProps/core.xml) та структурні відбитки для контролю авторства."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -147,6 +151,17 @@ class ExtractedMetadata(BaseModel):
     created: str | None = None
     modified: str | None = None
     revision: str | None = None
+    content_fingerprint: str | None = None
+    text_shingles: list[str] = Field(default_factory=list)
+    has_unique_content: bool | None = None
+
+    @field_validator("text_shingles", mode="before")
+    @classmethod
+    def _coerce_none_shingles(cls, value: object) -> object:
+        """Забезпечує зворотну сумісність при десеріалізації None у JSONB як порожнього списку."""
+        if value is None:
+            return []
+        return value
 
 
 class PlagiarismCheckResult(BaseModel):
@@ -169,4 +184,18 @@ class GradingRulesUpdateRequest(BaseModel):
         ...,
         min_length=1,
         description="Новий перелік декларативних правил оцінювання",
+    )
+    sync_max_score: bool = Field(
+        default=True,
+        description=(
+            "Якщо True — автоматично оновлює max_score практичної рівним сумі балів правил; "
+            "якщо False — залишає поточний max_score (для частково ручного оцінювання)"
+        ),
+    )
+    needs_rules_review: bool | None = Field(
+        default=None,
+        description=(
+            "Опційне явне значення прапорця needs_rules_review; "
+            "якщо не передано — скидається у False після збереження правил викладачем"
+        ),
     )

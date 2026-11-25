@@ -6,6 +6,7 @@ import {
   type ReactElement,
 } from "react";
 import Editor from "@monaco-editor/react";
+import "./monacoSetup";
 import {
   AlertTriangle,
   Check,

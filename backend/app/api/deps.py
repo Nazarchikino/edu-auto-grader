@@ -57,6 +57,13 @@ async def get_current_user(
             status_code=401,
         )
 
+    if payload.tv != user.token_version:
+        raise DomainError(
+            "Сесію завершено через зміну або скидання пароля. Увійдіть повторно.",
+            code="TOKEN_REVOKED",
+            status_code=401,
+        )
+
     return user
 
 

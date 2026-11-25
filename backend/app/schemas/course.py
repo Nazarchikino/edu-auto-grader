@@ -64,6 +64,7 @@ class QuizSubmitResponse(BaseModel):
     total_questions: int = Field(..., ge=0)
     practical_unlocked: bool
     attempted_at: datetime
+    retry_after_seconds: int = Field(default=0, ge=0)
 
 
 class PracticalVariant(BaseModel):
@@ -101,6 +102,7 @@ class PracticalUpdate(BaseModel):
     max_score: float | None = Field(default=None, gt=0.0)
     variants: list[PracticalVariant] | None = None
     grading_rules: list[GradingRule] | None = None
+    needs_rules_review: bool | None = None
 
 
 class PracticalSummaryRead(BaseModel):
@@ -115,6 +117,7 @@ class PracticalSummaryRead(BaseModel):
     max_score: float = Field(..., gt=0.0)
     is_unlocked: bool = False
     best_score: float | None = None
+    needs_rules_review: bool = False
 
 
 class PracticalStudentRead(BaseModel):
@@ -128,6 +131,7 @@ class PracticalStudentRead(BaseModel):
     instructions: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    needs_rules_review: bool = False
     variant_index: int = Field(..., ge=0)
     variant_number: int = Field(..., ge=1)
     variant: PracticalVariant
@@ -144,6 +148,7 @@ class PracticalTeacherRead(BaseModel):
     instructions: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    needs_rules_review: bool = False
     variants: list[PracticalVariant] = Field(default_factory=list)
     grading_rules: list[GradingRule] = Field(default_factory=list)
 
@@ -182,6 +187,7 @@ class ModuleSummaryRead(BaseModel):
     practical_id: uuid.UUID | None = None
     practical_format: PracticalFormat | None = None
     practical_score: float | None = None
+    practical_needs_rules_review: bool = False
 
 
 class ModuleDetailRead(BaseModel):
@@ -197,6 +203,7 @@ class ModuleDetailRead(BaseModel):
     quiz_questions: list[QuizQuestionRead] = Field(default_factory=list)
     quiz_passed: bool = False
     best_quiz_score: float | None = None
+    quiz_cooldown_remaining_seconds: int = Field(default=0, ge=0)
     practical_unlocked: bool = False
     practical: PracticalSummaryRead | None = None
 

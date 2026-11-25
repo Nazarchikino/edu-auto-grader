@@ -5,15 +5,15 @@
 Розробка ведеться суворо за методологією **Spec-Driven Development (SDD)**: джерелом істини є файли `SPEC.md`, `ARCHITECTURE.md` та `TASKS.md`.
 
 ## 2. Технологічний стек та версії
-* **Backend:** Python 3.12+, FastAPI 0.115+, Uvicorn 0.32+, Pydantic v2 (`>=2.9`), SQLAlchemy 2.0+ (async `asyncpg`), Alembic 1.13+, PyJWT, Passlib (bcrypt).
+* **Backend:** Python 3.12+, FastAPI 0.115+, Uvicorn 0.32+, Pydantic v2 (`>=2.9`), SQLAlchemy 2.0+ (async `asyncpg`), Alembic 1.13+, PyJWT, `bcrypt` (`sha256$` pre-hash + `bcrypt`).
 * **Ядро автоперевірки (Parsers):**
-  * Word (`.docx`): `python-docx==1.1.2` + `zipfile`/`xml.etree.ElementTree` (аналіз `docProps/core.xml`).
+  * Word (`.docx`): `python-docx==1.1.2` + `zipfile`/`defusedxml` (безпечний аналіз `docProps/core.xml` і захист від Zip-бомб).
   * Excel (`.xlsx`): `openpyxl==3.1.5` (`data_only=False` для формул, `data_only=True` для кешованих значень, `_charts` для діаграм).
-  * Access (`.accdb`): `access-parser==0.0.6` (кросплатформний парсинг схеми) / `mdbtools` CLI на Linux.
+  * Access (`.accdb`): `access-parser==0.0.6` (кросплатформний парсинг схеми) / `mdbtools` CLI (`mdb-schema`, `mdb-export`) на Linux.
   * HTML: `beautifulsoup4==4.12.3` + `lxml==5.3.0`.
-  * Експорт відомостей: `openpyxl==3.1.5` (`.xlsx`), `WeasyPrint==62.3` (`.pdf`).
-* **Frontend:** Node.js 20 LTS, React 18.3+, TypeScript 5.6+ (`strict: true`), Vite 5.4+, Tailwind CSS 3.4+, `@monaco-editor/react==4.6.0`, TanStack Query v5, React Router v6, Axios.
-* **База даних та інфраструктура:** PostgreSQL 16 (використання реляційних таблиць + `JSONB` для правил оцінювання), Docker & Docker Compose.
+  * Експорт відомостей: `openpyxl==3.1.5` (`.xlsx`), `fpdf2==2.8.1` (`.pdf` із системними кириличними шрифтами `DejaVuSans` на Linux).
+* **Frontend:** Node.js 20 LTS, React 18.3+, TypeScript 5.6+ (`strict: true`), Vite 5.4+, Tailwind CSS 3.4+, `@monaco-editor/react==4.6.0` (з локальним пакетом `monaco-editor` і Vite Web Workers без зовнішнього CDN), TanStack Query v5, React Router v6, Axios.
+* **База даних та інфраструктура:** PostgreSQL 16 (використання реляційних таблиць + `JSONB` для правил оцінювання), Docker & Docker Compose, Nginx, GitHub Actions CI.
 * **Інструменти якості:** `ruff` (лінтер та форматер Python), `mypy --strict` (перевірка типів Python), `pytest` + `httpx`, `eslint` + `tsc --noEmit` (TypeScript).
 
 ## 3. Інженерні стандарти коду

@@ -309,9 +309,25 @@ function parseInlineNodes(
                     src={safeUrl}
                     alt={alt}
                     loading="lazy"
+                    referrerPolicy="no-referrer"
                     className="max-h-40 max-w-full rounded object-contain"
                   />
                 </button>
+              );
+            } else if (options.disableLinks) {
+              nodes.push(
+                <span
+                  key={`${keyPrefix}-img-${tokenIndex}`}
+                  className="mx-1 inline-flex items-center rounded-lg border border-slate-200 bg-white p-1 align-middle shadow-2xs"
+                >
+                  <img
+                    src={safeUrl}
+                    alt={alt}
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                    className="max-h-40 max-w-full rounded object-contain"
+                  />
+                </span>
               );
             } else {
               nodes.push(
@@ -326,6 +342,7 @@ function parseInlineNodes(
                     src={safeUrl}
                     alt={alt}
                     loading="lazy"
+                    referrerPolicy="no-referrer"
                     className="max-h-40 max-w-full rounded object-contain"
                   />
                 </a>
@@ -486,11 +503,14 @@ function parseInlineNodes(
  * для заголовків, варіантів відповідей у тестах та компактних підписів.
  */
 // eslint-disable-next-line react-refresh/only-export-components
-export function renderInlineMarkdown(text: string): ReactNode[] {
+export function renderInlineMarkdown(
+  text: string,
+  options: InlineMarkdownOptions = {}
+): ReactNode[] {
   if (text.length === 0) {
     return [];
   }
-  return parseInlineNodes(text, {}, "inl");
+  return parseInlineNodes(text, options, "inl");
 }
 
 function getLineIndent(line: string): number {
@@ -1177,6 +1197,7 @@ export function MarkdownRenderer({
                   src={safeUrl}
                   alt={block.alt}
                   loading="lazy"
+                  referrerPolicy="no-referrer"
                   className={`mx-auto w-auto max-w-full rounded object-contain ${
                     compact ? "max-h-80" : "max-h-[480px]"
                   }`}
@@ -1307,6 +1328,8 @@ export function MarkdownRenderer({
               <img
                 src={lightboxImage.src}
                 alt={lightboxImage.alt}
+                loading="lazy"
+                referrerPolicy="no-referrer"
                 className="mx-auto max-h-[75vh] w-auto max-w-full rounded-lg bg-white object-contain shadow-xs"
               />
             </div>

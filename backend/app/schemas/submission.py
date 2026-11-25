@@ -114,6 +114,19 @@ class GroupJournalRow(BaseModel):
     total_score: float = Field(default=0.0, ge=0.0)
 
 
+class GroupJournalPracticalRead(BaseModel):
+    """Метадані стовпця практичної роботи у зведеній відомості успішності групи."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    practical_id: uuid.UUID
+    title: str
+    course_slug: CourseSlug
+    module_order_index: int = Field(..., ge=1)
+    max_score: float = Field(..., gt=0.0)
+    needs_rules_review: bool = False
+
+
 class GroupJournalRead(BaseModel):
     """Зведена відомість успішності академічної групи з аналітикою типових помилок."""
 
@@ -122,5 +135,6 @@ class GroupJournalRead(BaseModel):
     group_id: uuid.UUID
     group_code: str
     specialty: str
+    practicals: list[GroupJournalPracticalRead] = Field(default_factory=list)
     rows: list[GroupJournalRow] = Field(default_factory=list)
     error_stats: list[CriterionErrorStat] = Field(default_factory=list)

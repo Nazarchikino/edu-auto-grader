@@ -1,3 +1,5 @@
+import csv
+import io
 import re
 import shutil
 import struct
@@ -10,6 +12,8 @@ from access_parser.access_parser import (  # type: ignore[import-untyped]
     PAGE_SIZE_V4,
     SYSTEM_TABLE_FLAGS,
     AccessParser,
+    AccessTable,
+    TableObj,
 )
 from access_parser.parsing_primitives import (  # type: ignore[import-untyped]
     TDEF_HEADER,
@@ -47,8 +51,33 @@ from app.schemas.grading import (
 
 _ACCESS_HEADER_MAGIC = b"\x00\x01\x00\x00"
 _SYSTEM_TABLE_PREFIXES: tuple[str, ...] = ("msys", "usys", "~")
+_MSYS_TYPE_QUERY = 5
+_MSYS_TYPE_FORM = -32768
+_MSYS_TYPE_REPORT = -32764
+_MSYS_HIDDEN_OR_SYSTEM_FLAG_MASK = 0x8000000A
 _DB_WIDE_TARGETS: frozenset[str] = frozenset(
     {"database", "db", "schema", "all", "any", "*", "tables", "tables.count"}
+)
+_OBJECT_WILDCARD_TARGETS: frozenset[str] = frozenset(
+    {
+        "*",
+        "any",
+        "all",
+        "database",
+        "db",
+        "schema",
+        "count",
+        "queries",
+        "forms",
+        "reports",
+        "relationships",
+        "relations",
+    }
+)
+_RELATIONSHIP_SPLIT_PATTERN = re.compile(r"\s*(?:<->|<=>|->|<-|--|[,;])\s*")
+_COUNT_PREFIX_PATTERN = re.compile(
+    r"^\s*(min|count)\s*(>=|<=|!=|==|>|<|=|:)\s*([+-]?\d+(?:[.,]\d+)?)\s*$",
+    re.IGNORECASE,
 )
 _TABLE_COLUMN_COUNT_SUFFIX_PATTERN = re.compile(
     r"^(.+?)\.(columns|cols|fields|column_count)$",
@@ -241,6 +270,16 @@ _CANONICAL_TYPE_ALIASES: dict[str, frozenset[str]] = {
     "COMPLEX": frozenset({"complex", "multivalued", "attachment", "long", "int32"}),
 }
 
+_ALL_VALID_ACCDB_TYPE_TOKENS: frozenset[str] = frozenset(
+    {
+        *(key.lower() for key in _CANONICAL_TYPE_ALIASES),
+        *(alias for aliases in _CANONICAL_TYPE_ALIASES.values() for alias in aliases),
+        "pk",
+        "primary key",
+        "primary",
+    }
+)
+
 _NAME_TO_TYPE_CODE: dict[str, tuple[int, bool, bool, int]] = {
     # (type_code, is_fixed, is_autonumber, default_length)
     "AUTONUMBER": (int(TYPE_INT32), True, True, 4),
@@ -322,11 +361,36 @@ class AccdbTableSchema:
 
 
 @dataclass(frozen=True, slots=True)
+class AccdbRelationshipSchema:
+    """Зв'язок між двома таблицями Microsoft Access із системної таблиці MSysRelationships."""
+
+    source_table: str
+    referenced_table: str
+    source_column: str | None = None
+    referenced_column: str | None = None
+    relationship_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AccdbObjectsCatalog:
+    """Каталог об'єктів Access (запити, форми, звіти, зв'язки) із MSysObjects/MSysRelationships."""
+
+    queries: tuple[str, ...] = ()
+    forms: tuple[str, ...] = ()
+    reports: tuple[str, ...] = ()
+    relationships: tuple[AccdbRelationshipSchema, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AccdbDatabaseSchema:
-    """Каталог користувацьких таблиць та їхніх полів, витягнутий із файлу .accdb."""
+    """Каталог користувацьких таблиць, об'єктів та зв'язків, витягнутий із файлу .accdb."""
 
     version: int
     tables: dict[str, AccdbTableSchema]
+    queries: tuple[str, ...] = ()
+    forms: tuple[str, ...] = ()
+    reports: tuple[str, ...] = ()
+    relationships: tuple[AccdbRelationshipSchema, ...] = ()
 
     def find_table(self, table_name: str) -> AccdbTableSchema | None:
         """Повертає схему таблиці за її назвою (без урахування регістру)."""
@@ -341,11 +405,224 @@ class AccdbDatabaseSchema:
                 return table
         return None
 
+    def find_query(self, query_name: str) -> str | None:
+        """Повертає назву запиту за ім'ям без урахування регістру."""
+        return _find_named_entry(self.queries, query_name)
+
+    def find_form(self, form_name: str) -> str | None:
+        """Повертає назву форми за ім'ям без урахування регістру."""
+        return _find_named_entry(self.forms, form_name)
+
+    def find_report(self, report_name: str) -> str | None:
+        """Повертає назву звіту за ім'ям без урахування регістру."""
+        return _find_named_entry(self.reports, report_name)
+
+    def find_relationship(
+        self,
+        table_a: str,
+        table_b: str,
+    ) -> AccdbRelationshipSchema | None:
+        """Шукає зв'язок між двома таблицями (незалежно від напрямку FK -> PK)."""
+        a_cf = _strip_identifiers(table_a).casefold()
+        b_cf = _strip_identifiers(table_b).casefold()
+        if not a_cf or not b_cf:
+            return None
+        for rel in self.relationships:
+            src_cf = _strip_identifiers(rel.source_table).casefold()
+            ref_cf = _strip_identifiers(rel.referenced_table).casefold()
+            if (src_cf == a_cf and ref_cf == b_cf) or (src_cf == b_cf and ref_cf == a_cf):
+                return rel
+        return None
+
 
 class AccdbGrader(BaseGrader):
     """Стратегія детермінованої автоперевірки баз даних Microsoft Access (.accdb)."""
 
     format_type: PracticalFormat = PracticalFormat.ACCDB
+    supported_rule_types: frozenset[GradingRuleType] = frozenset(
+        {
+            GradingRuleType.ACCDB_TABLE_EXISTS,
+            GradingRuleType.ACCDB_COLUMN_EXISTS,
+            GradingRuleType.ACCDB_COLUMN_TYPE,
+            GradingRuleType.ACCDB_QUERY_EXISTS,
+            GradingRuleType.ACCDB_FORM_EXISTS,
+            GradingRuleType.ACCDB_REPORT_EXISTS,
+            GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+        }
+    )
+
+    def validate_rule_definition(self, rule: GradingRule) -> None:
+        """Перевіряє синтаксис правила Microsoft Access (.accdb) перед збереженням у БД."""
+        super().validate_rule_definition(rule)
+
+        if rule.type == GradingRuleType.ACCDB_TABLE_EXISTS:
+            target_sample = self.substitute_placeholders_for_validation(
+                rule.target,
+                "Table1",
+            ).strip()
+            if _TABLE_COLUMN_COUNT_SUFFIX_PATTERN.match(target_sample) is not None:
+                self.validate_numeric_condition(rule, rule.expected)
+                return
+            if target_sample.lower() not in _DB_WIDE_TARGETS:
+                requested = [
+                    _strip_identifiers(part)
+                    for part in target_sample.split(",")
+                    if _strip_identifiers(part)
+                ]
+                if not requested:
+                    raise GradingError(
+                        f"Не вказано цільову назву таблиці Access у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "target": rule.target},
+                    )
+            self.validate_bool_or_numeric_condition(rule, rule.expected)
+            return
+
+        if rule.type == GradingRuleType.ACCDB_COLUMN_EXISTS:
+            target_sample = (
+                "Table1.Col1"
+                if self.is_whole_placeholder(rule.target)
+                else self.substitute_placeholders_for_validation(rule.target, "Ident").strip()
+            )
+            expected_sample = (
+                "true"
+                if self.is_whole_placeholder(rule.expected)
+                else self.substitute_placeholders_for_validation(rule.expected, "1").strip()
+            )
+            try:
+                self._parse_table_column_target(
+                    rule,
+                    target_sample,
+                    expected_sample,
+                    require_explicit_column=False,
+                )
+            except GradingError as exc:
+                raise GradingError(
+                    exc.detail,
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            has_explicit_col = len(re.findall(r"\[([^\]]+)\]", target_sample)) == 2 or (
+                len(_COLUMN_TARGET_SPLIT_PATTERN.split(target_sample, maxsplit=1)) == 2
+            )
+            if has_explicit_col:
+                self.validate_bool_or_numeric_condition(rule, rule.expected)
+            return
+
+        if rule.type == GradingRuleType.ACCDB_COLUMN_TYPE:
+            target_sample = (
+                "Table1.Col1"
+                if self.is_whole_placeholder(rule.target)
+                else self.substitute_placeholders_for_validation(rule.target, "Ident").strip()
+            )
+            try:
+                self._parse_table_column_target(
+                    rule,
+                    target_sample,
+                    rule.expected,
+                    require_explicit_column=True,
+                )
+            except GradingError as exc:
+                raise GradingError(
+                    exc.detail,
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            if self.is_whole_placeholder(rule.expected):
+                return
+
+            expected_sample = self.substitute_placeholders_for_validation(
+                rule.expected,
+                "TEXT",
+            )
+            raw_candidates = [
+                token.strip()
+                for token in re.split(r"[|,;]", expected_sample)
+                if token.strip()
+            ]
+            if not raw_candidates:
+                raise GradingError(
+                    f"Порожній тип даних Access у правилі '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            for candidate in raw_candidates:
+                match = _EXPECTED_TYPE_SIZE_PATTERN.match(candidate)
+                if match is None:
+                    raise GradingError(
+                        f"Некоректний запис типу даних Access '{candidate}' у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "expected": rule.expected},
+                    )
+                type_token = match.group(1).strip().lower()
+                normalized_token = " ".join(type_token.replace("_", " ").split())
+                if not (
+                    normalized_token.isdigit()
+                    or normalized_token in _ALL_VALID_ACCDB_TYPE_TOKENS
+                    or type_token in _ALL_VALID_ACCDB_TYPE_TOKENS
+                ):
+                    raise GradingError(
+                        f"Невідомий тип даних Access '{candidate}' у правилі '{rule.id}'. "
+                        "Дозволені типи: AutoNumber, Short Text, Long Text, Number, Long, "
+                        "Double, Currency, Date/Time, Yes/No, Hyperlink, OLE, GUID.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={
+                            "rule_id": rule.id,
+                            "expected": rule.expected,
+                            "token": candidate,
+                        },
+                    )
+            return
+
+        if rule.type in {
+            GradingRuleType.ACCDB_QUERY_EXISTS,
+            GradingRuleType.ACCDB_FORM_EXISTS,
+            GradingRuleType.ACCDB_REPORT_EXISTS,
+        }:
+            target_sample = self.substitute_placeholders_for_validation(
+                rule.target,
+                "Object1",
+            ).strip()
+            if target_sample.lower() not in _OBJECT_WILDCARD_TARGETS:
+                requested = [
+                    _strip_identifiers(part)
+                    for part in target_sample.split(",")
+                    if _strip_identifiers(part)
+                ]
+                if not requested:
+                    raise GradingError(
+                        f"Не вказано цільову назву об'єкта Access у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "target": rule.target},
+                    )
+            if not self.is_whole_placeholder(rule.expected):
+                normalized_expr = _normalize_count_condition(
+                    self.substitute_placeholders_for_validation(rule.expected, "1")
+                )
+                self.validate_bool_or_numeric_condition(rule, normalized_expr)
+            return
+
+        if rule.type == GradingRuleType.ACCDB_RELATIONSHIP_EXISTS:
+            target_sample = (
+                "TableA->TableB"
+                if self.is_whole_placeholder(rule.target)
+                else self.substitute_placeholders_for_validation(rule.target, "TableA").strip()
+            )
+            if target_sample.lower() not in _OBJECT_WILDCARD_TARGETS:
+                _parse_relationship_pair_target(rule, target_sample)
+            if not self.is_whole_placeholder(rule.expected):
+                normalized_expr = _normalize_count_condition(
+                    self.substitute_placeholders_for_validation(rule.expected, "1")
+                )
+                self.validate_bool_or_numeric_condition(rule, normalized_expr)
+            return
 
     def evaluate(
         self,
@@ -466,7 +743,182 @@ class AccdbGrader(BaseGrader):
             if table_schema is not None:
                 tables[table_name] = table_schema
 
-        return AccdbDatabaseSchema(version=version, tables=tables)
+        objects_catalog = self._extract_access_objects(file_path, parser=parser)
+
+        return AccdbDatabaseSchema(
+            version=version,
+            tables=tables,
+            queries=objects_catalog.queries,
+            forms=objects_catalog.forms,
+            reports=objects_catalog.reports,
+            relationships=objects_catalog.relationships,
+        )
+
+    def _extract_access_objects(
+        self,
+        file_path: Path,
+        *,
+        parser: AccessParser | None = None,
+    ) -> AccdbObjectsCatalog:
+        """Витягує запити, форми, звіти та зв'язки з MSysObjects і MSysRelationships.
+
+        Джерело 1: системні таблиці через access-parser.
+        Джерело 2 (fallback для Linux/Docker): mdb-export (mdbtools) із timeout=10.
+        """
+        queries: list[str] = []
+        forms: list[str] = []
+        reports: list[str] = []
+        relationships: list[AccdbRelationshipSchema] = []
+
+        if parser is not None:
+            ap_catalog = self._extract_objects_from_access_parser(parser)
+            queries.extend(ap_catalog.queries)
+            forms.extend(ap_catalog.forms)
+            reports.extend(ap_catalog.reports)
+            relationships.extend(ap_catalog.relationships)
+
+        need_objects_fallback = parser is None or (
+            not queries and not forms and not reports
+        )
+        need_rels_fallback = parser is None or not relationships
+
+        if need_objects_fallback or need_rels_fallback:
+            mdb_export_bin = shutil.which("mdb-export")
+            if mdb_export_bin is not None:
+                if need_objects_fallback:
+                    msys_obj_csv = self._run_mdb_export(
+                        mdb_export_bin, file_path, "MSysObjects"
+                    )
+                    if msys_obj_csv is not None:
+                        csv_q, csv_f, csv_r = _parse_msys_objects_csv(msys_obj_csv)
+                        queries.extend(csv_q)
+                        forms.extend(csv_f)
+                        reports.extend(csv_r)
+
+                if need_rels_fallback:
+                    msys_rel_csv = self._run_mdb_export(
+                        mdb_export_bin, file_path, "MSysRelationships"
+                    )
+                    if msys_rel_csv is not None:
+                        relationships.extend(_parse_msys_relationships_csv(msys_rel_csv))
+
+        return AccdbObjectsCatalog(
+            queries=_dedupe_names_casefold(queries),
+            forms=_dedupe_names_casefold(forms),
+            reports=_dedupe_names_casefold(reports),
+            relationships=_dedupe_relationships(relationships),
+        )
+
+    def _extract_objects_from_access_parser(
+        self,
+        parser: AccessParser,
+    ) -> AccdbObjectsCatalog:
+        """Зчитує MSysObjects (Type=5/-32768/-32764) і MSysRelationships через access-parser."""
+        queries: tuple[str, ...] = ()
+        forms: tuple[str, ...] = ()
+        reports: tuple[str, ...] = ()
+        msys_rel_page_id: int | None = None
+
+        try:
+            msys_objects_raw: object = parser.parse_table("MSysObjects")
+        except Exception:
+            msys_objects_raw = None
+
+        if isinstance(msys_objects_raw, Mapping):
+            queries, forms, reports, msys_rel_page_id = _parse_msys_objects_table(
+                msys_objects_raw
+            )
+
+        relationships: tuple[AccdbRelationshipSchema, ...] = ()
+        msys_rel_raw = self._read_msys_relationships_from_parser(
+            parser, msys_rel_page_id=msys_rel_page_id
+        )
+        if isinstance(msys_rel_raw, Mapping):
+            relationships = _parse_msys_relationships_table(msys_rel_raw)
+
+        return AccdbObjectsCatalog(
+            queries=queries,
+            forms=forms,
+            reports=reports,
+            relationships=relationships,
+        )
+
+    def _read_msys_relationships_from_parser(
+        self,
+        parser: AccessParser,
+        *,
+        msys_rel_page_id: int | None,
+    ) -> object:
+        """Зчитує системну таблицю MSysRelationships (навіть якщо вона прихована в catalog)."""
+        catalog_obj: object = getattr(parser, "catalog", None)
+        if isinstance(catalog_obj, Mapping):
+            for key in catalog_obj:
+                if isinstance(key, str) and key.strip().casefold() == "msysrelationships":
+                    try:
+                        return parser.parse_table(key)
+                    except Exception:
+                        break
+
+        if msys_rel_page_id is None:
+            return None
+
+        page_size_raw: object = getattr(parser, "page_size", PAGE_SIZE_V4)
+        page_size = int(page_size_raw) if isinstance(page_size_raw, int) else int(PAGE_SIZE_V4)
+        version_raw: object = getattr(parser, "version", 4)
+        version = int(version_raw) if isinstance(version_raw, int) else 4
+
+        tables_with_data: object = getattr(parser, "_tables_with_data", None)
+        data_pages: object = getattr(parser, "_data_pages", None)
+        table_defs: object = getattr(parser, "_table_defs", None)
+
+        if not isinstance(data_pages, dict) or not isinstance(table_defs, dict):
+            return None
+
+        page_offset = msys_rel_page_id * page_size
+        table_obj: object = (
+            tables_with_data.get(page_offset)
+            if isinstance(tables_with_data, dict)
+            else None
+        )
+        if table_obj is None:
+            tdef = table_defs.get(page_offset)
+            if tdef is None:
+                return None
+            table_obj = TableObj(offset=page_offset, val=tdef)
+
+        try:
+            rel_table = AccessTable(
+                table_obj,
+                version,
+                page_size,
+                data_pages,
+                table_defs,
+            )
+            return rel_table.parse()
+        except Exception:
+            return None
+
+    def _run_mdb_export(
+        self,
+        mdb_export_bin: str,
+        file_path: Path,
+        table_name: str,
+    ) -> str | None:
+        """Запускає mdb-export для системної таблиці з timeout=10 та безпечною обробкою помилок."""
+        try:
+            proc = subprocess.run(
+                [mdb_export_bin, str(file_path), table_name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        return proc.stdout
 
     def _extract_single_table_schema(
         self,
@@ -745,7 +1197,23 @@ class AccdbGrader(BaseGrader):
 
             tables[table_name] = AccdbTableSchema(name=table_name, columns=columns)
 
-        return AccdbDatabaseSchema(version=4, tables=tables) if tables else None
+        objects_catalog = self._extract_access_objects(file_path, parser=None)
+        if not tables and not (
+            objects_catalog.queries
+            or objects_catalog.forms
+            or objects_catalog.reports
+            or objects_catalog.relationships
+        ):
+            return None
+
+        return AccdbDatabaseSchema(
+            version=4,
+            tables=tables,
+            queries=objects_catalog.queries,
+            forms=objects_catalog.forms,
+            reports=objects_catalog.reports,
+            relationships=objects_catalog.relationships,
+        )
 
     def _evaluate_rule(
         self,
@@ -772,6 +1240,49 @@ class AccdbGrader(BaseGrader):
             )
         if rule.type == GradingRuleType.ACCDB_COLUMN_TYPE:
             return self._evaluate_column_type(
+                schema=schema,
+                rule=rule,
+                target=target,
+                expected=expected,
+            )
+        if rule.type == GradingRuleType.ACCDB_QUERY_EXISTS:
+            return self._evaluate_named_object_exists(
+                objects=schema.queries,
+                finder=schema.find_query,
+                rule=rule,
+                target=target,
+                expected=expected,
+                singular_nom="Запит",
+                singular_acc="Запит",
+                plural_gen="запитів",
+                empty_label="немає запитів",
+            )
+        if rule.type == GradingRuleType.ACCDB_FORM_EXISTS:
+            return self._evaluate_named_object_exists(
+                objects=schema.forms,
+                finder=schema.find_form,
+                rule=rule,
+                target=target,
+                expected=expected,
+                singular_nom="Форма",
+                singular_acc="Форму",
+                plural_gen="форм",
+                empty_label="немає форм",
+            )
+        if rule.type == GradingRuleType.ACCDB_REPORT_EXISTS:
+            return self._evaluate_named_object_exists(
+                objects=schema.reports,
+                finder=schema.find_report,
+                rule=rule,
+                target=target,
+                expected=expected,
+                singular_nom="Звіт",
+                singular_acc="Звіт",
+                plural_gen="звітів",
+                empty_label="немає звітів",
+            )
+        if rule.type == GradingRuleType.ACCDB_RELATIONSHIP_EXISTS:
+            return self._evaluate_relationship_exists(
                 schema=schema,
                 rule=rule,
                 target=target,
@@ -1199,6 +1710,222 @@ class AccdbGrader(BaseGrader):
 
         return False
 
+    def _evaluate_named_object_exists(
+        self,
+        *,
+        objects: tuple[str, ...],
+        finder: object,
+        rule: GradingRule,
+        target: str,
+        expected: str,
+        singular_nom: str,
+        singular_acc: str,
+        plural_gen: str,
+        empty_label: str,
+    ) -> CriterionResult:
+        """Перевіряє наявність або кількість користувацьких запитів, форм чи звітів у БД."""
+        target_clean = target.strip()
+        expected_clean = expected.strip()
+        expected_lower = expected_clean.lower()
+        normalized_count_expr = _normalize_count_condition(expected_clean)
+
+        # Режим 1: Перевірка наявності або кількості об'єктів ('*', 'any', 'database')
+        if target_clean.lower() in _OBJECT_WILDCARD_TARGETS:
+            obj_count = len(objects)
+            if expected_lower in {"true", "false", "yes", "no"}:
+                expected_bool = self.parse_bool_expected(expected_clean)
+                actual_bool = obj_count > 0
+                passed = actual_bool == expected_bool
+                actual_str = "true" if actual_bool else "false"
+            else:
+                passed = self.compare_numeric_condition(obj_count, normalized_count_expr)
+                actual_str = str(obj_count)
+
+            feedback = (
+                f"Кількість користувацьких {plural_gen} у базі даних ({obj_count}) "
+                f"відповідає умові '{expected}'."
+                if passed
+                else (
+                    f"Кількість користувацьких {plural_gen} у базі даних ({obj_count}) "
+                    f"не відповідає умові '{expected}'."
+                )
+            )
+            return self.build_criterion_result(
+                rule,
+                passed=passed,
+                actual=actual_str,
+                feedback=feedback,
+                resolved_expected=expected,
+            )
+
+        # Режим 2: Перевірка конкретного імені або списку імен ('Query1' чи 'Query1,Query2')
+        requested_names = [
+            _strip_identifiers(part)
+            for part in target_clean.split(",")
+            if _strip_identifiers(part)
+        ]
+        if not requested_names:
+            raise GradingError(
+                f"Не вказано цільову назву об'єкта Access у правилі '{rule.id}'.",
+                context={"rule_id": rule.id, "target": target},
+            )
+
+        found_names: list[str] = []
+        missing_names: list[str] = []
+        for req_name in requested_names:
+            matched: str | None = (
+                finder(req_name) if callable(finder) else _find_named_entry(objects, req_name)
+            )
+            if isinstance(matched, str):
+                found_names.append(matched)
+            else:
+                missing_names.append(req_name)
+
+        all_exist = len(missing_names) == 0
+
+        if expected_lower in {"true", "false", "yes", "no"}:
+            expected_bool = self.parse_bool_expected(expected_clean)
+            passed = all_exist == expected_bool
+            actual_str = "true" if all_exist else "false"
+        else:
+            passed = self.compare_numeric_condition(len(found_names), normalized_count_expr)
+            actual_str = str(len(found_names))
+
+        available_list = ", ".join(objects) if objects else empty_label
+        if len(requested_names) == 1:
+            req_single = requested_names[0]
+            if passed:
+                feedback = (
+                    f"{singular_nom} '{found_names[0]}' присутній у базі даних Access."
+                    if all_exist
+                    else (
+                        f"{singular_nom} '{req_single}' відсутній у базі даних, "
+                        "як і очікувалося."
+                    )
+                )
+            else:
+                feedback = (
+                    f"{singular_acc} '{req_single}' не знайдено у базі даних Access "
+                    f"(наявні: {available_list})."
+                    if not all_exist
+                    else (
+                        f"{singular_nom} '{req_single}' присутній у базі даних, "
+                        f"хоча очікувалося '{expected}'."
+                    )
+                )
+        else:
+            if passed:
+                feedback = (
+                    f"Усі цільові об'єкти ({', '.join(found_names)}) присутні у базі даних."
+                )
+            else:
+                feedback = (
+                    f"Не знайдено цільові об'єкти: {', '.join(missing_names)} "
+                    f"(наявні: {available_list})."
+                )
+
+        return self.build_criterion_result(
+            rule,
+            passed=passed,
+            actual=actual_str,
+            feedback=feedback,
+            resolved_expected=expected,
+        )
+
+    def _evaluate_relationship_exists(
+        self,
+        *,
+        schema: AccdbDatabaseSchema,
+        rule: GradingRule,
+        target: str,
+        expected: str,
+    ) -> CriterionResult:
+        """Перевіряє наявність зв'язку між парою таблиць або кількість зв'язків у БД."""
+        target_clean = target.strip()
+        expected_clean = expected.strip()
+        expected_lower = expected_clean.lower()
+        normalized_count_expr = _normalize_count_condition(expected_clean)
+
+        # Режим 1: Перевірка кількості зв'язків у БД ('*', 'any', 'relationships')
+        if target_clean.lower() in _OBJECT_WILDCARD_TARGETS:
+            rel_count = len(schema.relationships)
+            if expected_lower in {"true", "false", "yes", "no"}:
+                expected_bool = self.parse_bool_expected(expected_clean)
+                actual_bool = rel_count > 0
+                passed = actual_bool == expected_bool
+                actual_str = "true" if actual_bool else "false"
+            else:
+                passed = self.compare_numeric_condition(rel_count, normalized_count_expr)
+                actual_str = str(rel_count)
+
+            feedback = (
+                f"Кількість зв'язків між таблицями у базі даних ({rel_count}) "
+                f"відповідає умові '{expected}'."
+                if passed
+                else (
+                    f"Кількість зв'язків між таблицями у базі даних ({rel_count}) "
+                    f"не відповідає умові '{expected}'."
+                )
+            )
+            return self.build_criterion_result(
+                rule,
+                passed=passed,
+                actual=actual_str,
+                feedback=feedback,
+                resolved_expected=expected,
+            )
+
+        # Режим 2: Конкретна пара таблиць ('Таблиця1->Таблиця2' або 'Таблиця1,Таблиця2')
+        table_a, table_b = _parse_relationship_pair_target(rule, target_clean)
+        matched_rel = schema.find_relationship(table_a, table_b)
+        exists = matched_rel is not None
+
+        if expected_lower in {"true", "false", "yes", "no"}:
+            expected_bool = self.parse_bool_expected(expected_clean)
+            passed = exists == expected_bool
+            actual_str = "true" if exists else "false"
+        else:
+            passed = self.compare_numeric_condition(1 if exists else 0, normalized_count_expr)
+            actual_str = "1" if exists else "0"
+
+        available_rels = (
+            ", ".join(
+                f"{rel.source_table}->{rel.referenced_table}" for rel in schema.relationships
+            )
+            if schema.relationships
+            else "немає зв'язків"
+        )
+        if passed:
+            if exists and matched_rel is not None:
+                feedback = (
+                    f"Зв'язок між таблицями '{matched_rel.source_table}' та "
+                    f"'{matched_rel.referenced_table}' присутній у базі даних Access."
+                )
+            else:
+                feedback = (
+                    f"Зв'язок між таблицями '{table_a}' та '{table_b}' відсутній, "
+                    "як і очікувалося."
+                )
+        else:
+            if not exists:
+                feedback = (
+                    f"Зв'язок між таблицями '{table_a}' та '{table_b}' не знайдено "
+                    f"(наявні зв'язки: {available_rels})."
+                )
+            else:
+                feedback = (
+                    f"Зв'язок між таблицями '{table_a}' та '{table_b}' присутній у БД, "
+                    f"хоча очікувалося '{expected}'."
+                )
+
+        return self.build_criterion_result(
+            rule,
+            passed=passed,
+            actual=actual_str,
+            feedback=feedback,
+            resolved_expected=expected,
+        )
+
 
 def _strip_identifiers(value: str) -> str:
     """Видаляє обрамлюючі лапки та квадратні дужки з ідентифікатора таблиці/поля."""
@@ -1274,12 +2001,346 @@ def _parse_ddl_column_type(ddl_rest: str) -> tuple[str, int, bool, int]:
     return "TEXT", int(TYPE_TEXT), False, length or 255
 
 
+def _find_named_entry(entries: Sequence[str], target_name: str) -> str | None:
+    """Шукає назву об'єкта Access у переліку без урахування регістру."""
+    cleaned = _strip_identifiers(target_name)
+    if not cleaned:
+        return None
+    for item in entries:
+        if item == cleaned:
+            return item
+    cleaned_cf = cleaned.casefold()
+    for item in entries:
+        if item.casefold() == cleaned_cf:
+            return item
+    return None
+
+
+def _is_hidden_or_system_object(name: str, flags: int | None) -> bool:
+    """Відфільтровує системні, приховані й тимчасові об'єкти MSysObjects (Flags, ~, MSys)."""
+    cleaned = name.strip()
+    if not cleaned or _is_system_table_name(cleaned):
+        return True
+    if flags is not None:
+        if flags < 0 or flags in SYSTEM_TABLE_FLAGS:
+            return True
+        if (flags & _MSYS_HIDDEN_OR_SYSTEM_FLAG_MASK) != 0:
+            return True
+    return False
+
+
+def _lookup_mapping_column(
+    table_data: Mapping[object, object],
+    column_name: str,
+) -> Sequence[object] | None:
+    """Повертає колонку результату access-parser.parse_table без урахування регістру."""
+    target_cf = column_name.casefold()
+    for key, val in table_data.items():
+        if (
+            isinstance(key, str)
+            and key.strip().casefold() == target_cf
+            and isinstance(val, Sequence)
+            and not isinstance(val, (str, bytes, bytearray))
+        ):
+            return val
+    return None
+
+
+def _parse_int_optional(value: object) -> int | None:
+    """Безпечно перетворює ціле значення (int або числовий рядок) на int."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return int(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _dedupe_names_casefold(names: Sequence[str]) -> tuple[str, ...]:
+    """Дедуплікує перелік імен об'єктів зі збереженням порядку (без урахування регістру)."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in names:
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(cleaned)
+    return tuple(ordered)
+
+
+def _dedupe_relationships(
+    relationships: Sequence[AccdbRelationshipSchema],
+) -> tuple[AccdbRelationshipSchema, ...]:
+    """Дедуплікує зв'язки MSysRelationships (враховуючи багатоколонкові зв'язки за ім'ям)."""
+    seen: set[tuple[str, str, str]] = set()
+    ordered: list[AccdbRelationshipSchema] = []
+    for rel in relationships:
+        src = _strip_identifiers(rel.source_table)
+        ref = _strip_identifiers(rel.referenced_table)
+        if not src or not ref:
+            continue
+        if _is_system_table_name(src) or _is_system_table_name(ref):
+            continue
+        rel_name_key = (rel.relationship_name or "").strip().casefold()
+        key = (rel_name_key, src.casefold(), ref.casefold())
+        if key not in seen:
+            seen.add(key)
+            ordered.append(
+                AccdbRelationshipSchema(
+                    source_table=src,
+                    referenced_table=ref,
+                    source_column=rel.source_column,
+                    referenced_column=rel.referenced_column,
+                    relationship_name=rel.relationship_name,
+                )
+            )
+    return tuple(ordered)
+
+
+def _parse_msys_objects_table(
+    table_data: Mapping[object, object],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], int | None]:
+    """Розбирає таблицю MSysObjects із access-parser на (queries, forms, reports, msys_rel_id)."""
+    names_col = _lookup_mapping_column(table_data, "Name")
+    types_col = _lookup_mapping_column(table_data, "Type")
+    flags_col = _lookup_mapping_column(table_data, "Flags")
+    ids_col = _lookup_mapping_column(table_data, "Id")
+
+    if names_col is None or types_col is None:
+        return (), (), (), None
+
+    queries: list[str] = []
+    forms: list[str] = []
+    reports: list[str] = []
+    msys_rel_page_id: int | None = None
+
+    row_count = min(len(names_col), len(types_col))
+    for idx in range(row_count):
+        raw_name = names_col[idx]
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name:
+            continue
+
+        obj_id = (
+            _parse_int_optional(ids_col[idx])
+            if ids_col is not None and idx < len(ids_col)
+            else None
+        )
+        if name.casefold() == "msysrelationships" and obj_id is not None:
+            msys_rel_page_id = obj_id
+
+        obj_type = _parse_int_optional(types_col[idx])
+        obj_flags = (
+            _parse_int_optional(flags_col[idx])
+            if flags_col is not None and idx < len(flags_col)
+            else 0
+        )
+        if obj_type is None or _is_hidden_or_system_object(name, obj_flags):
+            continue
+
+        if obj_type == _MSYS_TYPE_QUERY:
+            queries.append(name)
+        elif obj_type == _MSYS_TYPE_FORM:
+            forms.append(name)
+        elif obj_type == _MSYS_TYPE_REPORT:
+            reports.append(name)
+
+    return (
+        _dedupe_names_casefold(queries),
+        _dedupe_names_casefold(forms),
+        _dedupe_names_casefold(reports),
+        msys_rel_page_id,
+    )
+
+
+def _parse_msys_relationships_table(
+    table_data: Mapping[object, object],
+) -> tuple[AccdbRelationshipSchema, ...]:
+    """Розбирає таблицю MSysRelationships із access-parser у список зв'язків між таблицями."""
+    src_col = _lookup_mapping_column(table_data, "szObject")
+    ref_col = _lookup_mapping_column(table_data, "szReferencedObject")
+    if src_col is None or ref_col is None:
+        return ()
+
+    src_field_col = _lookup_mapping_column(table_data, "szColumn")
+    ref_field_col = _lookup_mapping_column(table_data, "szReferencedColumn")
+    rel_name_col = _lookup_mapping_column(table_data, "szRelationship")
+
+    relationships: list[AccdbRelationshipSchema] = []
+    row_count = min(len(src_col), len(ref_col))
+    for idx in range(row_count):
+        raw_src = src_col[idx]
+        raw_ref = ref_col[idx]
+        if not isinstance(raw_src, str) or not isinstance(raw_ref, str):
+            continue
+        src_tbl = _strip_identifiers(raw_src)
+        ref_tbl = _strip_identifiers(raw_ref)
+        if not src_tbl or not ref_tbl:
+            continue
+
+        src_field = (
+            str(src_field_col[idx]).strip() or None
+            if src_field_col is not None
+            and idx < len(src_field_col)
+            and isinstance(src_field_col[idx], str)
+            else None
+        )
+        ref_field = (
+            str(ref_field_col[idx]).strip() or None
+            if ref_field_col is not None
+            and idx < len(ref_field_col)
+            and isinstance(ref_field_col[idx], str)
+            else None
+        )
+        rel_name = (
+            str(rel_name_col[idx]).strip() or None
+            if rel_name_col is not None
+            and idx < len(rel_name_col)
+            and isinstance(rel_name_col[idx], str)
+            else None
+        )
+        relationships.append(
+            AccdbRelationshipSchema(
+                source_table=src_tbl,
+                referenced_table=ref_tbl,
+                source_column=src_field,
+                referenced_column=ref_field,
+                relationship_name=rel_name,
+            )
+        )
+
+    return _dedupe_relationships(relationships)
+
+
+def _parse_msys_objects_csv(
+    csv_text: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Парсить CSV-вивід `mdb-export <file> MSysObjects` у (queries, forms, reports)."""
+    cleaned_csv = csv_text.lstrip("\ufeff")
+    reader = csv.DictReader(io.StringIO(cleaned_csv))
+    queries: list[str] = []
+    forms: list[str] = []
+    reports: list[str] = []
+
+    for row in reader:
+        lowered_row = {
+            k.strip().casefold(): (v or "").strip()
+            for k, v in row.items()
+            if isinstance(k, str)
+        }
+        name = lowered_row.get("name", "")
+        obj_type = _parse_int_optional(lowered_row.get("type"))
+        obj_flags = _parse_int_optional(lowered_row.get("flags"))
+        if not name or obj_type is None or _is_hidden_or_system_object(name, obj_flags):
+            continue
+
+        if obj_type == _MSYS_TYPE_QUERY:
+            queries.append(name)
+        elif obj_type == _MSYS_TYPE_FORM:
+            forms.append(name)
+        elif obj_type == _MSYS_TYPE_REPORT:
+            reports.append(name)
+
+    return (
+        _dedupe_names_casefold(queries),
+        _dedupe_names_casefold(forms),
+        _dedupe_names_casefold(reports),
+    )
+
+
+def _parse_msys_relationships_csv(
+    csv_text: str,
+) -> tuple[AccdbRelationshipSchema, ...]:
+    """Парсить CSV-вивід `mdb-export <file> MSysRelationships` у кортеж зв'язків."""
+    cleaned_csv = csv_text.lstrip("\ufeff")
+    reader = csv.DictReader(io.StringIO(cleaned_csv))
+    relationships: list[AccdbRelationshipSchema] = []
+
+    for row in reader:
+        lowered_row = {
+            k.strip().casefold(): (v or "").strip()
+            for k, v in row.items()
+            if isinstance(k, str)
+        }
+        src_tbl = _strip_identifiers(lowered_row.get("szobject", ""))
+        ref_tbl = _strip_identifiers(lowered_row.get("szreferencedobject", ""))
+        if not src_tbl or not ref_tbl:
+            continue
+        relationships.append(
+            AccdbRelationshipSchema(
+                source_table=src_tbl,
+                referenced_table=ref_tbl,
+                source_column=lowered_row.get("szcolumn") or None,
+                referenced_column=lowered_row.get("szreferencedcolumn") or None,
+                relationship_name=lowered_row.get("szrelationship") or None,
+            )
+        )
+
+    return _dedupe_relationships(relationships)
+
+
+def _normalize_count_condition(expr: str) -> str:
+    """Нормалізує умову кількості ('min>=1', 'min=2', 'count>=1') до формату BaseGrader."""
+    cleaned = expr.strip()
+    match = _COUNT_PREFIX_PATTERN.match(cleaned)
+    if match is None:
+        return cleaned
+    prefix = match.group(1).lower()
+    operator = match.group(2)
+    number = match.group(3)
+    if prefix == "min" and operator in {"=", ":"}:
+        return f">={number}"
+    if operator == ":":
+        return f"=={number}"
+    return f"{operator}{number}"
+
+
+def _parse_relationship_pair_target(
+    rule: GradingRule,
+    target: str,
+) -> tuple[str, str]:
+    """Розбирає ціль зв'язку ('Таблиця1->Таблиця2' або 'Таблиця1,Таблиця2') на пару таблиць."""
+    parts = [
+        _strip_identifiers(part)
+        for part in _RELATIONSHIP_SPLIT_PATTERN.split(target.strip(), maxsplit=1)
+    ]
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return parts[0], parts[1]
+
+    raise GradingError(
+        f"Некоректний формат цілі зв'язку '{target}' у правилі '{rule.id}'. "
+        "Очікується 'Таблиця1->Таблиця2', 'Таблиця1,Таблиця2' або '*'.",
+        context={"rule_id": rule.id, "target": target},
+    )
+
+
 def build_accdb_bytes(
     tables: Mapping[str, Sequence[tuple[str, str | int]]],
+    *,
+    queries: Sequence[str] = (),
+    forms: Sequence[str] = (),
+    reports: Sequence[str] = (),
+    relationships: Sequence[
+        tuple[str, str] | tuple[str, str, str, str] | tuple[str, str, str, str, str]
+    ] = (),
+    extra_msys_objects: Sequence[tuple[str, int, int]] = (),
 ) -> bytes:
     """Конструює валідний бінарний образ бази даних Microsoft Access (.accdb, ACE v4/2010).
 
-    Використовується для детермінованої генерації еталонних та тестових .accdb файлів,
+    Використовується для детермінованої генерації еталонних та тестових .accdb файлів
+    (включно із запитами, формами, звітами в MSysObjects і зв'язками в MSysRelationships),
     які повноцінно парсяться бібліотекою access-parser на будь-якій ОС без MS Access.
     """
     page_size = int(PAGE_SIZE_V4)
@@ -1304,7 +2365,7 @@ def build_accdb_bytes(
     ]
     page_2 = _encode_tdef_page(msys_columns, page_size=page_size)
 
-    # Сторінки 4..N: TDEF користувацьких таблиць
+    # Сторінки 4..N: TDEF користувацьких таблиць та опційно MSysRelationships
     catalog_records: list[bytes] = [
         _encode_msys_catalog_record(
             obj_id=2,
@@ -1313,7 +2374,7 @@ def build_accdb_bytes(
             name="MSysObjects",
         )
     ]
-    user_tdef_pages: list[bytes] = []
+    extra_pages: list[bytes] = []
     next_page_id = 4
 
     for table_name, raw_cols in tables.items():
@@ -1349,7 +2410,7 @@ def build_accdb_bytes(
 
             encoded_cols.append((col_name, type_code, col_len, is_fixed, is_auto))
 
-        user_tdef_pages.append(_encode_tdef_page(encoded_cols, page_size=page_size))
+        extra_pages.append(_encode_tdef_page(encoded_cols, page_size=page_size))
         catalog_records.append(
             _encode_msys_catalog_record(
                 obj_id=next_page_id,
@@ -1360,10 +2421,115 @@ def build_accdb_bytes(
         )
         next_page_id += 1
 
+    # Записи MSysObjects для запитів (5), форм (-32768), звітів (-32764) та додаткових об'єктів
+    next_virtual_obj_id = 1000
+    for query_name in queries:
+        catalog_records.append(
+            _encode_msys_catalog_record(
+                obj_id=next_virtual_obj_id,
+                obj_type=_MSYS_TYPE_QUERY,
+                obj_flags=0,
+                name=query_name,
+            )
+        )
+        next_virtual_obj_id += 1
+
+    for form_name in forms:
+        catalog_records.append(
+            _encode_msys_catalog_record(
+                obj_id=next_virtual_obj_id,
+                obj_type=_MSYS_TYPE_FORM,
+                obj_flags=0,
+                name=form_name,
+            )
+        )
+        next_virtual_obj_id += 1
+
+    for report_name in reports:
+        catalog_records.append(
+            _encode_msys_catalog_record(
+                obj_id=next_virtual_obj_id,
+                obj_type=_MSYS_TYPE_REPORT,
+                obj_flags=0,
+                name=report_name,
+            )
+        )
+        next_virtual_obj_id += 1
+
+    for extra_name, extra_type, extra_flags in extra_msys_objects:
+        catalog_records.append(
+            _encode_msys_catalog_record(
+                obj_id=next_virtual_obj_id,
+                obj_type=extra_type,
+                obj_flags=extra_flags,
+                name=extra_name,
+            )
+        )
+        next_virtual_obj_id += 1
+
+    # Системна таблиця MSysRelationships (TDEF + сторінка даних із записами зв'язків)
+    if relationships:
+        rel_tdef_page_id = next_page_id
+        rel_columns: list[tuple[str, int, int, bool, bool]] = [
+            ("szObject", int(TYPE_TEXT), 255, False, False),
+            ("szReferencedObject", int(TYPE_TEXT), 255, False, False),
+            ("szColumn", int(TYPE_TEXT), 255, False, False),
+            ("szReferencedColumn", int(TYPE_TEXT), 255, False, False),
+            ("szRelationship", int(TYPE_TEXT), 255, False, False),
+        ]
+        rel_tdef_page = _encode_tdef_page(rel_columns, page_size=page_size)
+        rel_records: list[bytes] = []
+        for idx, rel_spec in enumerate(relationships):
+            src_tbl = rel_spec[0]
+            ref_tbl = rel_spec[1]
+            src_col = rel_spec[2] if len(rel_spec) >= 4 else "ID"
+            ref_col = rel_spec[3] if len(rel_spec) >= 4 else "ID"
+            rel_name = (
+                rel_spec[4]
+                if len(rel_spec) == 5
+                else f"Rel_{src_tbl}_{ref_tbl}_{idx}"
+            )
+            rel_records.append(
+                _encode_text_record((src_tbl, ref_tbl, src_col, ref_col, rel_name))
+            )
+
+        rel_data_page = _encode_data_page(
+            owner_page=rel_tdef_page_id,
+            records=rel_records,
+            page_size=page_size,
+        )
+        extra_pages.append(rel_tdef_page)
+        extra_pages.append(rel_data_page)
+        catalog_records.append(
+            _encode_msys_catalog_record(
+                obj_id=rel_tdef_page_id,
+                obj_type=1,
+                obj_flags=int(SYSTEM_TABLE_FLAGS[0]),
+                name="MSysRelationships",
+            )
+        )
+        next_page_id += 2
+
     # Сторінка 3: Сторінка даних MSysObjects (owner = 2)
     page_3 = _encode_data_page(owner_page=2, records=catalog_records, page_size=page_size)
 
-    return b"".join([page_0, page_1, page_2, page_3, *user_tdef_pages])
+    return b"".join([page_0, page_1, page_2, page_3, *extra_pages])
+
+
+def _encode_text_record(values: Sequence[str]) -> bytes:
+    """Кодує запис таблиці Access v4, що складається виключно з текстових (variable) полів."""
+    col_count = len(values)
+    encoded_fields = [b"\xff\xfe" + value.encode("utf-8") for value in values]
+    cursor = 2
+    offsets: list[int] = [cursor]
+    for field_bytes in encoded_fields:
+        cursor += len(field_bytes)
+        offsets.append(cursor)
+
+    meta = struct.pack(f"<{len(offsets) + 1}H", *reversed(offsets), col_count)
+    null_bitmap_len = (col_count + 7) // 8
+    null_bitmap = ((1 << col_count) - 1).to_bytes(null_bitmap_len, byteorder="little")
+    return struct.pack("<h", col_count) + b"".join(encoded_fields) + meta + null_bitmap
 
 
 def _encode_tdef_page(

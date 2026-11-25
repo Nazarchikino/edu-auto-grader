@@ -679,7 +679,7 @@
             "type": "accdb_table_exists",
             "target": "Співробітники",
             "expected": "true",
-            "points": 1.0,
+            "points": 0.5,
             "description": "Перевірка наявності таблиці «Співробітники» у БД Фірма.accdb"
           },
           {
@@ -687,7 +687,7 @@
             "type": "accdb_table_exists",
             "target": "Клієнти",
             "expected": "true",
-            "points": 1.0,
+            "points": 0.5,
             "description": "Перевірка наявності таблиці «Клієнти» у БД Фірма.accdb"
           },
           {
@@ -695,7 +695,7 @@
             "type": "accdb_table_exists",
             "target": "Замовлення",
             "expected": "true",
-            "points": 1.0,
+            "points": 0.5,
             "description": "Перевірка наявності таблиці «Замовлення» у БД Фірма.accdb"
           },
           {
@@ -809,6 +809,22 @@
             "expected": "Yes/No",
             "points": 0.5,
             "description": "Перевірка типу даних поля «Замовлення.Відмітка про виконання» (Так/Ні / Yes/No)"
+          },
+          {
+            "id": "a_m04_rel_emp_ord",
+            "type": "accdb_relationship_exists",
+            "target": "Співробітники->Замовлення",
+            "expected": "true",
+            "points": 0.75,
+            "description": "Перевірка наявності зв'язку між таблицями «Співробітники» та «Замовлення» за полем «Код співробітника»"
+          },
+          {
+            "id": "a_m04_rel_cli_ord",
+            "type": "accdb_relationship_exists",
+            "target": "Клієнти->Замовлення",
+            "expected": "true",
+            "points": 0.75,
+            "description": "Перевірка наявності зв'язку між таблицями «Клієнти» та «Замовлення» за полем «Код клієнта»"
           }
         ],
         "meta": {
@@ -911,56 +927,72 @@
         ],
         "grading_rules": [
           {
-            "id": "a_m05_tbl_emp",
-            "type": "accdb_table_exists",
-            "target": "Співробітники",
-            "expected": "true",
-            "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Співробітники» для створення запитів"
-          },
-          {
-            "id": "a_m05_tbl_cli",
-            "type": "accdb_table_exists",
-            "target": "Клієнти",
-            "expected": "true",
-            "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Клієнти» для створення запитів"
-          },
-          {
-            "id": "a_m05_tbl_ord",
-            "type": "accdb_table_exists",
-            "target": "Замовлення",
-            "expected": "true",
-            "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Замовлення» для створення запитів"
-          },
-          {
-            "id": "a_m05_col_emp_sal",
-            "type": "accdb_column_exists",
-            "target": "Співробітники.Заробітна плата",
+            "id": "a_m05_q_telefony",
+            "type": "accdb_query_exists",
+            "target": "Телефони",
             "expected": "true",
             "points": 1.5,
-            "description": "Перевірка наявності поля «Заробітна плата» (джерело даних для запитів)"
+            "description": "Перевірка наявності запиту «Телефони» на вибірку контактів співробітників"
           },
           {
-            "id": "a_m05_col_ord_sum",
-            "type": "accdb_column_exists",
-            "target": "Замовлення.Сума",
+            "id": "a_m05_q_adresi",
+            "type": "accdb_query_exists",
+            "target": "Адреси клієнтів",
             "expected": "true",
             "points": 1.5,
-            "description": "Перевірка наявності поля «Сума» (джерело розрахунків у запитів)"
+            "description": "Перевірка наявності запиту «Адреси клієнтів» із сортуванням компаній"
           },
           {
-            "id": "a_m05_type_ord_sum",
-            "type": "accdb_column_type",
-            "target": "Замовлення.Сума",
-            "expected": "Currency",
+            "id": "a_m05_q_dni_narodzh",
+            "type": "accdb_query_exists",
+            "target": "Дні народження",
+            "expected": "true",
+            "points": 1.5,
+            "description": "Перевірка наявності запиту «Дні народження» з умовою відбору або параметром"
+          },
+          {
+            "id": "a_m05_q_vykonani",
+            "type": "accdb_query_exists",
+            "target": "Виконані замовлення",
+            "expected": "true",
+            "points": 1.5,
+            "description": "Перевірка наявності багатотабличного запиту «Виконані замовлення»"
+          },
+          {
+            "id": "a_m05_q_suma",
+            "type": "accdb_query_exists",
+            "target": "Сума замовлення",
+            "expected": "true",
+            "points": 1.5,
+            "description": "Перевірка наявності запиту «Сума замовлення» з обчислювальними полями"
+          },
+          {
+            "id": "a_m05_q_count",
+            "type": "accdb_query_exists",
+            "target": "*",
+            "expected": ">=5",
             "points": 1.0,
-            "description": "Перевірка грошового типу даних (Currency) для поля «Замовлення.Сума»"
+            "description": "Перевірка наявності щонайменше 5 користувацьких запитів у базі даних"
+          },
+          {
+            "id": "a_m05_rel_emp_ord",
+            "type": "accdb_relationship_exists",
+            "target": "Співробітники->Замовлення",
+            "expected": "true",
+            "points": 0.75,
+            "description": "Перевірка збереження зв'язку між таблицями «Співробітники» та «Замовлення»"
+          },
+          {
+            "id": "a_m05_rel_cli_ord",
+            "type": "accdb_relationship_exists",
+            "target": "Клієнти->Замовлення",
+            "expected": "true",
+            "points": 0.75,
+            "description": "Перевірка збереження зв'язку між таблицями «Клієнти» та «Замовлення»"
           }
         ],
         "meta": {
-          "needs_manual_rules_review": true,
+          "needs_manual_rules_review": false,
           "control_questions": [
             "Для чого призначені запити?",
             "Які види запитів ви знаєте?",
@@ -1060,56 +1092,64 @@
         ],
         "grading_rules": [
           {
-            "id": "a_m06_tbl_emp",
-            "type": "accdb_table_exists",
+            "id": "a_m06_f_emp",
+            "type": "accdb_form_exists",
             "target": "Співробітники",
             "expected": "true",
-            "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Співробітники» для створення форм"
+            "points": 1.5,
+            "description": "Перевірка наявності форми «Співробітники»"
           },
           {
-            "id": "a_m06_tbl_cli",
-            "type": "accdb_table_exists",
+            "id": "a_m06_f_cli",
+            "type": "accdb_form_exists",
             "target": "Клієнти",
             "expected": "true",
-            "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Клієнти» для створення форм"
+            "points": 1.5,
+            "description": "Перевірка наявності форми «Клієнти»"
           },
           {
-            "id": "a_m06_tbl_ord",
-            "type": "accdb_table_exists",
+            "id": "a_m06_f_ord",
+            "type": "accdb_form_exists",
             "target": "Замовлення",
             "expected": "true",
-            "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Замовлення» для створення форм"
-          },
-          {
-            "id": "a_m06_col_emp_sal",
-            "type": "accdb_column_exists",
-            "target": "Співробітники.Заробітна плата",
-            "expected": "true",
             "points": 1.5,
-            "description": "Перевірка наявності поля «Заробітна плата» (джерело даних для форм)"
+            "description": "Перевірка наявності форми «Замовлення»"
           },
           {
-            "id": "a_m06_col_ord_sum",
-            "type": "accdb_column_exists",
-            "target": "Замовлення.Сума",
+            "id": "a_m06_f_mgr",
+            "type": "accdb_form_exists",
+            "target": "Менеджери",
             "expected": "true",
-            "points": 1.5,
-            "description": "Перевірка наявності поля «Сума» (джерело розрахунків у форм)"
-          },
-          {
-            "id": "a_m06_type_ord_sum",
-            "type": "accdb_column_type",
-            "target": "Замовлення.Сума",
-            "expected": "Currency",
             "points": 1.0,
-            "description": "Перевірка грошового типу даних (Currency) для поля «Замовлення.Сума»"
+            "description": "Перевірка наявності форми «Менеджери»"
+          },
+          {
+            "id": "a_m06_f_emp_tabs",
+            "type": "accdb_form_exists",
+            "target": "Співробітники фірми",
+            "expected": "true",
+            "points": 1.5,
+            "description": "Перевірка наявності складеної форми з вкладками «Співробітники фірми»"
+          },
+          {
+            "id": "a_m06_f_main_menu",
+            "type": "accdb_form_exists",
+            "target": "Головне меню",
+            "expected": "true",
+            "points": 2.0,
+            "description": "Перевірка наявності форми навігації «Головне меню»"
+          },
+          {
+            "id": "a_m06_f_count",
+            "type": "accdb_form_exists",
+            "target": "*",
+            "expected": ">=6",
+            "points": 1.0,
+            "description": "Перевірка наявності щонайменше 6 користувацьких форм у базі даних"
           }
         ],
         "meta": {
-          "needs_manual_rules_review": true,
+          "needs_manual_rules_review": false,
           "control_questions": [
             "Для чого призначені форми?",
             "Чому форма є незамінним засобом під час введення даних у БД?",
@@ -1209,56 +1249,48 @@
         ],
         "grading_rules": [
           {
-            "id": "a_m07_tbl_emp",
-            "type": "accdb_table_exists",
-            "target": "Співробітники",
+            "id": "a_m07_r_adresi",
+            "type": "accdb_report_exists",
+            "target": "Адреси клієнтів",
             "expected": "true",
             "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Співробітники» для створення звітів"
+            "description": "Перевірка наявності звіту «Адреси клієнтів»"
           },
           {
-            "id": "a_m07_tbl_cli",
-            "type": "accdb_table_exists",
-            "target": "Клієнти",
+            "id": "a_m07_r_suma",
+            "type": "accdb_report_exists",
+            "target": "Сума замовлення",
             "expected": "true",
             "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Клієнти» для створення звітів"
+            "description": "Перевірка наявності звіту «Сума замовлення» з підсумковими обчисленнями"
           },
           {
-            "id": "a_m07_tbl_ord",
-            "type": "accdb_table_exists",
-            "target": "Замовлення",
+            "id": "a_m07_r_dni_narodzh",
+            "type": "accdb_report_exists",
+            "target": "Дні народження",
             "expected": "true",
             "points": 2.0,
-            "description": "Перевірка наявності базової таблиці «Замовлення» для створення звітів"
+            "description": "Перевірка наявності звіту «Дні народження»"
           },
           {
-            "id": "a_m07_col_emp_sal",
-            "type": "accdb_column_exists",
-            "target": "Співробітники.Заробітна плата",
+            "id": "a_m07_r_vykonani",
+            "type": "accdb_report_exists",
+            "target": "Виконані замовлення",
             "expected": "true",
+            "points": 2.5,
+            "description": "Перевірка наявності звіту «Виконані замовлення» з групуванням та підсумками"
+          },
+          {
+            "id": "a_m07_r_count",
+            "type": "accdb_report_exists",
+            "target": "*",
+            "expected": ">=4",
             "points": 1.5,
-            "description": "Перевірка наявності поля «Заробітна плата» (джерело даних для звітів)"
-          },
-          {
-            "id": "a_m07_col_ord_sum",
-            "type": "accdb_column_exists",
-            "target": "Замовлення.Сума",
-            "expected": "true",
-            "points": 1.5,
-            "description": "Перевірка наявності поля «Сума» (джерело розрахунків у звітів)"
-          },
-          {
-            "id": "a_m07_type_ord_sum",
-            "type": "accdb_column_type",
-            "target": "Замовлення.Сума",
-            "expected": "Currency",
-            "points": 1.0,
-            "description": "Перевірка грошового типу даних (Currency) для поля «Замовлення.Сума»"
+            "description": "Перевірка наявності щонайменше 4 користувацьких звітів у базі даних"
           }
         ],
         "meta": {
-          "needs_manual_rules_review": true,
+          "needs_manual_rules_review": false,
           "control_questions": [
             "Яке основне призначення об'єкта «Звіт»?",
             "Чим звіт відрізняється від звичайної роздруківки таблиці?",
@@ -2057,7 +2089,7 @@
             "type": "accdb_table_exists",
             "target": "{table_1}",
             "expected": "true",
-            "points": 2.5,
+            "points": 1.0,
             "description": "Перевірка наявності головної таблиці довідника відповідно до варіанта"
           },
           {
@@ -2065,7 +2097,7 @@
             "type": "accdb_table_exists",
             "target": "{table_2}",
             "expected": "true",
-            "points": 2.5,
+            "points": 1.0,
             "description": "Перевірка наявності другої довідкової таблиці відповідно до варіанта"
           },
           {
@@ -2073,7 +2105,7 @@
             "type": "accdb_table_exists",
             "target": "{table_3}",
             "expected": "true",
-            "points": 2.5,
+            "points": 1.0,
             "description": "Перевірка наявності зв'язуючої/операційної таблиці відповідно до варіанта"
           },
           {
@@ -2081,8 +2113,40 @@
             "type": "accdb_column_exists",
             "target": "{pk_target}",
             "expected": "true",
-            "points": 2.5,
+            "points": 1.0,
             "description": "Перевірка наявності ключового поля головної таблиці відповідно до варіанта"
+          },
+          {
+            "id": "a_m09_rels",
+            "type": "accdb_relationship_exists",
+            "target": "*",
+            "expected": ">=2",
+            "points": 1.5,
+            "description": "Перевірка налаштування щонайменше 2 зв'язків між таблицями проєкту"
+          },
+          {
+            "id": "a_m09_queries",
+            "type": "accdb_query_exists",
+            "target": "*",
+            "expected": ">=2",
+            "points": 1.5,
+            "description": "Перевірка створення щонайменше 2 запитів (на вибірку та з параметром)"
+          },
+          {
+            "id": "a_m09_forms",
+            "type": "accdb_form_exists",
+            "target": "*",
+            "expected": ">=2",
+            "points": 1.5,
+            "description": "Перевірка створення форм введення даних та головної форми навігації"
+          },
+          {
+            "id": "a_m09_reports",
+            "type": "accdb_report_exists",
+            "target": "*",
+            "expected": ">=1",
+            "points": 1.5,
+            "description": "Перевірка створення щонайменше одного підсумкового звіту"
           }
         ],
         "meta": {

@@ -9,6 +9,7 @@ import axios from "axios";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  AlertTriangle,
   Award,
   BarChart3,
   CheckCircle2,
@@ -56,6 +57,7 @@ interface PracticalColumnMeta {
   moduleOrderIndex: number;
   moduleTitle: string;
   formatType: PracticalFormat | null;
+  needsRulesReview: boolean;
 }
 
 const COURSE_SLUG_BADGES: Record<
@@ -337,12 +339,33 @@ export function GroupJournalPage(): ReactElement {
             moduleOrderIndex: mod.order_index,
             moduleTitle: mod.title,
             formatType: mod.practical_format,
+            needsRulesReview: mod.practical_needs_rules_review,
           };
         }
       }
     }
+    for (const prac of journal?.practicals ?? []) {
+      const existing = map[prac.practical_id];
+      if (existing !== undefined) {
+        map[prac.practical_id] = {
+          ...existing,
+          needsRulesReview: prac.needs_rules_review,
+        };
+      } else {
+        map[prac.practical_id] = {
+          practicalId: prac.practical_id,
+          courseId: "",
+          courseTitle: COURSE_SLUG_BADGES[prac.course_slug].shortLabel,
+          courseSlug: prac.course_slug,
+          moduleOrderIndex: prac.module_order_index,
+          moduleTitle: prac.title,
+          formatType: null,
+          needsRulesReview: prac.needs_rules_review,
+        };
+      }
+    }
     return map;
-  }, [courses]);
+  }, [courses, journal]);
 
   // Перелік стовпців практичних робіт із поточного журналу
   const practicalColumnIds = useMemo<string[]>(() => {
@@ -963,6 +986,15 @@ export function GroupJournalPage(): ReactElement {
                           <p className="mt-1 line-clamp-1 font-bold normal-case text-slate-800">
                             {meta?.moduleTitle ?? `Практична №${idx + 1}`}
                           </p>
+                          {meta?.needsRulesReview && (
+                            <span
+                              title="Потребує перевірки правил / ручного дооцінювання"
+                              className="mt-1 inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold normal-case text-amber-800"
+                            >
+                              <AlertTriangle className="h-3 w-3 shrink-0 text-amber-600" />
+                              <span>Потребує дооцінювання</span>
+                            </span>
+                          )}
                         </th>
                       );
                     })}
@@ -1141,10 +1173,25 @@ export function GroupJournalPage(): ReactElement {
             >
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
                 <div>
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold text-blue-700">
-                    <Edit3 className="h-3.5 w-3.5" />
-                    Інспекція роботи та ручне коригування оцінки
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold text-blue-700">
+                      <Edit3 className="h-3.5 w-3.5" />
+                      Інспекція роботи та ручне коригування оцінки
+                    </span>
+                    {activeSubmission !== undefined &&
+                      practicalMetaMap[activeSubmission.practical_id]
+                        ?.needsRulesReview && (
+                        <span
+                          title="Стартові правила цієї практичної потребують перевірки викладачем або додаткової ручної оцінки"
+                          className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800"
+                        >
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                          <span>
+                            Потребує перевірки правил / ручного дооцінювання
+                          </span>
+                        </span>
+                      )}
+                  </div>
                   <h3 className="mt-1.5 text-lg font-bold text-slate-900">
                     {activeSubmission?.student_full_name ?? "Студент"} —{" "}
                     {activeSubmission?.practical_title ?? "Практична робота"}

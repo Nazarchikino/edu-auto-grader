@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Menu, UserCheck } from "lucide-react";
+import { KeyRound, LogOut, Menu, UserCheck } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import type { UserRole } from "../../types/api";
 
@@ -49,9 +49,13 @@ function resolvePageTitle(pathname: string): string {
 
 export interface NavbarProps {
   onOpenSidebar: () => void;
+  onOpenChangePassword: () => void;
 }
 
-export function Navbar({ onOpenSidebar }: NavbarProps): ReactElement | null {
+export function Navbar({
+  onOpenSidebar,
+  onOpenChangePassword,
+}: NavbarProps): ReactElement | null {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
@@ -121,15 +125,28 @@ export function Navbar({ onOpenSidebar }: NavbarProps): ReactElement | null {
           </span>
         </div>
 
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-2xs hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 transition-colors"
-          title="Вийти з облікового запису"
-        >
-          <LogOut className="h-4 w-4" />
-          <span className="hidden sm:inline">Вийти</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onOpenChangePassword}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-2xs transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+            title="Змінити пароль"
+            aria-label="Змінити пароль"
+          >
+            <KeyRound className="h-4 w-4" />
+            <span className="hidden md:inline">Змінити пароль</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-2xs transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700"
+            title="Вийти з облікового запису"
+          >
+            <LogOut className="h-4 w-4" />
+            <span className="hidden sm:inline">Вийти</span>
+          </button>
+        </div>
       </div>
     </header>
   );

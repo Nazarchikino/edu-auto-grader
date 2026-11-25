@@ -19,6 +19,8 @@ import apiClient, {
   subscribeToAuthFailure,
 } from "../api/client";
 import type {
+  ChangePasswordRequest,
+  ChangePasswordResponse,
   ErrorResponse,
   LoginRequest,
   TokenResponse,
@@ -31,6 +33,7 @@ export interface AuthContextValue {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (credentials: LoginRequest) => Promise<UserRead>;
+  changePassword: (payload: ChangePasswordRequest) => Promise<UserRead>;
   logout: () => void;
   refreshUser: () => Promise<UserRead | null>;
 }
@@ -48,15 +51,31 @@ export function getDefaultHomePath(role: UserRole): string {
   return ROLE_DEFAULT_PATHS[role];
 }
 
+interface ValidationErrorItem {
+  msg?: unknown;
+}
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function extractApiErrorMessage(
   error: unknown,
   fallbackMessage: string
 ): string {
   if (axios.isAxiosError<ErrorResponse>(error)) {
-    const detail = error.response?.data?.detail;
+    const detail: unknown = error.response?.data?.detail;
     if (typeof detail === "string" && detail.trim().length > 0) {
       return detail;
+    }
+    if (Array.isArray(detail) && detail.length > 0) {
+      const firstItem = detail[0] as ValidationErrorItem | undefined;
+      if (
+        firstItem !== undefined &&
+        typeof firstItem === "object" &&
+        firstItem !== null &&
+        typeof firstItem.msg === "string" &&
+        firstItem.msg.trim().length > 0
+      ) {
+        return firstItem.msg.replace(/^Value error,\s*/i, "");
+      }
     }
   }
   if (error instanceof Error && error.message.trim().length > 0) {
@@ -163,6 +182,20 @@ export function AuthProvider({ children }: AuthProviderProps): ReactElement {
     }
   }, []);
 
+  const changePassword = useCallback(
+    async (payload: ChangePasswordRequest): Promise<UserRead> => {
+      const response = await apiClient.post<ChangePasswordResponse>(
+        "/auth/change-password",
+        payload
+      );
+      setAccessToken(response.data.access_token);
+      setRefreshToken(response.data.refresh_token);
+      setUser(response.data.user);
+      return response.data.user;
+    },
+    []
+  );
+
   const logout = useCallback((): void => {
     clearAuthTokens();
     setUser(null);
@@ -174,10 +207,11 @@ export function AuthProvider({ children }: AuthProviderProps): ReactElement {
       isAuthenticated: user !== null,
       isLoading,
       login,
+      changePassword,
       logout,
       refreshUser,
     }),
-    [user, isLoading, login, logout, refreshUser]
+    [user, isLoading, login, changePassword, logout, refreshUser]
   );
 
   return (

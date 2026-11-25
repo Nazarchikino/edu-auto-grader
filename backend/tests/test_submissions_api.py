@@ -177,6 +177,7 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     assert fail_quiz_data["passed"] is False
     assert fail_quiz_data["score_percent"] == pytest.approx(16.67, abs=0.01)
     assert fail_quiz_data["practical_unlocked"] is False
+    assert fail_quiz_data["retry_after_seconds"] == settings.QUIZ_RETRY_COOLDOWN_SECONDS
 
     still_locked_resp = await async_client.post(
         f"/api/v1/practicals/{practical.id}/submit",
@@ -185,6 +186,17 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     )
     assert still_locked_resp.status_code == 403
     assert still_locked_resp.json()["code"] == "QUIZ_NOT_PASSED"
+
+    # Зсуваємо час невдалої спроби в минуле за межі cooldown перед повторною здачею
+    failed_attempt_res = await db_session.execute(
+        select(QuizAttempt).where(QuizAttempt.id == uuid.UUID(fail_quiz_data["id"]))
+    )
+    failed_attempt = failed_attempt_res.scalar_one()
+    assert isinstance(failed_attempt, QuizAttempt)
+    failed_attempt.attempted_at = datetime.now(UTC) - timedelta(
+        seconds=settings.QUIZ_RETRY_COOLDOWN_SECONDS + 5
+    )
+    await db_session.commit()
 
     # 3. Успішна спроба тесту (5 правильних з 6 = 83.33% >= 70%) розблоковує практичну роботу
     passed_answers = [
@@ -464,14 +476,23 @@ async def test_antiplagiarism_flags_sha256_and_core_xml_matches_across_students(
     assert sub2_data["plagiarism_reason"] is not None
     assert "SHA-256" in sub2_data["plagiarism_reason"]
 
-    # 4. Студент 3 змінює вміст файлу (інший SHA-256), але залишає час створення у docProps/core.xml
+    # 4. Студент 3 змінює таблицю у файлі студента 1 (інший SHA-256), але зберігає
+    # оригінальні creator та created у docProps/core.xml (як робить MS Word при редагуванні копії)
     modified_content_docx = build_sample_docx(
         tmp_path / "student3_meta_clone.docx",
         table_rows=6,
         table_cols=4,
-        creator="Шевченко Максим",
+        creator="Бондаренко Ірина Василівна",
         created_iso="2026-11-18T07:45:00Z",
         modified_iso="2026-11-18T16:15:00Z",
+    )
+    rewrite_openxml_core_metadata(
+        modified_content_docx,
+        creator="Бондаренко Ірина Василівна",
+        last_modified_by="Шевченко Максим",
+        created="2026-11-18T07:45:00Z",
+        modified="2026-11-18T16:15:00Z",
+        revision="2",
     )
     sub3_resp = await async_client.post(
         f"/api/v1/practicals/{word_prac.id}/submit",
@@ -1589,3 +1610,468 @@ async def test_submit_html_starter_template_and_empty_body_returns_422(
     my_subs_resp = await async_client.get("/api/v1/submissions/me", headers=headers)
     assert my_subs_resp.status_code == 200
     assert my_subs_resp.json() == []
+
+
+async def test_check_files_exist_batch_handles_existing_missing_and_path_traversal(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє пакетну перевірку файлів: існуючі, відсутні та Path Traversal -> False."""
+    from starlette.concurrency import run_in_threadpool
+
+    from app.services.submission_service import _check_files_exist_batch
+
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir()
+
+    existing_abs_file = uploads_dir / "prac-1" / "student-1" / "sub-1.docx"
+    existing_abs_file.parent.mkdir(parents=True)
+    existing_abs_file.write_bytes(b"valid-docx-payload")
+
+    existing_rel_file = uploads_dir / "prac-1" / "student-2" / "sub-2.xlsx"
+    existing_rel_file.parent.mkdir(parents=True)
+    existing_rel_file.write_bytes(b"valid-xlsx-payload")
+
+    outside_secret = tmp_path / "outside_secret.docx"
+    outside_secret.write_bytes(b"sensitive-content")
+
+    existing_abs_key = existing_abs_file.as_posix()
+    existing_rel_key = "prac-1/student-2/sub-2.xlsx"
+    missing_key = (uploads_dir / "prac-1" / "student-1" / "missing.docx").as_posix()
+    outside_abs_key = outside_secret.as_posix()
+    traversal_rel_key = "../outside_secret.docx"
+    subdir_key = (uploads_dir / "prac-1").as_posix()
+
+    input_paths = [
+        existing_abs_key,
+        existing_abs_key,
+        existing_rel_key,
+        missing_key,
+        outside_abs_key,
+        traversal_rel_key,
+        subdir_key,
+        "",
+        "   ",
+    ]
+
+    result = await run_in_threadpool(
+        _check_files_exist_batch,
+        input_paths,
+        uploads_dir,
+    )
+
+    assert (existing_abs_key in result) is True
+    assert (existing_rel_key in result) is True
+    assert (missing_key in result) is False
+    assert (outside_abs_key in result) is False
+    assert (traversal_rel_key in result) is False
+    assert (subdir_key in result) is False
+    assert result == {existing_abs_key, existing_rel_key}
+
+
+async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє серверну валідацію правил (422), sync_max_score та прапорець needs_rules_review."""
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+    student_headers = make_auth_headers(student1.id, student1.role)
+
+    # Завантажуємо курси та конкретні практичні (Word M01 false, Word M02 true, Excel/Access/HTML)
+    word_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    assert isinstance(word_course, Course)
+
+    word_m01, word_m01_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 1)
+        )
+    ).one()
+    word_m02, word_m02_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 2)
+        )
+    ).one()
+    assert isinstance(word_m01, Module) and isinstance(word_m01_prac, Practical)
+    assert isinstance(word_m02, Module) and isinstance(word_m02_prac, Practical)
+    assert word_m01_prac.needs_rules_review is False
+    assert word_m02_prac.needs_rules_review is True
+
+    _, _, excel_prac = await _get_course_module_and_practical(db_session, CourseSlug.EXCEL)
+    _, _, access_prac = await _get_course_module_and_practical(db_session, CourseSlug.ACCESS)
+    _, _, html_prac = await _get_course_module_and_practical(db_session, CourseSlug.HTML)
+
+    # 1. Перевіряємо прокидання needs_rules_review у всіх відповідних API-контрактах
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_m02.id)
+
+    teacher_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{word_m02_prac.id}/teacher",
+        headers=teacher_headers,
+    )
+    assert teacher_prac_resp.status_code == 200
+    assert teacher_prac_resp.json()["needs_rules_review"] is True
+
+    student_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{word_m02_prac.id}",
+        headers=student_headers,
+    )
+    assert student_prac_resp.status_code == 200
+    assert student_prac_resp.json()["needs_rules_review"] is True
+
+    courses_resp = await async_client.get("/api/v1/courses", headers=teacher_headers)
+    assert courses_resp.status_code == 200
+    word_course_json = next(
+        c for c in courses_resp.json() if c["slug"] == CourseSlug.WORD.value
+    )
+    m01_summary = next(m for m in word_course_json["modules"] if m["order_index"] == 1)
+    m02_summary = next(m for m in word_course_json["modules"] if m["order_index"] == 2)
+    assert m01_summary["practical_needs_rules_review"] is False
+    assert m02_summary["practical_needs_rules_review"] is True
+
+    group = (
+        await db_session.execute(select(AcademicGroup).where(AcademicGroup.code == "КН-31"))
+    ).scalar_one()
+    assert isinstance(group, AcademicGroup)
+    journal_resp = await async_client.get(
+        f"/api/v1/analytics/groups/{group.id}/journal?course_id={word_course.id}",
+        headers=teacher_headers,
+    )
+    assert journal_resp.status_code == 200
+    journal_practicals = journal_resp.json()["practicals"]
+    m01_j = next(p for p in journal_practicals if p["practical_id"] == str(word_m01_prac.id))
+    m02_j = next(p for p in journal_practicals if p["practical_id"] == str(word_m02_prac.id))
+    assert m01_j["needs_rules_review"] is False
+    assert m02_j["needs_rules_review"] is True
+
+    # 2. Невалідне правило docx_table_exists із expected="min_rows=4" -> 422 Unprocessable Entity
+    bad_docx_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_table_rule",
+                    "type": "docx_table_exists",
+                    "target": "document",
+                    "expected": "min_rows=4",
+                    "points": 10.0,
+                    "description": "Некоректний синтаксис таблиці",
+                }
+            ]
+        },
+    )
+    assert bad_docx_resp.status_code == 422
+    bad_docx_body = bad_docx_resp.json()
+    assert bad_docx_body["code"] == "INVALID_RULE_DEFINITION"
+    assert "bad_table_rule" in bad_docx_body["detail"]
+    assert "3x4" in bad_docx_body["detail"]
+    assert "rows>=4" in bad_docx_body["detail"]
+    assert bad_docx_body["context"]["rule_id"] == "bad_table_rule"
+
+    # Невалідні правила інших форматів (Excel, Access, HTML) та крос-форматне правило -> 422
+    bad_xlsx_resp = await async_client.put(
+        f"/api/v1/practicals/{excel_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_xlsx_cell",
+                    "type": "xlsx_formula",
+                    "target": "NOT_A_CELL_COORD",
+                    "expected": "SUM",
+                    "points": 10.0,
+                    "description": "Некоректна координата клітинки",
+                }
+            ]
+        },
+    )
+    assert bad_xlsx_resp.status_code == 422
+    assert bad_xlsx_resp.json()["code"] == "INVALID_RULE_DEFINITION"
+    assert bad_xlsx_resp.json()["context"]["rule_id"] == "bad_xlsx_cell"
+
+    bad_accdb_resp = await async_client.put(
+        f"/api/v1/practicals/{access_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_accdb_rel",
+                    "type": "accdb_relationship_exists",
+                    "target": "OnlyOneTable",
+                    "expected": "true",
+                    "points": 10.0,
+                    "description": "Зв'язок без другої таблиці",
+                }
+            ]
+        },
+    )
+    assert bad_accdb_resp.status_code == 422
+    assert bad_accdb_resp.json()["code"] == "INVALID_RULE_DEFINITION"
+    assert bad_accdb_resp.json()["context"]["rule_id"] == "bad_accdb_rel"
+
+    bad_html_resp = await async_client.put(
+        f"/api/v1/practicals/{html_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_html_count",
+                    "type": "html_tag_count",
+                    "target": "table > tr",
+                    "expected": "not_a_number",
+                    "points": 10.0,
+                    "description": "Некоректна числова умова",
+                }
+            ]
+        },
+    )
+    assert bad_html_resp.status_code == 422
+    assert bad_html_resp.json()["code"] == "INVALID_RULE_DEFINITION"
+    assert bad_html_resp.json()["context"]["rule_id"] == "bad_html_count"
+
+    cross_format_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "wrong_format_rule",
+                    "type": "xlsx_formula",
+                    "target": "A1",
+                    "expected": "SUM",
+                    "points": 10.0,
+                    "description": "Правило Excel у роботі Word",
+                }
+            ]
+        },
+    )
+    assert cross_format_resp.status_code == 422
+    assert cross_format_resp.json()["code"] == "INVALID_RULE_TYPE_FOR_FORMAT"
+
+    # 3. Збереження з sync_max_score=False залишає max_score=10.0 і скидає needs_rules_review=False
+    partial_rules = [
+        {
+            "id": "m02_font_check",
+            "type": "docx_font",
+            "target": "all_paragraphs",
+            "expected": "Times New Roman:14",
+            "points": 4.0,
+            "description": "Основний шрифт Times New Roman 14 pt",
+        },
+        {
+            "id": "m02_table_check",
+            "type": "docx_table_exists",
+            "target": "document",
+            "expected": "rows>=4",
+            "points": 3.0,
+            "description": "Таблиця щонайменше з 4 рядками",
+        },
+    ]
+    keep_max_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": partial_rules,
+            "sync_max_score": False,
+        },
+    )
+    assert keep_max_resp.status_code == 200
+    keep_max_data = keep_max_resp.json()
+    assert keep_max_data["max_score"] == 10.0
+    assert keep_max_data["needs_rules_review"] is False
+    assert len(keep_max_data["grading_rules"]) == 2
+
+    # 4. sync_max_score=True оновлює max_score до суми балів (7.0) і зберігає явний прапорець
+    sync_max_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": partial_rules,
+            "sync_max_score": True,
+            "needs_rules_review": True,
+        },
+    )
+    assert sync_max_resp.status_code == 200
+    sync_max_data = sync_max_resp.json()
+    assert sync_max_data["max_score"] == 7.0
+    assert sync_max_data["needs_rules_review"] is True
+
+    # 5. Збереження без needs_rules_review скидає прапорець у False та приймає формат 3x4
+    reset_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "m02_table_matrix",
+                    "type": "docx_table_exists",
+                    "target": "document",
+                    "expected": "3x4",
+                    "points": 10.0,
+                    "description": "Таблиця щонайменше 3x4",
+                }
+            ]
+        },
+    )
+    assert reset_resp.status_code == 200
+    assert reset_resp.json()["max_score"] == 10.0
+    assert reset_resp.json()["needs_rules_review"] is False
+
+
+async def test_antiplagiarism_api_html_structural_match_and_classroom_template_clean(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє через API детекцію HTML-плагіату з коментарем/класами та чистий шаблон Word."""
+    import docx as python_docx
+
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+
+    # 1. HTML-практична: копія з коментарем <!-- my work --> та іншими CSS-класами
+    _, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    for st in (student1, student2):
+        await _grant_quiz_pass(db_session, student_id=st.id, module_id=html_mod.id)
+
+    html_orig = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Візитівка</title>
+        <style>.box-a { color: #111; padding: 12px; }</style>
+      </head>
+      <body>
+        <main class="box-a">
+          <h1>Профіль студента</h1>
+          <h2>Навчання</h2>
+          <p>Вивчаю <strong>вебтехнології</strong> та сучасні стандарти HTML5 у коледжі.</p>
+          <h2>Інтереси</h2>
+          <p>Цікавлюся <em>семантичною версткою</em>, доступністю та чистою структурою коду.</p>
+          <p>Регулярно виконую лабораторні та практичні завдання курсу.</p>
+          <blockquote>Якісна розмітка є фундаментом надійного вебінтерфейсу.</blockquote>
+        </main>
+      </body>
+    </html>
+    """
+    html_copy = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Моя робота</title>
+        <style>.student-card { padding: 12px; color: #111; }</style>
+      </head>
+      <body>
+        <!-- my work -->
+        <main class="student-card">
+          <h1>Профіль студента</h1>
+          <h2>Навчання</h2>
+          <p>Вивчаю <strong>вебтехнології</strong> та сучасні стандарти HTML5 у коледжі.</p>
+          <h2>Інтереси</h2>
+          <p>Цікавлюся <em>семантичною версткою</em>, доступністю та чистою структурою коду.</p>
+          <p>Регулярно виконую лабораторні та практичні завдання курсу.</p>
+          <blockquote>Якісна розмітка є фундаментом надійного вебінтерфейсу.</blockquote>
+        </main>
+      </body>
+    </html>
+    """
+
+    html_r1 = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        json={"raw_code": html_orig},
+    )
+    assert html_r1.status_code == 201
+    html_d1 = html_r1.json()
+    assert html_d1["is_plagiarism_flagged"] is False
+    assert html_d1["extracted_metadata"]["content_fingerprint"] is not None
+
+    html_r2 = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=make_auth_headers(student2.id, student2.role),
+        json={"raw_code": html_copy},
+    )
+    assert html_r2.status_code == 201
+    html_d2 = html_r2.json()
+    assert html_d2["file_hash"] != html_d1["file_hash"]
+    assert html_d2["is_plagiarism_flagged"] is True
+    assert html_d2["plagiarism_reason"] is not None
+    assert "Збіг структурного вмісту" in html_d2["plagiarism_reason"]
+
+    # 2. Word-практична: два студенти на спільному шаблоні (creator="User", однаковий created)
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    for st in (student1, student2):
+        await _grant_quiz_pass(db_session, student_id=st.id, module_id=word_mod.id)
+
+    def _make_template_docx(path: Path, paragraphs: list[str], modified_iso: str) -> Path:
+        doc = python_docx.Document()
+        for line in paragraphs:
+            doc.add_paragraph(line)
+        doc.save(str(path))
+        rewrite_openxml_core_metadata(
+            path,
+            creator="User",
+            last_modified_by="User",
+            created="2026-09-01T08:00:00Z",
+            modified=modified_iso,
+            revision="1",
+        )
+        return path
+
+    word_a = _make_template_docx(
+        tmp_path / "api_tmpl_a.docx",
+        [
+            "Індивідуальний звіт першого студента про налаштування мережевої інфраструктури.",
+            "Наведено таблицю маршрутизації, опис топології локальної мережі та висновки.",
+        ],
+        "2026-11-25T10:05:00Z",
+    )
+    word_b = _make_template_docx(
+        tmp_path / "api_tmpl_b.docx",
+        [
+            "Самостійна робота другого студента з моделювання обліку бібліотечного фонду.",
+            "Створено схему сутностей, правила валідації записів і підсумковий аналіз даних.",
+        ],
+        "2026-11-25T10:18:00Z",
+    )
+
+    w_r1 = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        files={
+            "file": (
+                "work_a.docx",
+                word_a.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert w_r1.status_code == 201
+    assert w_r1.json()["is_plagiarism_flagged"] is False
+
+    w_r2 = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student2.id, student2.role),
+        files={
+            "file": (
+                "work_b.docx",
+                word_b.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert w_r2.status_code == 201
+    assert w_r2.json()["is_plagiarism_flagged"] is False
+    assert w_r2.json()["plagiarism_reason"] is None

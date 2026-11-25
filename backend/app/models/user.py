@@ -3,14 +3,18 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
+    Integer,
     SmallInteger,
     String,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -74,6 +78,17 @@ class User(Base):
     """Користувач системи: студент, викладач або адміністратор (таблиця `users`)."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_group_id", "group_id"),
+        Index(
+            "uq_users_group_list_number",
+            "group_id",
+            "list_number",
+            unique=True,
+            postgresql_where=text("group_id IS NOT NULL AND list_number IS NOT NULL"),
+            sqlite_where=text("group_id IS NOT NULL AND list_number IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -110,6 +125,18 @@ class User(Base):
     list_number: Mapped[int | None] = mapped_column(
         SmallInteger,
         nullable=True,
+    )
+    token_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
