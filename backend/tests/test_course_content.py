@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import re
@@ -13,6 +14,8 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.core.security import hash_password
 from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
+from app.graders.base import format_student_criterion_description
+from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
 from app.graders.html_grader import HtmlGrader
 from app.graders.xlsx_grader import XlsxGrader, _canonicalize_formula
@@ -72,11 +75,22 @@ def test_full_course_json_bundle_validation() -> None:
                 media_references.update(_MEDIA_URL_PATTERN.findall(variants_json))
 
                 assert not hasattr(practical, "meta")
+                assert practical.max_score == Decimal("12.00"), (
+                    f"{course.slug.value} M{module.order_index:02d}: "
+                    f"очікувався max_score=12.00, отримано {practical.max_score}"
+                )
                 assert len(practical.grading_rules) >= 1
+                rules_points_sum = Decimal("0.00")
                 for raw_rule in practical.grading_rules:
                     parsed_rule = GradingRule.model_validate(raw_rule)
                     assert parsed_rule.points > 0
+                    rules_points_sum += Decimal(str(parsed_rule.points))
                     validated_rules_count += 1
+                assert Decimal("0") < rules_points_sum <= practical.max_score
+                assert rules_points_sum == Decimal("10.00"), (
+                    f"{course.slug.value} M{module.order_index:02d}: "
+                    f"очікувалась сума балів правил 10.00, отримано {rules_points_sum}"
+                )
 
     assert validated_rules_count >= 190
     assert len(media_references) > 0
@@ -199,7 +213,15 @@ def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> No
                 GradingRule.model_validate(raw_rule)
                 for raw_rule in practical.grading_rules
             ]
-            assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+            assert practical.max_score == Decimal("12.00"), (
+                f"{course.slug.value} M{module.order_index:02d}: max_score != 12.00"
+            )
+            rules_sum = sum(
+                (Decimal(str(rule.points)) for rule in parsed_rules),
+                Decimal("0.00"),
+            )
+            assert Decimal("0") < rules_sum <= practical.max_score
+            assert rules_sum == Decimal("10.00"), (
                 f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
             )
             assert len(practical.variants) >= 1
@@ -262,7 +284,8 @@ def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> No
 
     assert practicals_checked == 37
     assert variants_checked == 254
-    assert placeholders_resolved >= 340
+    # Після видалення прихованих шаблонних правил Word (T6.16a) лишаються реальні плейсхолдери
+    assert placeholders_resolved >= 230
 
 
 def test_minimal_html_starter_template_scores_zero_across_all_html_course_modules() -> None:
@@ -1440,7 +1463,15 @@ def test_all_course_rules_pass_validate_rule_definition_and_access_modules_separ
                 GradingRule.model_validate(raw_rule)
                 for raw_rule in practical.grading_rules
             ]
-            assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+            assert practical.max_score == Decimal("12.00"), (
+                f"{course.slug.value} M{module.order_index:02d}: max_score != 12.00"
+            )
+            rules_sum = sum(
+                (Decimal(str(rule.points)) for rule in parsed_rules),
+                Decimal("0.00"),
+            )
+            assert Decimal("0") < rules_sum <= practical.max_score
+            assert rules_sum == Decimal("10.00"), (
                 f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
             )
             for rule in parsed_rules:
@@ -1594,3 +1625,253 @@ async def test_seed_and_sync_courses_persist_needs_rules_review(
     ).scalar_one()
     assert m01_after.needs_rules_review is True
     assert m02_after.needs_rules_review is False
+
+
+_CYRILLIC_PATTERN = re.compile(r"[А-Яа-яІіЇїЄєҐґ]")
+_FORBIDDEN_DESCRIPTION_TOKEN_PATTERN = re.compile(
+    r"(?:docx_|xlsx_|accdb_|html_|contains:|rows>=|min_rows|placeholder"
+    r"|\bjustify\b|\bcenter\b|\bleft\b|\bright\b|\bfunc:|\bfunction:"
+    r"|\btrue\b|\bfalse\b|перевірка поля target)",
+    re.IGNORECASE,
+)
+
+
+def test_word_module2_has_no_hidden_rules_and_matches_instructions() -> None:
+    """Регресія T6.16a: ПР №2 Word не містить прихованих правил шрифту чи вирівнювання."""
+    bundle = build_seed_bundle()
+    word_course = next(
+        course for course in bundle.courses if course.slug == CourseSlug.WORD
+    )
+    m02 = next(mod for mod in word_course.modules if mod.order_index == 2)
+    assert m02.practical is not None
+
+    parsed_rules = [
+        GradingRule.model_validate(raw_rule) for raw_rule in m02.practical.grading_rules
+    ]
+    assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0)
+    assert m02.practical.needs_rules_review is True
+
+    rule_types = {rule.type for rule in parsed_rules}
+    assert GradingRuleType.DOCX_FONT not in rule_types
+    assert GradingRuleType.DOCX_ALIGNMENT not in rule_types
+    assert rule_types == {
+        GradingRuleType.DOCX_PAGE_MARGINS,
+        GradingRuleType.DOCX_LINE_SPACING,
+    }
+
+    instructions_lower = m02.practical.instructions.lower()
+    assert "2 см" in instructions_lower
+    assert "1,5" in instructions_lower or "1.5" in instructions_lower
+
+    for variant in m02.practical.variants:
+        params = variant.get("parameters")
+        assert isinstance(params, dict)
+        assert "body_font" not in params
+        for rule in parsed_rules:
+            formatted = format_student_criterion_description(rule.description, variant)
+            assert "шрифт" not in formatted.lower()
+
+
+def test_all_course_criterion_descriptions_plain_ukrainian_and_readable() -> None:
+    """Інваріант T6.16a: усі описи критеріїв в усіх 4 курсах і 254 варіантах — чиста українська."""
+    # 1. Модульні перевірки форматера без мутації вхідного словника variant_data
+    raw_variant: dict[str, object] = {
+        "variant_number": 7,
+        "parameters": {
+            "body_font": "Times New Roman",
+            "body_alignment": "justify",
+            "alt_alignment": "center",
+            "left_align": "left",
+            "right_align": "right",
+            "margins": "left=3cm,right=1.5cm,top=2cm,bottom=2cm",
+            "uniform_margins": "2cm",
+            "line_spacing": "1.5",
+            "is_required": True,
+            "is_optional": False,
+            "bool_str": "true",
+            "columns": ["Код", "Назва"],
+            "pk_target": "Книги.Код_книги",
+        },
+    }
+    snapshot = copy.deepcopy(raw_variant)
+    sample_text = format_student_criterion_description(
+        (
+            "Шрифт {body_font}, вирівнювання {body_alignment}/{alt_alignment}/"
+            "{left_align}/{right_align}, поля: {margins} (або {uniform_margins}), "
+            "інтервал {line_spacing}, обов'язково: {is_required}/{bool_str}, "
+            "додатково: {is_optional}, поля таблиці: {columns}, ключ: {pk_target}"
+        ),
+        raw_variant,
+    )
+    assert raw_variant == snapshot
+    assert "Times New Roman" in sample_text
+    assert "по ширині" in sample_text
+    assert "по центру" in sample_text
+    assert "по лівому краю" in sample_text
+    assert "по правому краю" in sample_text
+    assert "ліве — 3 см, праве — 1,5 см, верхнє — 2 см, нижнє — 2 см" in sample_text
+    assert "по 2 см з усіх боків" in sample_text
+    assert "так/так" in sample_text
+    assert "додатково: ні" in sample_text
+    assert "Код, Назва" in sample_text
+    assert "«Код_книги» у таблиці «Книги»" in sample_text
+    assert _FORBIDDEN_DESCRIPTION_TOKEN_PATTERN.search(sample_text) is None
+
+    # 2. Повний прохід по 4 курсах, 37 практичних і кожному з 254 варіантів
+    bundle = build_seed_bundle()
+    checked_pairs = 0
+
+    for course in bundle.courses:
+        for module in course.modules:
+            practical = module.practical
+            if practical is None:
+                continue
+            parsed_rules = [
+                GradingRule.model_validate(raw_rule)
+                for raw_rule in practical.grading_rules
+            ]
+            for variant in practical.variants:
+                v_num = variant.get("variant_number", "?")
+                variant_before = copy.deepcopy(variant)
+                for rule in parsed_rules:
+                    formatted = format_student_criterion_description(
+                        rule.description,
+                        variant,
+                    )
+                    assert variant == variant_before
+                    assert formatted.strip() != "", (
+                        f"Порожній опис критерію: {course.slug.value} M{module.order_index:02d} "
+                        f"V{v_num} {rule.id}"
+                    )
+                    assert _CYRILLIC_PATTERN.search(formatted) is not None, (
+                        f"Опис не містить кирилиці: '{formatted}' "
+                        f"({course.slug.value} M{module.order_index:02d} V{v_num} {rule.id})"
+                    )
+                    assert _UNRESOLVED_PLACEHOLDER_PATTERN.search(formatted) is None, (
+                        f"Нерозкритий плейсхолдер у description: '{formatted}' "
+                        f"({course.slug.value} M{module.order_index:02d} V{v_num} {rule.id})"
+                    )
+                    forbidden_match = _FORBIDDEN_DESCRIPTION_TOKEN_PATTERN.search(formatted)
+                    assert forbidden_match is None, (
+                        f"Заборонений технічний токен '{forbidden_match.group(0)}' в описі "
+                        f"'{formatted}' ({course.slug.value} M{module.order_index:02d} "
+                        f"V{v_num} {rule.id})"
+                    )
+                    checked_pairs += 1
+
+    assert checked_pairs >= 700
+
+
+def test_word_formatting_rules_match_instructions_and_variants() -> None:
+    """Інваріант T6.16a: усі форматувальні правила word.json узгоджені з умовами завдань."""
+    bundle = build_seed_bundle()
+    word_course = next(
+        course for course in bundle.courses if course.slug == CourseSlug.WORD
+    )
+    grader = DocxGrader()
+    alignment_stems: dict[str, tuple[str, ...]] = {
+        "justify": ("ширин",),
+        "both": ("ширин",),
+        "center": ("центр",),
+        "left": ("лівому", "ліворуч"),
+        "right": ("правому", "праворуч"),
+    }
+    formatting_types = {
+        GradingRuleType.DOCX_FONT,
+        GradingRuleType.DOCX_ALIGNMENT,
+        GradingRuleType.DOCX_LINE_SPACING,
+        GradingRuleType.DOCX_PAGE_MARGINS,
+    }
+    checks_verified = 0
+
+    for module in word_course.modules:
+        practical = module.practical
+        if practical is None:
+            continue
+        parsed_rules = [
+            GradingRule.model_validate(raw_rule) for raw_rule in practical.grading_rules
+        ]
+        for variant in practical.variants:
+            v_num = variant.get("variant_number", "?")
+            params = variant.get("parameters")
+            params_dict = params if isinstance(params, dict) else {}
+            combined_task = "\n".join(
+                [
+                    practical.instructions,
+                    str(variant.get("task_description", "")),
+                    str(params_dict.get("level_1_task", "")),
+                    str(params_dict.get("level_2_task", "")),
+                    str(params_dict.get("level_3_task", "")),
+                ]
+            ).lower()
+
+            for rule in parsed_rules:
+                if rule.type not in formatting_types:
+                    continue
+                resolved_expected = grader.resolve_expected(rule.expected, variant).strip()
+                formatted_desc = format_student_criterion_description(
+                    rule.description,
+                    variant,
+                ).lower()
+                ctx = (
+                    f"word M{module.order_index:02d} V{v_num} {rule.id} "
+                    f"(expected={resolved_expected})"
+                )
+
+                if rule.type == GradingRuleType.DOCX_FONT:
+                    font_parts = [part.strip() for part in resolved_expected.split(":", maxsplit=1)]
+                    font_lower = font_parts[0].lower()
+                    assert font_lower in formatted_desc, f"Шрифт відсутній в описі: {ctx}"
+                    assert font_lower in combined_task, f"Шрифт відсутній в умові завдання: {ctx}"
+                    if len(font_parts) == 2 and font_parts[1]:
+                        size_val = float(font_parts[1].replace(",", "."))
+                        size_dot = f"{size_val:g}"
+                        size_comma = size_dot.replace(".", ",")
+                        assert size_comma in formatted_desc or size_dot in formatted_desc, (
+                            f"Розмір шрифту відсутній в описі: {ctx}"
+                        )
+                        assert size_comma in combined_task or size_dot in combined_task, (
+                            f"Розмір шрифту відсутній в умові завдання: {ctx}"
+                        )
+                elif rule.type == GradingRuleType.DOCX_ALIGNMENT:
+                    stems = alignment_stems[resolved_expected.lower()]
+                    assert any(stem in formatted_desc for stem in stems), (
+                        f"Вирівнювання відсутнє в описі: {ctx}"
+                    )
+                    assert any(stem in combined_task for stem in stems), (
+                        f"Вирівнювання відсутнє в умові завдання: {ctx}"
+                    )
+                elif rule.type == GradingRuleType.DOCX_LINE_SPACING:
+                    num = float(resolved_expected.replace(",", "."))
+                    tokens: tuple[str, ...]
+                    if abs(num - 1.0) < 1e-6:
+                        tokens = ("одинарн", "1,0", "1.0")
+                    elif abs(num - 2.0) < 1e-6:
+                        tokens = ("подвійн", "2,0", "2.0")
+                    else:
+                        dot_form = f"{num:g}"
+                        comma_form = dot_form.replace(".", ",")
+                        tokens = (comma_form, dot_form)
+                    assert any(tok in formatted_desc for tok in tokens), (
+                        f"Інтервал відсутній в описі: {ctx}"
+                    )
+                    assert any(tok in combined_task for tok in tokens), (
+                        f"Інтервал відсутній в умові завдання: {ctx}"
+                    )
+                elif rule.type == GradingRuleType.DOCX_PAGE_MARGINS:
+                    raw_numbers = re.findall(r"\d+(?:[.,]\d+)?", resolved_expected)
+                    assert raw_numbers, f"Не знайдено числових значень полів: {ctx}"
+                    for raw_num in raw_numbers:
+                        val = float(raw_num.replace(",", "."))
+                        dot_str = f"{val:g}"
+                        comma_str = dot_str.replace(".", ",")
+                        assert comma_str in formatted_desc or dot_str in formatted_desc, (
+                            f"Значення поля '{comma_str}' відсутнє в описі: {ctx}"
+                        )
+                        assert comma_str in combined_task or dot_str in combined_task, (
+                            f"Значення поля '{comma_str}' відсутнє в умові завдання: {ctx}"
+                        )
+
+                checks_verified += 1
+
+    assert checks_verified >= 285

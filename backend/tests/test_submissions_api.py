@@ -287,7 +287,7 @@ async def test_submit_all_four_practical_formats_via_api(
     ws_exams["A1"] = "Прізвище"
     ws_exams["B1"] = "Алгебра"
     ws_budget = wb.create_sheet("Бюджет")
-    ws_budget["E10"] = "=SUM(E2:E9)"
+    ws_budget["J3"] = "=SUM(B3:H3)"
     wb.save(str(xlsx_file))
     wb.close()
     rewrite_openxml_core_metadata(
@@ -706,7 +706,7 @@ async def test_download_submissions_by_course_teacher_and_admin_with_headers_and
     ws.title = "Іспити"
     ws["A1"] = "Прізвище"
     ws_budget = wb.create_sheet("Бюджет")
-    ws_budget["E10"] = "=SUM(E2:E9)"
+    ws_budget["J3"] = "=SUM(B3:H3)"
     wb.save(str(xlsx_path))
     wb.close()
     xlsx_bytes = xlsx_path.read_bytes()
@@ -1854,7 +1854,7 @@ async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
     assert cross_format_resp.status_code == 422
     assert cross_format_resp.json()["code"] == "INVALID_RULE_TYPE_FOR_FORMAT"
 
-    # 3. Збереження з sync_max_score=False залишає max_score=10.0 і скидає needs_rules_review=False
+    # 3. Збереження з sync_max_score=False залишає max_score=12.0 і скидає needs_rules_review=False
     partial_rules = [
         {
             "id": "m02_font_check",
@@ -1883,7 +1883,9 @@ async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
     )
     assert keep_max_resp.status_code == 200
     keep_max_data = keep_max_resp.json()
-    assert keep_max_data["max_score"] == 10.0
+    assert keep_max_data["max_score"] == 12.0
+    assert keep_max_data["auto_max_score"] == 7.0
+    assert keep_max_data["manual_bonus_max"] == 5.0
     assert keep_max_data["needs_rules_review"] is False
     assert len(keep_max_data["grading_rules"]) == 2
 
@@ -2075,3 +2077,293 @@ async def test_antiplagiarism_api_html_structural_match_and_classroom_template_c
     assert w_r2.status_code == 201
     assert w_r2.json()["is_plagiarism_flagged"] is False
     assert w_r2.json()["plagiarism_reason"] is None
+
+
+async def test_student_module_and_practical_endpoints_return_formatted_grading_criteria(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Інтеграційна перевірка T6.16a: прозорі україномовні критерії без expected/target."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+    headers_s1 = make_auth_headers(student1.id, student1.role)
+    headers_s2 = make_auth_headers(student2.id, student2.role)
+
+    async def _get_module_and_practical_by_order(
+        slug: CourseSlug,
+        order_index: int,
+    ) -> tuple[Module, Practical]:
+        row = (
+            await db_session.execute(
+                select(Module, Practical)
+                .join(Course, Module.course_id == Course.id)
+                .join(Practical, Practical.module_id == Module.id)
+                .where(Course.slug == slug, Module.order_index == order_index)
+            )
+        ).one()
+        mod, prac = row
+        assert isinstance(mod, Module)
+        assert isinstance(prac, Practical)
+        return mod, prac
+
+    def _assert_safe_criteria_list(
+        criteria: list[dict[str, Any]],
+        *,
+        expected_count: int,
+    ) -> None:
+        assert len(criteria) == expected_count
+        total_weight = 0.0
+        for item in criteria:
+            assert set(item.keys()) == {"id", "description", "weight_points"}
+            assert "expected" not in item
+            assert "target" not in item
+            desc = item["description"]
+            assert isinstance(desc, str) and desc.strip() != ""
+            assert "{" not in desc and "}" not in desc
+            for forbidden in ("justify", "center", "left", "right", "docx_", "accdb_"):
+                assert forbidden not in desc.lower()
+            total_weight += float(item["weight_points"])
+        assert total_weight == pytest.approx(10.0)
+
+    # 1. Word M01: студент 1 (Варіант 1 -> Times New Roman) vs студент 2 (Варіант 2 -> Calibri)
+    word_m01, word_m01_prac = await _get_module_and_practical_by_order(
+        CourseSlug.WORD,
+        1,
+    )
+    mod_s1_resp = await async_client.get(
+        f"/api/v1/modules/{word_m01.id}",
+        headers=headers_s1,
+    )
+    assert mod_s1_resp.status_code == 200
+    mod_s1_prac = mod_s1_resp.json()["practical"]
+    assert mod_s1_prac is not None
+    assert mod_s1_prac["needs_rules_review"] is False
+    s1_criteria = mod_s1_prac["grading_criteria"]
+    _assert_safe_criteria_list(s1_criteria, expected_count=4)
+    s1_joined = " | ".join(item["description"] for item in s1_criteria)
+    assert "Times New Roman" in s1_joined
+    assert "по ширині" in s1_joined
+    assert "1,5" in s1_joined
+    assert "2 см" in s1_joined
+
+    mod_s2_resp = await async_client.get(
+        f"/api/v1/modules/{word_m01.id}",
+        headers=headers_s2,
+    )
+    assert mod_s2_resp.status_code == 200
+    s2_criteria = mod_s2_resp.json()["practical"]["grading_criteria"]
+    _assert_safe_criteria_list(s2_criteria, expected_count=4)
+    s2_joined = " | ".join(item["description"] for item in s2_criteria)
+    assert "Calibri" in s2_joined
+    assert "по ширині" in s2_joined
+    assert s1_joined != s2_joined
+
+    # 2. Після проходження тесту GET /api/v1/practicals/{id} повертає ті самі безпечні критерії
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_m01.id)
+    prac_s1_resp = await async_client.get(
+        f"/api/v1/practicals/{word_m01_prac.id}",
+        headers=headers_s1,
+    )
+    assert prac_s1_resp.status_code == 200
+    prac_s1_data = prac_s1_resp.json()
+    assert prac_s1_data["grading_criteria"] == s1_criteria
+
+    # Перевіряємо також, що GradingReport містить підставлений опис без {body_font}
+    docx_file = build_sample_docx(
+        tmp_path / "criteria_check.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+    )
+    submit_resp = await async_client.post(
+        f"/api/v1/practicals/{word_m01_prac.id}/submit",
+        headers=headers_s1,
+        files={
+            "file": (
+                "criteria_check.docx",
+                docx_file.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert submit_resp.status_code == 201
+    report_descs = " | ".join(
+        item["description"] for item in submit_resp.json()["grading_report"]["results"]
+    )
+    assert "Times New Roman" in report_descs
+    assert "по ширині" in report_descs
+    assert "{" not in report_descs
+
+    # 3. Word M02: прапорець needs_rules_review=True та відсутність прихованих правил шрифту
+    word_m02, _ = await _get_module_and_practical_by_order(CourseSlug.WORD, 2)
+    m02_resp = await async_client.get(
+        f"/api/v1/modules/{word_m02.id}",
+        headers=headers_s1,
+    )
+    assert m02_resp.status_code == 200
+    m02_prac_data = m02_resp.json()["practical"]
+    assert m02_prac_data["needs_rules_review"] is True
+    m02_criteria = m02_prac_data["grading_criteria"]
+    _assert_safe_criteria_list(m02_criteria, expected_count=2)
+    m02_joined = " | ".join(item["description"] for item in m02_criteria).lower()
+    assert "шрифт" not in m02_joined
+    assert "2 см" in m02_joined
+    assert "1,5" in m02_joined
+
+    # 4. Access M09: назви таблиць і первинного ключа підставляються індивідуально
+    access_m09, _ = await _get_module_and_practical_by_order(CourseSlug.ACCESS, 9)
+    acc_s1_resp = await async_client.get(
+        f"/api/v1/modules/{access_m09.id}",
+        headers=headers_s1,
+    )
+    acc_s2_resp = await async_client.get(
+        f"/api/v1/modules/{access_m09.id}",
+        headers=headers_s2,
+    )
+    assert acc_s1_resp.status_code == 200
+    assert acc_s2_resp.status_code == 200
+    acc_s1_criteria = acc_s1_resp.json()["practical"]["grading_criteria"]
+    acc_s2_criteria = acc_s2_resp.json()["practical"]["grading_criteria"]
+    _assert_safe_criteria_list(acc_s1_criteria, expected_count=8)
+    _assert_safe_criteria_list(acc_s2_criteria, expected_count=8)
+    acc_s1_text = " | ".join(item["description"] for item in acc_s1_criteria)
+    acc_s2_text = " | ".join(item["description"] for item in acc_s2_criteria)
+    assert acc_s1_text != acc_s2_text
+
+
+async def test_twelve_point_grading_scale_auto_plus_teacher_creative_bonus(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Інтеграційна перевірка T6.16b: 12-бальна шкала (10 б. авто + до 2 б. творче)."""
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    student_headers = make_auth_headers(student1.id, student1.role)
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+
+    _html_course, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+
+    # 1. GET /api/v1/modules/{id} повертає max_score=12.0, auto_max_score=10.0, manual_bonus_max=2.0
+    mod_resp = await async_client.get(
+        f"/api/v1/modules/{html_mod.id}",
+        headers=student_headers,
+    )
+    assert mod_resp.status_code == 200
+    mod_prac = mod_resp.json()["practical"]
+    assert mod_prac is not None
+    assert mod_prac["max_score"] == 12.0
+    assert mod_prac["auto_max_score"] == 10.0
+    assert mod_prac["manual_bonus_max"] == 2.0
+
+    # Перевіряємо також /practicals/{id} (студент) та /practicals/{id}/teacher (викладач)
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=html_mod.id)
+
+    student_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{html_prac.id}",
+        headers=student_headers,
+    )
+    assert student_prac_resp.status_code == 200
+    student_prac_data = student_prac_resp.json()
+    assert student_prac_data["max_score"] == 12.0
+    assert student_prac_data["auto_max_score"] == 10.0
+    assert student_prac_data["manual_bonus_max"] == 2.0
+
+    teacher_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{html_prac.id}/teacher",
+        headers=teacher_headers,
+    )
+    assert teacher_prac_resp.status_code == 200
+    teacher_prac_data = teacher_prac_resp.json()
+    assert teacher_prac_data["max_score"] == 12.0
+    assert teacher_prac_data["auto_max_score"] == 10.0
+    assert teacher_prac_data["manual_bonus_max"] == 2.0
+
+    # 2. Студент виконує всі критерії автоперевірки -> auto_score=10.0, final_score=10.0 з 12.0
+    full_html = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Портфоліо студента</title>
+      </head>
+      <body>
+        <h1>Профіль студента</h1>
+        <h2>Освіта</h2>
+        <p>Вивчаю <strong>вебтехнології</strong> та семантичний HTML5.</p>
+        <h2>Проєкти</h2>
+        <p>Цікавлюся <em>адаптивною версткою</em> та доступністю.</p>
+        <p>Виконую практичні завдання коледжу.</p>
+        <blockquote>Якісна розмітка — основа сучасного вебу.</blockquote>
+      </body>
+    </html>
+    """
+    submit_resp = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=student_headers,
+        json={"raw_code": full_html},
+    )
+    assert submit_resp.status_code == 201
+    sub_data = submit_resp.json()
+    assert sub_data["auto_score"] == 10.0
+    assert sub_data["final_score"] == 10.0
+    assert sub_data["max_score"] == 12.0
+    assert sub_data["auto_max_score"] == 10.0
+    assert sub_data["manual_bonus_max"] == 2.0
+    submission_id = sub_data["id"]
+
+    # 3. Викладач додає teacher_score_adjustment=2.0 -> final_score=12.0
+    bonus_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={
+            "teacher_score_adjustment": 2.0,
+            "teacher_comment": "Чудове творче оформлення сторінки (+2 б.).",
+        },
+    )
+    assert bonus_resp.status_code == 200
+    bonus_data = bonus_resp.json()
+    assert bonus_data["auto_score"] == 10.0
+    assert bonus_data["final_score"] == 12.0
+    assert bonus_data["max_score"] == 12.0
+    assert bonus_data["teacher_comment"] == "Чудове творче оформлення сторінки (+2 б.)."
+
+    # 4. Спроба додати teacher_score_adjustment=5.0 -> 422 SCORE_EXCEEDS_MAX (не вище 12.0)
+    excess_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={"teacher_score_adjustment": 5.0},
+    )
+    assert excess_resp.status_code == 422
+    assert excess_resp.json()["code"] == "SCORE_EXCEEDS_MAX"
+
+    # Переконуємося, що збережений final_score не перевищив 12.0
+    detail_resp = await async_client.get(
+        f"/api/v1/submissions/{submission_id}",
+        headers=teacher_headers,
+    )
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["final_score"] == 12.0
+
+    # 5. Надмірне від'ємне коригування (< 0) -> 422 SCORE_BELOW_ZERO, пряме final_score=11.0 -> 200
+    below_zero_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={"teacher_score_adjustment": -15.0},
+    )
+    assert below_zero_resp.status_code == 422
+    assert below_zero_resp.json()["code"] == "SCORE_BELOW_ZERO"
+
+    direct_score_resp = await async_client.patch(
+        f"/api/v1/submissions/{submission_id}/grade",
+        headers=teacher_headers,
+        json={
+            "final_score": 11.0,
+            "teacher_comment": "Додано +1 б. за творчу частину.",
+        },
+    )
+    assert direct_score_resp.status_code == 200
+    assert direct_score_resp.json()["final_score"] == 11.0

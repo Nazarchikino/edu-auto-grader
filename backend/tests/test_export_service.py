@@ -590,3 +590,109 @@ def test_build_credentials_report_uses_list_number_and_dynamic_variant_note() ->
         "Рядок #4 | Дубль Студент <dup@kpefk.com.ua> | Дублікат електронної пошти."
         in report_text
     )
+
+
+def test_export_group_journal_xlsx_and_pdf_support_12_point_scale() -> None:
+    """Перевіряє коректність build_group_journal, .xlsx та .pdf експорту для 12-бальної шкали."""
+    assert _format_pdf_score(12.0) == "12"
+    assert _format_pdf_score(11.5) == "11.5"
+
+    group = AcademicGroup(
+        id=uuid.uuid4(),
+        code="КН-32",
+        specialty="122 Комп'ютерні науки",
+        course_year=3,
+    )
+    student = User(
+        id=uuid.uuid4(),
+        email="creative.student@kpefk.lcloud.in.ua",
+        password_hash="hash",
+        full_name="Гончаренко Олена Вікторівна",
+        role=UserRole.STUDENT,
+        group_id=group.id,
+        list_number=1,
+    )
+
+    p1_id = uuid.uuid4()
+    p2_id = uuid.uuid4()
+    practicals = [
+        PracticalColumnInfo(
+            practical_id=p1_id,
+            practical_title="Форматування текстового документа",
+            course_slug=CourseSlug.WORD,
+            course_title="Microsoft Word",
+            module_order_index=1,
+            max_score=12.0,
+        ),
+        PracticalColumnInfo(
+            practical_id=p2_id,
+            practical_title="Формули та діаграми",
+            course_slug=CourseSlug.EXCEL,
+            course_title="Microsoft Excel",
+            module_order_index=2,
+            max_score=12.0,
+        ),
+    ]
+
+    now_utc = datetime(2026, 11, 25, 15, 0, tzinfo=UTC)
+    sub1 = Submission(
+        id=uuid.uuid4(),
+        practical_id=p1_id,
+        student_id=student.id,
+        variant_index=0,
+        auto_score=Decimal("10.00"),
+        final_score=Decimal("12.00"),
+        grading_report=_make_grading_report_dict(rule_id="r_word_1", passed=True),
+        extracted_metadata={},
+        is_plagiarism_flagged=False,
+        plagiarism_reason=None,
+        submitted_at=now_utc,
+    )
+    sub2 = Submission(
+        id=uuid.uuid4(),
+        practical_id=p2_id,
+        student_id=student.id,
+        variant_index=0,
+        auto_score=Decimal("9.50"),
+        final_score=Decimal("11.50"),
+        grading_report=_make_grading_report_dict(rule_id="r_excel_1", passed=True),
+        extracted_metadata={},
+        is_plagiarism_flagged=False,
+        plagiarism_reason=None,
+        submitted_at=now_utc + timedelta(minutes=5),
+    )
+
+    journal = build_group_journal(
+        group=group,
+        students=[student],
+        practicals=practicals,
+        submissions=[sub1, sub2],
+    )
+    assert [item.max_score for item in journal.practicals] == [12.0, 12.0]
+    assert len(journal.rows) == 1
+    assert journal.rows[0].total_score == 23.5
+    assert journal.rows[0].cells[0].auto_score == 10.0
+    assert journal.rows[0].cells[0].final_score == 12.0
+    assert journal.rows[0].cells[1].auto_score == 9.5
+    assert journal.rows[0].cells[1].final_score == 11.5
+
+    # Перевірка .xlsx експорту
+    xlsx_bytes = render_group_journal_xlsx(journal, practicals)
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=False)
+    try:
+        sheet = wb["Відомість успішності"]
+        assert isinstance(sheet, Worksheet)
+        subtitle_val = str(sheet.cell(row=2, column=1).value)
+        assert "Макс. сума: 24.00 б." in subtitle_val
+        assert "(макс. 12.00)" in str(sheet.cell(row=4, column=3).value)
+        assert "(макс. 12.00)" in str(sheet.cell(row=4, column=4).value)
+        assert sheet.cell(row=5, column=3).value == 12.0
+        assert sheet.cell(row=5, column=4).value == 11.5
+        assert sheet.cell(row=5, column=5).value == 23.5
+    finally:
+        wb.close()
+
+    # Перевірка .pdf експорту
+    pdf_bytes = render_group_journal_pdf(journal, practicals)
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert _count_pdf_pages(pdf_bytes) >= 1

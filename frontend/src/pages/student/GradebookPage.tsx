@@ -116,6 +116,41 @@ async function fetchCourses(): Promise<CourseRead[]> {
   return response.data;
 }
 
+function formatCompactScore(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  return Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(1);
+}
+
+function getScoreBadgeClasses(score: number, maxScore: number): string {
+  const ratioPercent = maxScore > 0 ? (score / maxScore) * 100 : 0;
+  if (ratioPercent >= 80) {
+    return "bg-emerald-600 text-white";
+  }
+  if (ratioPercent >= 60) {
+    return "bg-blue-600 text-white";
+  }
+  if (ratioPercent >= 40) {
+    return "bg-amber-600 text-white";
+  }
+  return "bg-rose-600 text-white";
+}
+
+function getSoftScoreBadgeClasses(score: number, maxScore: number): string {
+  const ratioPercent = maxScore > 0 ? (score / maxScore) * 100 : 0;
+  if (ratioPercent >= 80) {
+    return "bg-emerald-50 text-emerald-800 border border-emerald-200";
+  }
+  if (ratioPercent >= 60) {
+    return "bg-blue-50 text-blue-800 border border-blue-200";
+  }
+  if (ratioPercent >= 40) {
+    return "bg-amber-50 text-amber-800 border border-amber-200";
+  }
+  return "bg-rose-50 text-rose-800 border border-rose-200";
+}
+
 function formatShortDateTime(isoString: string): string {
   const parsed = new Date(isoString);
   if (Number.isNaN(parsed.getTime())) {
@@ -524,6 +559,22 @@ export function GradebookPage(): ReactElement {
             <p className="mt-1 text-xs font-medium text-blue-700">
               Середня результативність: {gradebookStats.averageScorePercent}%
             </p>
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ${
+                  gradebookStats.averageScorePercent >= 80
+                    ? "bg-emerald-500"
+                    : gradebookStats.averageScorePercent >= 60
+                      ? "bg-blue-600"
+                      : gradebookStats.averageScorePercent >= 40
+                        ? "bg-amber-500"
+                        : "bg-rose-500"
+                }`}
+                style={{
+                  width: `${Math.min(100, Math.max(0, gradebookStats.averageScorePercent))}%`,
+                }}
+              />
+            </div>
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
@@ -764,9 +815,14 @@ export function GradebookPage(): ReactElement {
                             {attemptMeta.isLatestAttempt ? " • акт." : ""}
                           </span>
                         )}
-                        <span className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2 py-0.5 font-mono text-xs font-bold text-white">
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 font-mono text-xs font-bold ${getScoreBadgeClasses(
+                            item.final_score,
+                            item.max_score
+                          )}`}
+                        >
                           {item.final_score.toFixed(1)}/
-                          {item.max_score.toFixed(0)}
+                          {formatCompactScore(item.max_score)}
                         </span>
                       </div>
                     </div>
@@ -973,9 +1029,18 @@ export function GradebookPage(): ReactElement {
                           )}
 
                           {mod.practical_score !== null ? (
-                            <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 font-mono text-[11px] font-bold text-blue-800">
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-[11px] font-bold ${getSoftScoreBadgeClasses(
+                                mod.practical_score,
+                                mod.practical_max_score ?? 12
+                              )}`}
+                            >
                               <Award className="h-3 w-3" />
-                              {mod.practical_score.toFixed(1)} б.
+                              {mod.practical_score.toFixed(1)}
+                              {mod.practical_max_score !== null
+                                ? ` / ${formatCompactScore(mod.practical_max_score)}`
+                                : ""}{" "}
+                              б.
                             </span>
                           ) : mod.quiz_passed ? (
                             <span className="inline-flex items-center gap-1 rounded-md bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">

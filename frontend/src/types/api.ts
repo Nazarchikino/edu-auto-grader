@@ -2,6 +2,7 @@ import type { CourseSlug } from "./course";
 import type { ExtractedMetadata, GradingReport } from "./grading";
 
 export {
+  type GradingCriterionPreviewRead,
   type PracticalStudentRead,
   type PracticalSummaryRead,
   type PracticalTeacherRead,
@@ -156,7 +157,8 @@ export interface HtmlSubmissionRequest {
 }
 
 export interface ManualGradeUpdateRequest {
-  final_score: number;
+  final_score?: number | null;
+  teacher_score_adjustment?: number | null;
   teacher_comment?: string | null;
 }
 
@@ -178,6 +180,8 @@ export interface SubmissionRead {
   auto_score: number;
   final_score: number;
   max_score: number;
+  auto_max_score: number;
+  manual_bonus_max: number;
   grading_report: GradingReport;
   teacher_comment: string | null;
   submitted_at: string;

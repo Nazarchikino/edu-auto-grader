@@ -239,8 +239,8 @@ class Practical(Base):
     )
     max_score: Mapped[Decimal] = mapped_column(
         Numeric(5, 2),
-        default=Decimal("10.00"),
-        server_default=text("10.00"),
+        default=Decimal("12.00"),
+        server_default=text("12.00"),
         nullable=False,
     )
     variants: Mapped[list[dict[str, object]]] = mapped_column(

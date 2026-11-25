@@ -33,7 +33,9 @@ import {
   FileText,
   HardDriveUpload,
   HelpCircle,
+  Info,
   KeyRound,
+  ListChecks,
   Loader2,
   Lock,
   RefreshCw,
@@ -268,7 +270,75 @@ const PARAMETER_DISPLAY_LABELS: Record<string, string> = {
   task_titles: "Перелік завдань",
   sheets_count: "Кількість аркушів",
   images: "Ілюстрації-зразки",
+  body_font: "Шрифт основного тексту",
+  body_size: "Розмір шрифту (пт)",
+  body_alignment: "Вирівнювання тексту",
+  line_spacing: "Міжрядковий інтервал",
+  margins: "Поля сторінки",
+  min_tables: "Таблиці в документі",
+  table_1: "Головна таблиця",
+  table_2: "Друга таблиця",
+  table_3: "Третя таблиця",
+  pk_target: "Ключове поле",
+  theme: "Тема",
+  required_heading: "Заголовок сторінки",
+  min_items: "Мінімум елементів",
 };
+
+const ALIGNMENT_DISPLAY_LABELS: Record<string, string> = {
+  justify: "по ширині",
+  both: "по ширині",
+  center: "по центру",
+  left: "по лівому краю",
+  right: "по правому краю",
+  distribute: "рівномірно за шириною",
+};
+
+const MARGIN_SIDE_DISPLAY_LABELS: Record<string, string> = {
+  left: "ліве",
+  right: "праве",
+  top: "верхнє",
+  bottom: "нижнє",
+};
+
+function formatPointsValue(points: number): string {
+  const rounded = Math.round(points * 100) / 100;
+  return Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(2).replace(/0$/, "");
+}
+
+function formatMarginsChipDisplay(raw: string): string {
+  const cleaned = raw.trim();
+  if (cleaned.includes("=")) {
+    const parts = cleaned
+      .split(/[,;]/)
+      .map((chunk) => chunk.trim())
+      .filter((chunk) => chunk.includes("="))
+      .map((chunk) => {
+        const [sideRaw, valRaw] = chunk.split("=", 2);
+        const sideKey = (sideRaw ?? "").trim().toLowerCase();
+        const sideLabel = MARGIN_SIDE_DISPLAY_LABELS[sideKey] ?? sideKey;
+        const valueFormatted = (valRaw ?? "")
+          .trim()
+          .replace(/cm$/i, " см")
+          .replace(/mm$/i, " мм")
+          .replace(".", ",");
+        return `${sideLabel} — ${valueFormatted}`;
+      });
+    if (parts.length > 0) {
+      return parts.join(", ");
+    }
+  }
+  const singleMatch = /^(\d+(?:[.,]\d+)?)\s*(cm|mm)$/i.exec(cleaned);
+  if (singleMatch !== null) {
+    const numPart = (singleMatch[1] ?? "").replace(".", ",");
+    const unitPart =
+      (singleMatch[2] ?? "").toLowerCase() === "cm" ? "см" : "мм";
+    return `по ${numPart} ${unitPart}`;
+  }
+  return cleaned;
+}
 
 interface AccessFieldDescriptor {
   name: string;
@@ -454,6 +524,27 @@ function formatInlineChipDisplay(paramKey: string, value: unknown): string {
         .join(", ");
     }
     return value.map((item) => formatScalarValue(item)).join(", ");
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const lowered = trimmed.toLowerCase();
+    if (paramKey === "body_alignment" && lowered in ALIGNMENT_DISPLAY_LABELS) {
+      return ALIGNMENT_DISPLAY_LABELS[lowered] ?? trimmed;
+    }
+    if (paramKey === "margins") {
+      return formatMarginsChipDisplay(trimmed);
+    }
+    if (paramKey === "line_spacing") {
+      return trimmed.replace(".", ",");
+    }
+    if (paramKey === "min_tables") {
+      if (trimmed === ">=0") {
+        return "не обов'язково";
+      }
+      if (trimmed === ">=1") {
+        return "не менше 1";
+      }
+    }
   }
   return formatScalarValue(value);
 }
@@ -1981,6 +2072,101 @@ export function ModuleViewPage(): ReactElement {
                     />
                   </div>
 
+                  {/* Картка прозорих україномовних критеріїв автоперевірки */}
+                  {(() => {
+                    const studentCriteria =
+                      practicalDetail.grading_criteria.length > 0
+                        ? practicalDetail.grading_criteria
+                        : module.practical.grading_criteria;
+
+                    if (studentCriteria.length === 0) {
+                      return null;
+                    }
+
+                    const autoMaxScore = practicalDetail.auto_max_score;
+                    const manualBonusMax = practicalDetail.manual_bonus_max;
+                    const maxScoreValue = practicalDetail.max_score;
+
+                    return (
+                      <div
+                        className="rounded-2xl border border-emerald-200/90 bg-emerald-50/40 p-5 shadow-xs"
+                        aria-label="Критерії автоперевірки"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-200/70 pb-3.5">
+                          <div className="flex items-center gap-2.5">
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700">
+                              <ListChecks className="h-5 w-5" />
+                            </div>
+                            <div>
+                              <h3 className="text-sm font-bold text-slate-900 sm:text-base">
+                                Критерії автоперевірки
+                              </h3>
+                              <p className="text-xs text-slate-600">
+                                Перелік вимог, за якими система автоматично
+                                нарахує бали для вашого варіанта
+                              </p>
+                            </div>
+                          </div>
+
+                          <span className="inline-flex items-center rounded-full border border-emerald-300 bg-white px-3 py-1 text-xs font-bold text-emerald-800 shadow-2xs">
+                            {manualBonusMax > 0
+                              ? `Максимум: ${formatPointsValue(maxScoreValue)} б. (до ${formatPointsValue(autoMaxScore)} б. автоперевірка + до ${formatPointsValue(manualBonusMax)} б. творче завдання)`
+                              : `Максимум: ${formatPointsValue(maxScoreValue)} б.`}
+                          </span>
+                        </div>
+
+                        <ol className="mt-4 space-y-2">
+                          {studentCriteria.map((criterion, index) => (
+                            <li
+                              key={criterion.id}
+                              className="flex flex-col justify-between gap-2 rounded-xl border border-emerald-100 bg-white px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:text-sm"
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[11px] font-bold text-emerald-800">
+                                  {index + 1}
+                                </span>
+                                <span className="leading-relaxed text-slate-800">
+                                  {criterion.description}
+                                </span>
+                              </div>
+                              <span className="inline-flex shrink-0 items-center self-start rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 font-mono text-xs font-bold text-emerald-800 sm:self-center">
+                                +{formatPointsValue(criterion.weight_points)} б.
+                              </span>
+                            </li>
+                          ))}
+
+                          {manualBonusMax > 0 && (
+                            <li className="flex flex-col justify-between gap-2 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:text-sm">
+                              <div className="flex items-start gap-2.5">
+                                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700">
+                                  <Sparkles className="h-3 w-3" />
+                                </span>
+                                <span className="font-semibold leading-relaxed text-indigo-950">
+                                  Творче завдання / додаткове оформлення
+                                  (перевіряє викладач вручну)
+                                </span>
+                              </div>
+                              <span className="inline-flex shrink-0 items-center self-start rounded-lg border border-indigo-200 bg-white px-2.5 py-0.5 font-mono text-xs font-bold text-indigo-800 sm:self-center">
+                                +{formatPointsValue(manualBonusMax)} б.
+                              </span>
+                            </li>
+                          )}
+                        </ol>
+
+                        {practicalDetail.needs_rules_review && (
+                          <div className="mt-3.5 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/90 px-3.5 py-2.5 text-xs text-amber-900">
+                            <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                            <span>
+                              Візуальне оформлення, формули або творчу частину
+                              цієї практичної роботи додатково може оцінити
+                              викладач.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   {/* Повідомлення про помилку здачі роботи */}
                   {submissionError !== null && (
                     <div
@@ -2233,6 +2419,33 @@ export function ModuleViewPage(): ReactElement {
                           <ArrowRight className="h-3.5 w-3.5" />
                         </Link>
                       </div>
+
+                      {lastSubmissionResult.manual_bonus_max > 0 &&
+                        lastSubmissionResult.auto_max_score > 0 &&
+                        lastSubmissionResult.auto_score >=
+                          lastSubmissionResult.auto_max_score - 0.005 && (
+                          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/80 p-3.5 text-xs text-indigo-950">
+                            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+                            <p className="leading-relaxed">
+                              Усі критерії автоперевірки виконано (
+                              <span className="font-bold">
+                                {formatPointsValue(
+                                  lastSubmissionResult.auto_score
+                                )}{" "}
+                                з{" "}
+                                {formatPointsValue(
+                                  lastSubmissionResult.max_score
+                                )}{" "}
+                                б.
+                              </span>
+                              ). Додаткові бали за творче завдання (до +
+                              {formatPointsValue(
+                                lastSubmissionResult.manual_bonus_max
+                              )}{" "}
+                              б.) виставляє викладач після перегляду роботи.
+                            </p>
+                          </div>
+                        )}
 
                       {lastSubmissionResult.is_plagiarism_flagged &&
                         lastSubmissionResult.plagiarism_reason !== null && (

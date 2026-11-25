@@ -343,6 +343,13 @@ function renderFormatIcon(format: PracticalFormat): ReactElement {
   }
 }
 
+function formatPointsCompact(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  return Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(2).replace(/0$/, "");
+}
+
 export function RuleBuilderPage(): ReactElement {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -352,7 +359,7 @@ export function RuleBuilderPage(): ReactElement {
     queryPracticalId
   );
   const [rulesDraft, setRulesDraft] = useState<GradingRule[]>([]);
-  const [syncMaxScore, setSyncMaxScore] = useState<boolean>(true);
+  const [syncMaxScore, setSyncMaxScore] = useState<boolean>(false);
   const [showJsonInspector, setShowJsonInspector] = useState<boolean>(false);
   const [rawJsonInput, setRawJsonInput] = useState<string>("");
   const [feedbackBanner, setFeedbackBanner] = useState<{
@@ -421,7 +428,7 @@ export function RuleBuilderPage(): ReactElement {
   const handleSelectPractical = (practicalId: string): void => {
     setSelectedPracticalId(practicalId);
     setSearchParams({ practicalId });
-    setSyncMaxScore(true);
+    setSyncMaxScore(false);
     setFeedbackBanner(null);
   };
 
@@ -442,6 +449,13 @@ export function RuleBuilderPage(): ReactElement {
     }
     setRulesDraft(practicalDetail.grading_rules);
     setRawJsonInput(JSON.stringify(practicalDetail.grading_rules, null, 2));
+    const loadedRulesSum = Number(
+      practicalDetail.grading_rules
+        .reduce((acc, item) => acc + (Number(item.points) || 0), 0)
+        .toFixed(2)
+    );
+    const hasManualReserve = practicalDetail.max_score - loadedRulesSum > 0.005;
+    setSyncMaxScore(!hasManualReserve);
   }, [practicalDetail]);
 
   useEffect(() => {
@@ -476,8 +490,13 @@ export function RuleBuilderPage(): ReactElement {
     );
   }, [rulesDraft]);
 
-  const maxScore = practicalDetail?.max_score ?? 10;
+  const maxScore = practicalDetail?.max_score ?? 12;
   const isPointsBalanced = Math.abs(totalDraftPoints - maxScore) < 0.01;
+  const isOverMaxScore = totalDraftPoints > maxScore + 0.005;
+  const manualBonusReserve = Math.max(
+    0,
+    Number((maxScore - totalDraftPoints).toFixed(2))
+  );
 
   // Мутація збереження правил перевірки PUT /practicals/{id}/rules
   const saveRulesMutation = useMutation<
@@ -1024,14 +1043,20 @@ export function RuleBuilderPage(): ReactElement {
               <div className="flex flex-wrap items-center gap-3">
                 <div
                   className={`flex items-center gap-3 rounded-2xl border px-4 py-3 ${
-                    isPointsBalanced
-                      ? "border-emerald-200 bg-emerald-50/70 text-emerald-950"
-                      : "border-amber-300 bg-amber-50/80 text-amber-950"
+                    isOverMaxScore
+                      ? "border-amber-300 bg-amber-50/80 text-amber-950"
+                      : isPointsBalanced
+                        ? "border-emerald-200 bg-emerald-50/70 text-emerald-950"
+                        : "border-indigo-200 bg-indigo-50/70 text-indigo-950"
                   }`}
                 >
                   <Scale
                     className={`h-5 w-5 shrink-0 ${
-                      isPointsBalanced ? "text-emerald-600" : "text-amber-600"
+                      isOverMaxScore
+                        ? "text-amber-600"
+                        : isPointsBalanced
+                          ? "text-emerald-600"
+                          : "text-indigo-600"
                     }`}
                   />
                   <div>
@@ -1041,10 +1066,16 @@ export function RuleBuilderPage(): ReactElement {
                     <p className="font-mono text-base font-extrabold">
                       {totalDraftPoints.toFixed(1)} / {maxScore.toFixed(1)} б.
                     </p>
+                    {manualBonusReserve > 0 && !isOverMaxScore && (
+                      <p className="mt-0.5 text-[11px] font-medium text-indigo-800">
+                        Резерв для ручної оцінки викладача (творче завдання): +
+                        {formatPointsCompact(manualBonusReserve)} б.
+                      </p>
+                    )}
                   </div>
                 </div>
 
-                {!isPointsBalanced && totalDraftPoints > 0 && (
+                {isOverMaxScore && totalDraftPoints > 0 && (
                   <button
                     type="button"
                     disabled={syncMaxScoreMutation.isPending}
@@ -1392,8 +1423,16 @@ export function RuleBuilderPage(): ReactElement {
                   {totalDraftPoints.toFixed(1)} б.
                 </span>
                 {!syncMaxScore && (
-                  <span className="ml-1.5 text-amber-700">
-                    (макс. бал залишиться {maxScore.toFixed(1)} б.)
+                  <span className="ml-1.5 font-medium text-indigo-700">
+                    • Резерв для ручної оцінки викладача (творче завдання): +
+                    {formatPointsCompact(manualBonusReserve)} б. (макс. бал
+                    залишиться {maxScore.toFixed(1)} б.)
+                  </span>
+                )}
+                {syncMaxScore && manualBonusReserve > 0 && (
+                  <span className="ml-1.5 font-medium text-amber-700">
+                    (увага: max_score зменшиться з {maxScore.toFixed(1)} до{" "}
+                    {totalDraftPoints.toFixed(1)} б.)
                   </span>
                 )}
               </div>

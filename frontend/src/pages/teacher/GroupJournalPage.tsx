@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactElement,
@@ -27,6 +28,7 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   TableProperties,
   Users,
   X,
@@ -57,7 +59,48 @@ interface PracticalColumnMeta {
   moduleOrderIndex: number;
   moduleTitle: string;
   formatType: PracticalFormat | null;
+  maxScore: number;
   needsRulesReview: boolean;
+}
+
+function formatCompactPoints(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  return Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(2).replace(/0$/, "");
+}
+
+function getJournalCellScoreClasses(
+  score: number,
+  maxScore: number
+): { scoreTextClass: string; cellAccentClass: string } {
+  const ratioPercent = maxScore > 0 ? (score / maxScore) * 100 : 0;
+  if (ratioPercent >= 80) {
+    return {
+      scoreTextClass: "text-emerald-700",
+      cellAccentClass:
+        "border-emerald-200 bg-emerald-50/40 hover:border-emerald-300 hover:bg-emerald-50/80",
+    };
+  }
+  if (ratioPercent >= 60) {
+    return {
+      scoreTextClass: "text-blue-700",
+      cellAccentClass:
+        "border-blue-200 bg-blue-50/30 hover:border-blue-300 hover:bg-blue-50/70",
+    };
+  }
+  if (ratioPercent >= 40) {
+    return {
+      scoreTextClass: "text-amber-700",
+      cellAccentClass:
+        "border-amber-200 bg-amber-50/40 hover:border-amber-300 hover:bg-amber-50/80",
+    };
+  }
+  return {
+    scoreTextClass: "text-rose-700",
+    cellAccentClass:
+      "border-rose-200 bg-rose-50/30 hover:border-rose-300 hover:bg-rose-50/70",
+  };
 }
 
 const COURSE_SLUG_BADGES: Record<
@@ -237,7 +280,11 @@ export function GroupJournalPage(): ReactElement {
 
   // Стан форми ручного коригування бала та коментаря
   const [manualScoreInput, setManualScoreInput] = useState<string>("");
+  const [pendingScoreAdjustment, setPendingScoreAdjustment] = useState<
+    number | null
+  >(null);
   const [teacherCommentInput, setTeacherCommentInput] = useState<string>("");
+  const teacherCommentInputRef = useRef<HTMLInputElement | null>(null);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(
     null
   );
@@ -313,10 +360,12 @@ export function GroupJournalPage(): ReactElement {
   useEffect(() => {
     if (activeSubmission === undefined) {
       setManualScoreInput("");
+      setPendingScoreAdjustment(null);
       setTeacherCommentInput("");
       return;
     }
     setManualScoreInput(activeSubmission.final_score.toFixed(1));
+    setPendingScoreAdjustment(null);
     setTeacherCommentInput(activeSubmission.teacher_comment ?? "");
   }, [activeSubmission]);
 
@@ -339,6 +388,7 @@ export function GroupJournalPage(): ReactElement {
             moduleOrderIndex: mod.order_index,
             moduleTitle: mod.title,
             formatType: mod.practical_format,
+            maxScore: mod.practical_max_score ?? 12,
             needsRulesReview: mod.practical_needs_rules_review,
           };
         }
@@ -349,6 +399,7 @@ export function GroupJournalPage(): ReactElement {
       if (existing !== undefined) {
         map[prac.practical_id] = {
           ...existing,
+          maxScore: prac.max_score,
           needsRulesReview: prac.needs_rules_review,
         };
       } else {
@@ -360,6 +411,7 @@ export function GroupJournalPage(): ReactElement {
           moduleOrderIndex: prac.module_order_index,
           moduleTitle: prac.title,
           formatType: null,
+          maxScore: prac.max_score,
           needsRulesReview: prac.needs_rules_review,
         };
       }
@@ -483,6 +535,22 @@ export function GroupJournalPage(): ReactElement {
     },
   });
 
+  const handleApplyCreativeBonus = (bonusPoints: number): void => {
+    if (activeSubmission === undefined) {
+      return;
+    }
+    const clampedScore = Math.min(
+      activeSubmission.max_score,
+      Number((activeSubmission.auto_score + bonusPoints).toFixed(2))
+    );
+    const effectiveAdjustment = Number(
+      (clampedScore - activeSubmission.auto_score).toFixed(2)
+    );
+    setManualScoreInput(clampedScore.toFixed(1));
+    setPendingScoreAdjustment(effectiveAdjustment);
+    teacherCommentInputRef.current?.focus();
+  };
+
   const handleSaveManualGrade = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (activeSubmission === undefined) {
@@ -501,15 +569,28 @@ export function GroupJournalPage(): ReactElement {
       return;
     }
 
+    const normalizedComment =
+      teacherCommentInput.trim().length > 0
+        ? teacherCommentInput.trim()
+        : null;
+
+    const useRelativeAdjustment =
+      pendingScoreAdjustment !== null &&
+      Math.abs(
+        activeSubmission.auto_score + pendingScoreAdjustment - parsedScore
+      ) < 0.01;
+
     updateGradeMutation.mutate({
       submissionId: activeSubmission.id,
-      payload: {
-        final_score: parsedScore,
-        teacher_comment:
-          teacherCommentInput.trim().length > 0
-            ? teacherCommentInput.trim()
-            : null,
-      },
+      payload: useRelativeAdjustment
+        ? {
+            teacher_score_adjustment: pendingScoreAdjustment,
+            teacher_comment: normalizedComment,
+          }
+        : {
+            final_score: parsedScore,
+            teacher_comment: normalizedComment,
+          },
     });
   };
 
@@ -976,12 +1057,19 @@ export function GroupJournalPage(): ReactElement {
                                 ПР №{idx + 1}
                               </span>
                             )}
-                            {meta?.formatType !== null &&
-                              meta?.formatType !== undefined && (
-                                <span className="font-mono text-[10px] lowercase text-slate-400">
-                                  .{meta.formatType}
+                            <div className="flex items-center gap-1.5">
+                              {meta !== undefined && (
+                                <span className="font-mono text-[10px] font-semibold normal-case text-slate-500">
+                                  /{formatCompactPoints(meta.maxScore)} б.
                                 </span>
                               )}
+                              {meta?.formatType !== null &&
+                                meta?.formatType !== undefined && (
+                                  <span className="font-mono text-[10px] lowercase text-slate-400">
+                                    .{meta.formatType}
+                                  </span>
+                                )}
+                            </div>
                           </div>
                           <p className="mt-1 line-clamp-1 font-bold normal-case text-slate-800">
                             {meta?.moduleTitle ?? `Практична №${idx + 1}`}
@@ -1063,11 +1151,25 @@ export function GroupJournalPage(): ReactElement {
                             const isSelectedCell =
                               cell.submission_id !== null &&
                               cell.submission_id === selectedSubmissionId;
+                            const cellMaxScore =
+                              practicalMetaMap[cell.practical_id]?.maxScore ??
+                              12;
                             const isManuallyAdjusted =
                               cell.final_score !== null &&
                               cell.auto_score !== null &&
                               Math.abs(cell.final_score - cell.auto_score) >=
                                 0.01;
+                            const isCreativeBonusAdded =
+                              cell.final_score !== null &&
+                              cell.auto_score !== null &&
+                              cell.final_score - cell.auto_score >= 0.01;
+                            const scoreTone =
+                              cell.final_score !== null
+                                ? getJournalCellScoreClasses(
+                                    cell.final_score,
+                                    cellMaxScore
+                                  )
+                                : null;
 
                             return (
                               <td
@@ -1095,14 +1197,22 @@ export function GroupJournalPage(): ReactElement {
                                         ? "border-blue-600 bg-blue-50/70 ring-1 ring-blue-600"
                                         : cell.is_plagiarism_flagged
                                           ? "border-rose-300 bg-rose-50/70 hover:border-rose-400"
-                                          : "border-slate-200 bg-white hover:border-blue-300 hover:bg-slate-50"
+                                          : (scoreTone?.cellAccentClass ??
+                                            "border-slate-200 bg-white hover:border-blue-300 hover:bg-slate-50")
                                     }`}
                                   >
                                     <div className="flex items-center justify-between gap-1.5">
-                                      <span className="font-mono text-sm font-extrabold text-slate-900">
+                                      <span
+                                        className={`font-mono text-sm font-extrabold ${
+                                          cell.is_plagiarism_flagged
+                                            ? "text-rose-800"
+                                            : (scoreTone?.scoreTextClass ??
+                                              "text-slate-900")
+                                        }`}
+                                      >
                                         {cell.final_score?.toFixed(1) ?? "0.0"}{" "}
                                         <span className="text-[10px] font-normal text-slate-500">
-                                          б.
+                                          / {formatCompactPoints(cellMaxScore)}
                                         </span>
                                       </span>
                                       <PlagiarismBadge
@@ -1113,7 +1223,17 @@ export function GroupJournalPage(): ReactElement {
                                     </div>
 
                                     <div className="mt-1 flex items-center justify-between text-[10px] text-slate-500">
-                                      {isManuallyAdjusted ? (
+                                      {isCreativeBonusAdded &&
+                                      cell.final_score !== null &&
+                                      cell.auto_score !== null ? (
+                                        <span className="font-semibold text-indigo-700">
+                                          +
+                                          {formatCompactPoints(
+                                            cell.final_score - cell.auto_score
+                                          )}{" "}
+                                          творч.
+                                        </span>
+                                      ) : isManuallyAdjusted ? (
                                         <span className="font-semibold text-amber-700">
                                           Авто: {cell.auto_score?.toFixed(1)}
                                         </span>
@@ -1304,28 +1424,97 @@ export function GroupJournalPage(): ReactElement {
                     onSubmit={handleSaveManualGrade}
                     className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 sm:p-5 space-y-4"
                   >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-1">
                         <h4 className="text-sm font-bold text-slate-900">
                           Ручне коригування бала та рецензія викладача
                         </h4>
-                        <p className="text-xs text-slate-500">
-                          Автоматичний бал парсера:{" "}
-                          <span className="font-mono font-bold text-slate-800">
-                            {activeSubmission.auto_score.toFixed(1)} /{" "}
-                            {activeSubmission.max_score.toFixed(1)} б.
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                          <span>
+                            Автооцінка:{" "}
+                            <span className="font-mono font-bold text-slate-900">
+                              {activeSubmission.auto_score.toFixed(1)} /{" "}
+                              {activeSubmission.auto_max_score.toFixed(1)} б.
+                            </span>
                           </span>
-                        </p>
+                          <span>
+                            Підсумковий бал:{" "}
+                            <span className="font-mono font-bold text-blue-700">
+                              {activeSubmission.final_score.toFixed(1)} /{" "}
+                              {activeSubmission.max_score.toFixed(1)} б.
+                            </span>
+                          </span>
+                          {activeSubmission.manual_bonus_max > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-800">
+                              <Sparkles className="h-3 w-3" />
+                              Творче завдання: до +
+                              {formatCompactPoints(
+                                activeSubmission.manual_bonus_max
+                              )}{" "}
+                              б.
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
+                        {activeSubmission.max_score >
+                          activeSubmission.auto_score && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleApplyCreativeBonus(1)}
+                              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-bold transition-colors ${
+                                pendingScoreAdjustment !== null &&
+                                Math.abs(
+                                  activeSubmission.auto_score +
+                                    pendingScoreAdjustment -
+                                    Math.min(
+                                      activeSubmission.max_score,
+                                      activeSubmission.auto_score + 1
+                                    )
+                                ) < 0.01
+                                  ? "border-indigo-500 bg-indigo-600 text-white"
+                                  : "border-indigo-300 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                              }`}
+                              title="Додати +1 б. за творче завдання (не вище максимального бала)"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              <span>+1 б. за творче</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleApplyCreativeBonus(2)}
+                              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-bold transition-colors ${
+                                pendingScoreAdjustment !== null &&
+                                Math.abs(
+                                  activeSubmission.auto_score +
+                                    pendingScoreAdjustment -
+                                    Math.min(
+                                      activeSubmission.max_score,
+                                      activeSubmission.auto_score + 2
+                                    )
+                                ) < 0.01
+                                  ? "border-indigo-500 bg-indigo-600 text-white"
+                                  : "border-indigo-300 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                              }`}
+                              title="Додати +2 б. за творче завдання (не вище максимального бала)"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              <span>+2 б. за творче</span>
+                            </button>
+                          </>
+                        )}
+
                         <button
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
                             setManualScoreInput(
                               activeSubmission.auto_score.toFixed(1)
-                            )
-                          }
+                            );
+                            setPendingScoreAdjustment(0);
+                          }}
                           className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                         >
                           <RotateCcw className="h-3 w-3" />
@@ -1337,6 +1526,7 @@ export function GroupJournalPage(): ReactElement {
                             type="button"
                             onClick={() => {
                               setManualScoreInput("0.0");
+                              setPendingScoreAdjustment(null);
                               if (teacherCommentInput.trim().length === 0) {
                                 setTeacherCommentInput(
                                   "Роботу анульовано (0 балів) через виявлений збіг SHA-256 / метаданих docProps/core.xml."
@@ -1351,6 +1541,26 @@ export function GroupJournalPage(): ReactElement {
                         )}
                       </div>
                     </div>
+
+                    {pendingScoreAdjustment !== null &&
+                      pendingScoreAdjustment > 0 && (
+                        <div className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50/70 px-3 py-2 text-xs text-indigo-900">
+                          <Sparkles className="h-3.5 w-3.5 shrink-0 text-indigo-600" />
+                          <span>
+                            Підставлено коригування{" "}
+                            <strong className="font-mono">
+                              +{formatCompactPoints(pendingScoreAdjustment)} б.
+                            </strong>{" "}
+                            до автооцінки (підсумковий бал:{" "}
+                            <strong className="font-mono">
+                              {manualScoreInput} /{" "}
+                              {activeSubmission.max_score.toFixed(1)} б.
+                            </strong>
+                            ). Додайте коментар і натисніть «Зберегти
+                            скориговану оцінку».
+                          </span>
+                        </div>
+                      )}
 
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
                       <div>
@@ -1369,7 +1579,10 @@ export function GroupJournalPage(): ReactElement {
                           max={activeSubmission.max_score}
                           required
                           value={manualScoreInput}
-                          onChange={(e) => setManualScoreInput(e.target.value)}
+                          onChange={(e) => {
+                            setManualScoreInput(e.target.value);
+                            setPendingScoreAdjustment(null);
+                          }}
                           className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 font-mono text-sm font-bold text-slate-900 focus:border-blue-500 focus:outline-none"
                         />
                       </div>
@@ -1388,13 +1601,14 @@ export function GroupJournalPage(): ReactElement {
                           </span>
                         </label>
                         <input
+                          ref={teacherCommentInputRef}
                           id="teacher-comment-input"
                           type="text"
                           value={teacherCommentInput}
                           onChange={(e) =>
                             setTeacherCommentInput(e.target.value)
                           }
-                          placeholder="Напр.: Враховано альтернативну формулу розрахунку..."
+                          placeholder="Напр.: Додано +2 б. за творче оформлення та акуратну структуру..."
                           className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
                         />
                       </div>

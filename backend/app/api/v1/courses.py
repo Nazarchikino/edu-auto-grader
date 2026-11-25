@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
@@ -48,7 +48,11 @@ from app.schemas.course import (
     QuizSubmitResponse,
 )
 from app.schemas.grading import GradingRule
-from app.services.quiz_service import QuizService
+from app.services.quiz_service import (
+    QuizService,
+    build_student_grading_criteria,
+    resolve_student_variant,
+)
 from app.services.retention_service import delete_submission_files_for_paths_async
 
 router = APIRouter(tags=["courses"])
@@ -134,6 +138,9 @@ def _serialize_course(
         practical_score = (
             best_practical_by_id.get(practical.id) if practical is not None else None
         )
+        practical_max_score = (
+            float(practical.max_score) if practical is not None else None
+        )
         practical_needs_rules_review = (
             practical.needs_rules_review if practical is not None else False
         )
@@ -152,6 +159,7 @@ def _serialize_course(
                 practical_id=practical_id,
                 practical_format=practical_format,
                 practical_score=practical_score,
+                practical_max_score=practical_max_score,
                 practical_needs_rules_review=practical_needs_rules_review,
             )
         )
@@ -298,6 +306,10 @@ async def _build_module_detail_read(
         best_sub_result = await db.execute(best_sub_stmt)
         max_sub_score: Decimal | None = best_sub_result.scalar_one_or_none()
 
+        _, _, resolved_variant = resolve_student_variant(
+            practical=module.practical,
+            list_number=current_user.list_number,
+        )
         practical_summary = PracticalSummaryRead(
             id=module.practical.id,
             module_id=module.id,
@@ -309,6 +321,10 @@ async def _build_module_detail_read(
                 round(float(max_sub_score), 2) if max_sub_score is not None else None
             ),
             needs_rules_review=module.practical.needs_rules_review,
+            grading_criteria=build_student_grading_criteria(
+                module.practical,
+                resolved_variant,
+            ),
         )
 
     quiz_questions_read = [
@@ -916,7 +932,10 @@ async def upsert_module_practical(
     serialized_rules: list[dict[str, object]] = [
         rule.model_dump(mode="json") for rule in payload.grading_rules
     ]
-    max_score_decimal = Decimal(str(payload.max_score))
+    max_score_decimal = payload.max_score.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
 
     if module.practical is None:
         practical = Practical(
@@ -981,7 +1000,10 @@ async def update_practical(
     if payload.format_type is not None:
         practical.format_type = payload.format_type
     if payload.max_score is not None:
-        practical.max_score = Decimal(str(payload.max_score))
+        practical.max_score = payload.max_score.quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
     if payload.variants is not None:
         practical.variants = [
             variant.model_dump(mode="json") for variant in payload.variants

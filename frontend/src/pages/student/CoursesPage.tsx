@@ -147,7 +147,15 @@ function ModuleRowCard({
               {module.practical_score !== null ? (
                 <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700">
                   <Award className="h-3.5 w-3.5" />
-                  Оцінка: {module.practical_score.toFixed(1)} б.
+                  Оцінка: {module.practical_score.toFixed(1)}
+                  {module.practical_max_score !== null
+                    ? ` / ${
+                        Number.isInteger(module.practical_max_score)
+                          ? module.practical_max_score.toFixed(0)
+                          : module.practical_max_score.toFixed(1)
+                      }`
+                    : ""}{" "}
+                  б.
                 </span>
               ) : module.quiz_passed ? (
                 <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">

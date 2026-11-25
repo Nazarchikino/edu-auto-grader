@@ -18,7 +18,7 @@ from openpyxl.workbook.workbook import Workbook  # type: ignore[import-untyped]
 from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.base import BaseGrader
+from app.graders.base import BaseGrader, format_student_criterion_description
 from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import PracticalFormat
 from app.schemas.grading import (
@@ -312,10 +312,18 @@ class XlsxGrader(BaseGrader):
             for rule in rules:
                 resolved_expected = self.resolve_expected(rule.expected, variant_data)
                 resolved_target = self.resolve_expected(rule.target, variant_data)
+                resolved_rule = rule.model_copy(
+                    update={
+                        "description": format_student_criterion_description(
+                            rule.description,
+                            variant_data,
+                        )
+                    }
+                )
                 result = self._evaluate_rule(
                     formula_wb=formula_wb,
                     value_wb=value_wb,
-                    rule=rule,
+                    rule=resolved_rule,
                     target=resolved_target,
                     expected=resolved_expected,
                 )
