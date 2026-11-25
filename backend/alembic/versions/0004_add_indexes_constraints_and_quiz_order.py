@@ -1,7 +1,7 @@
 """add_indexes_constraints_and_quiz_order
 
 Revision ID: 0004_indexes_and_quiz_order
-Revises: 0003_add_user_auth_security_fields
+Revises: 0003_user_auth_security
 Create Date: 2026-11-25 03:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0004_indexes_and_quiz_order"
-down_revision: str | None = "0003_add_user_auth_security_fields"
+down_revision: str | None = "0003_user_auth_security"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

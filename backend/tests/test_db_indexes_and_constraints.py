@@ -567,7 +567,8 @@ async def test_schema_indexes_constraints_and_alembic_0004_backfill(
     assert spec is not None and spec.loader is not None
     migration_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration_module)
-    assert migration_module.down_revision == "0003_add_user_auth_security_fields"
+    assert migration_module.revision == "0004_indexes_and_quiz_order"
+    assert migration_module.down_revision == "0003_user_auth_security"
 
     # Перевіряємо backfill SQL (ROW_NUMBER() OVER (PARTITION BY module_id ORDER BY id))
     await db_session.execute(text("UPDATE quiz_questions SET order_index = 0"))
@@ -605,3 +606,57 @@ async def test_schema_indexes_constraints_and_alembic_0004_backfill(
         assert indices == list(range(1, len(indices) + 1)), (
             f"Некоректний backfill order_index для module_id={module_id}: {indices}"
         )
+
+
+async def test_all_alembic_revisions_fit_varchar_32_and_form_single_linear_chain() -> None:
+    """Гарантує, що кожен revision у Alembic має <= 32 символи та лінійний ланцюжок без гілок."""
+    versions_dir = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    migration_files = sorted(
+        path for path in versions_dir.glob("*.py") if path.name != "__init__.py"
+    )
+    assert len(migration_files) >= 4
+
+    revisions_to_parent: dict[str, str | None] = {}
+    for migration_file in migration_files:
+        spec = importlib.util.spec_from_file_location(
+            f"alembic_rev_{migration_file.stem}",
+            migration_file,
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        rev = getattr(module, "revision", None)
+        down_rev = getattr(module, "down_revision", None)
+        assert isinstance(rev, str) and rev, (
+            f"Міграція {migration_file.name} не містить коректного рядка revision."
+        )
+        assert len(rev) <= 32, (
+            f"Міграція {migration_file.name} має revision={rev!r} довжиною {len(rev)} > 32 "
+            "(перевищує PostgreSQL alembic_version.version_num VARCHAR(32))."
+        )
+        assert rev not in revisions_to_parent, (
+            f"Виявлено дубльований revision={rev!r} у {migration_file.name}."
+        )
+        assert down_rev is None or isinstance(down_rev, str), (
+            f"Міграція {migration_file.name} має нелінійний down_revision={down_rev!r}."
+        )
+        revisions_to_parent[rev] = down_rev
+
+    referenced_parents: set[str] = set()
+    root_count = 0
+    for rev, parent in revisions_to_parent.items():
+        if parent is None:
+            root_count += 1
+        else:
+            assert parent in revisions_to_parent, (
+                f"Міграція {rev!r} посилається на неіснуючий down_revision={parent!r}."
+            )
+            assert parent not in referenced_parents, (
+                f"Виявлено розгалуження історії Alembic на ревізії {parent!r}."
+            )
+            referenced_parents.add(parent)
+
+    heads = [rev for rev in revisions_to_parent if rev not in referenced_parents]
+    assert root_count == 1, f"Очікувався 1 корінь міграцій, знайдено {root_count}."
+    assert len(heads) == 1, f"Очікувався рівно 1 Alembic head, знайдено {heads}."
