@@ -1,5 +1,6 @@
 import io
 import uuid
+import zipfile
 from pathlib import Path
 
 import docx
@@ -10,6 +11,7 @@ from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untype
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import settings
 from app.models.course import ALLOWED_COURSE_SLUGS, Course, CourseSlug, Module, Practical
 from app.models.progress import QuizAttempt, Submission
 from app.models.user import AcademicGroup, User, UserRole
@@ -879,3 +881,53 @@ async def test_delete_admin_user_removes_student_submissions_and_disk_files(
     ).scalars().all()
     assert len(st2_remaining) == 1
     assert st2_docx_path.is_file()
+
+
+async def test_admin_bulk_import_returns_413_on_oversized_file_and_422_on_zip_bomb(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє HTTP 413 при перевищенні MAX_IMPORT_UPLOAD_BYTES і 422 для Zip-бомби .docx."""
+    admin = await _get_user_by_email(db_session, "admin@kpefk.lcloud.in.ua")
+    admin_headers = make_auth_headers(admin.id, admin.role)
+
+    group_res = await db_session.execute(
+        select(AcademicGroup).where(AcademicGroup.code == "КН-31")
+    )
+    group = group_res.scalar_one()
+    assert isinstance(group, AcademicGroup)
+
+    monkeypatch.setattr(settings, "MAX_IMPORT_UPLOAD_BYTES", 1024)
+    oversized_txt = ("Іваненко Іван Іванович\n" * 200).encode("utf-8")
+    assert len(oversized_txt) > 1024
+
+    too_large_resp = await async_client.post(
+        "/api/v1/admin/users/import",
+        headers=admin_headers,
+        data={"group_id": str(group.id)},
+        files={"file": ("students_large.txt", oversized_txt, "text/plain")},
+    )
+    assert too_large_resp.status_code == 413
+    assert "МБ" in too_large_resp.json()["detail"]
+
+    # Відновлюємо достатній ліміт для перевірки захисту від Zip-бомби в .docx-відомості
+    monkeypatch.setattr(settings, "MAX_IMPORT_UPLOAD_BYTES", 5 * 1024 * 1024)
+    bomb_buf = io.BytesIO()
+    with zipfile.ZipFile(bomb_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", b"\x00" * (2 * 1024 * 1024))
+
+    zip_bomb_resp = await async_client.post(
+        "/api/v1/admin/users/import",
+        headers=admin_headers,
+        data={"group_id": str(group.id)},
+        files={
+            "file": (
+                "bomb.docx",
+                bomb_buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert zip_bomb_resp.status_code == 422
+    assert zip_bomb_resp.json()["code"] == "UNSAFE_ZIP_ARCHIVE"

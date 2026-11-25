@@ -147,6 +147,7 @@ export interface CourseCreate {
 export interface CourseUpdate {
   title?: string | null;
   description?: string | null;
+  teacher_id?: string | null;
 }
 
 export interface CourseRead {

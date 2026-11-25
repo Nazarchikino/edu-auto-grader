@@ -13,13 +13,14 @@ import apiClient, {
   clearAuthTokens,
   getAccessToken,
   getRefreshToken,
+  refreshAccessToken,
   setAccessToken,
   setRefreshToken,
+  subscribeToAuthFailure,
 } from "../api/client";
 import type {
   ErrorResponse,
   LoginRequest,
-  RefreshTokenRequest,
   TokenResponse,
   UserRead,
   UserRole,
@@ -69,12 +70,6 @@ async function fetchCurrentUserProfile(): Promise<UserRead> {
   return response.data;
 }
 
-async function tryRefreshTokens(refreshToken: string): Promise<TokenResponse> {
-  const payload: RefreshTokenRequest = { refresh_token: refreshToken };
-  const response = await apiClient.post<TokenResponse>("/auth/refresh", payload);
-  return response.data;
-}
-
 export interface AuthProviderProps {
   children: ReactNode;
 }
@@ -82,6 +77,12 @@ export interface AuthProviderProps {
 export function AuthProvider({ children }: AuthProviderProps): ReactElement {
   const [user, setUser] = useState<UserRead | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    return subscribeToAuthFailure(() => {
+      setUser(null);
+    });
+  }, []);
 
   const refreshUser = useCallback(async (): Promise<UserRead | null> => {
     const accessToken = getAccessToken();
@@ -92,21 +93,22 @@ export function AuthProvider({ children }: AuthProviderProps): ReactElement {
       return null;
     }
 
-    try {
-      if (accessToken !== null) {
+    if (accessToken !== null) {
+      try {
         const currentUser = await fetchCurrentUserProfile();
         setUser(currentUser);
         return currentUser;
+      } catch {
+        // Якщо access-токен був прострочений, apiClient вже виконав спробу silent refresh
+        clearAuthTokens();
+        setUser(null);
+        return null;
       }
-    } catch {
-      // Якщо access-токен прострочений, спробуємо оновити пару за refresh-токеном
     }
 
     if (refreshToken !== null) {
       try {
-        const tokens = await tryRefreshTokens(refreshToken);
-        setAccessToken(tokens.access_token);
-        setRefreshToken(tokens.refresh_token);
+        await refreshAccessToken();
         const currentUser = await fetchCurrentUserProfile();
         setUser(currentUser);
         return currentUser;

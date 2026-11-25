@@ -1,25 +1,39 @@
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import openpyxl  # type: ignore[import-untyped]
 import pytest
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+from app.core.config import settings
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.accdb_grader import AccdbGrader
+from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
 from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
-from app.graders.html_grader import HtmlGrader
+from app.graders.html_grader import (
+    EMPTY_HTML_BODY_ERROR_MESSAGE,
+    HtmlGrader,
+    has_meaningful_html_body,
+)
 from app.graders.metadata import (
+    CORE_XML_ARCHIVE_PATH,
     compute_code_sha256,
     compute_file_sha256,
     evaluate_plagiarism,
+    extract_core_xml_metadata,
     extract_document_metadata,
+    parse_core_xml_bytes,
+    validate_zip_archive_safety,
 )
 from app.graders.xlsx_grader import XlsxGrader
-from app.models.course import PracticalFormat
+from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import ExtractedMetadata, GradingRule, GradingRuleType
+from app.seed import build_seed_bundle
+from app.services.student_import_service import parse_docx_students
 from tests.conftest import (
+    _replace_zip_member,
     build_sample_accdb,
     build_sample_docx,
     build_sample_xlsx,
@@ -328,6 +342,129 @@ def test_xlsx_grader_rejects_static_value_instead_of_formula_and_missing_chart(
     corrupt_xlsx.write_bytes(b"corrupted-excel-payload")
     with pytest.raises(InvalidFileFormatError):
         grader.evaluate(file_path=corrupt_xlsx, rules=rules, variant_data={})
+
+
+def test_xlsx_grader_supports_dollar_reference_and_any_formula_expressions(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє підтримку 'contains:$', '$', 'any' та '=' у правилах формул XlsxGrader."""
+    xlsx_path = tmp_path / "formula_modes.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Sheet1"
+    sheet["A1"] = 10
+    sheet["A2"] = 20
+    sheet["B2"] = 50
+    sheet["B10"] = 100
+    sheet["C2"] = "=B2/$B$10"
+    sheet["C3"] = "=B2/B$10"
+    sheet["C4"] = "=B2/B10"
+    sheet["D2"] = "=SUM(A1:A5)"
+    sheet["D3"] = 42
+    sheet["D4"] = "="
+    workbook.save(str(xlsx_path))
+    workbook.close()
+
+    rules = [
+        GradingRule(
+            id="abs_contains_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C2",
+            expected="contains:$",
+            points=1.0,
+            description="Абсолютне посилання (=B2/$B$10) проходить contains:$",
+        ),
+        GradingRule(
+            id="abs_bare_dollar_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C2",
+            expected="$",
+            points=1.0,
+            description="Абсолютне посилання (=B2/$B$10) проходить одиничний $",
+        ),
+        GradingRule(
+            id="mixed_contains_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C3",
+            expected="contains:$",
+            points=1.0,
+            description="Змішане посилання (=B2/B$10) проходить contains:$",
+        ),
+        GradingRule(
+            id="rel_contains_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C4",
+            expected="contains:$",
+            points=1.0,
+            description="Відносне посилання (=B2/B10) не проходить contains:$",
+        ),
+        GradingRule(
+            id="rel_bare_dollar_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!C4",
+            expected="$",
+            points=1.0,
+            description="Відносне посилання (=B2/B10) не проходить одиничний $",
+        ),
+        GradingRule(
+            id="any_formula_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D2",
+            expected="any",
+            points=1.0,
+            description="Реальна формула (=SUM(A1:A5)) проходить any",
+        ),
+        GradingRule(
+            id="eq_formula_pass",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D2",
+            expected="=",
+            points=1.0,
+            description="Реальна формула (=SUM(A1:A5)) проходить =",
+        ),
+        GradingRule(
+            id="any_static_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D3",
+            expected="any",
+            points=1.0,
+            description="Статичне число (42) не проходить any",
+        ),
+        GradingRule(
+            id="eq_static_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D3",
+            expected="=",
+            points=1.0,
+            description="Статичне число (42) не проходить =",
+        ),
+        GradingRule(
+            id="eq_empty_body_fail",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Sheet1!D4",
+            expected="=",
+            points=1.0,
+            description="Порожня формула ('=') не проходить =",
+        ),
+    ]
+
+    report = XlsxGrader().evaluate(file_path=xlsx_path, rules=rules, variant_data={})
+    results_by_id = {item.rule_id: item for item in report.results}
+
+    assert results_by_id["abs_contains_pass"].passed is True
+    assert results_by_id["abs_bare_dollar_pass"].passed is True
+    assert results_by_id["mixed_contains_pass"].passed is True
+    assert results_by_id["rel_contains_fail"].passed is False
+    assert results_by_id["rel_bare_dollar_fail"].passed is False
+    assert results_by_id["any_formula_pass"].passed is True
+    assert results_by_id["eq_formula_pass"].passed is True
+    assert results_by_id["any_static_fail"].passed is False
+    assert results_by_id["eq_static_fail"].passed is False
+    assert results_by_id["eq_empty_body_fail"].passed is False
+    assert report.passed_count == 5
+    assert report.failed_count == 5
+    assert report.total_points == 5.0
 
 
 def test_accdb_grader_evaluates_tables_columns_and_types(tmp_path: Path) -> None:
@@ -732,6 +869,72 @@ def test_html_grader_attribute_filter_selector_and_compound_colspan() -> None:
     assert pass_report_td.total_points == 4.0
 
 
+def test_html_grader_empty_body_and_starter_template_score_zero() -> None:
+    """Перевіряє, що порожнє <body> або мінімальний шаблон набирають 0.0 балів у HtmlGrader."""
+    starter_html = """<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Практична робота</title>
+</head>
+<body>
+  <!-- Виконайте завдання тут -->
+</body>
+</html>"""
+
+    assert has_meaningful_html_body(starter_html) is False
+    assert (
+        has_meaningful_html_body(
+            "<!DOCTYPE html><html><head><title>T</title></head>"
+            "<body><!-- <h1>X</h1> --> \n </body></html>"
+        )
+        is False
+    )
+    assert (
+        has_meaningful_html_body(
+            "<!DOCTYPE html><html lang='uk'><head><meta charset='UTF-8'></head></html>"
+        )
+        is False
+    )
+    assert has_meaningful_html_body("<!DOCTYPE html><body>Текст</body>") is True
+    assert has_meaningful_html_body("<!DOCTYPE html><body><h1>Заголовок</h1></body>") is True
+    assert has_meaningful_html_body("<!DOCTYPE html><header><h1>Фрагмент</h1></header>") is True
+
+    rules = [
+        GradingRule(
+            id="r_lang",
+            type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+            target="html",
+            expected="lang",
+            points=3.0,
+            description="Атрибут lang у html",
+        ),
+        GradingRule(
+            id="r_charset",
+            type=GradingRuleType.HTML_ATTRIBUTE_EXISTS,
+            target="head meta[charset]",
+            expected="charset",
+            points=3.0,
+            description="Метатег charset",
+        ),
+        GradingRule(
+            id="r_title",
+            type=GradingRuleType.HTML_TAG_EXISTS,
+            target="head > title",
+            expected="true",
+            points=4.0,
+            description="Тег title у head",
+        ),
+    ]
+
+    report = HtmlGrader().evaluate(raw_code=starter_html, rules=rules, variant_data={})
+    assert report.total_points == 0.0
+    assert report.passed_count == 0
+    assert report.failed_count == 3
+    assert all(item.feedback == EMPTY_HTML_BODY_ERROR_MESSAGE for item in report.results)
+
+
 def test_docx_grader_supports_uniform_single_number_margin(tmp_path: Path) -> None:
     """Перевіряє підтримку уніфікованого числового формату полів сторінки ('2.0' -> 20 мм)."""
     docx_path = build_sample_docx(
@@ -752,6 +955,213 @@ def test_docx_grader_supports_uniform_single_number_margin(tmp_path: Path) -> No
     report = DocxGrader().evaluate(file_path=docx_path, rules=[rule], variant_data={})
     assert report.passed_count == 1
     assert report.total_points == 2.0
+
+
+def test_docx_grader_resolves_placeholders_in_target_and_expected(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє підстановку {placeholder} одночасно у rule.target та rule.expected DocxGrader."""
+    docx_path = build_sample_docx(
+        tmp_path / "variant_placeholders.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=15.0,
+        bottom_mm=15.0,
+        font_name="Calibri",
+        font_size_pt=12.0,
+        line_spacing=1.5,
+        alignment=WD_ALIGN_PARAGRAPH.LEFT,
+        include_table=True,
+        table_rows=5,
+        table_cols=3,
+    )
+
+    rules = [
+        GradingRule(
+            id="w_ph_margins",
+            type=GradingRuleType.DOCX_PAGE_MARGINS,
+            target="{section_target}",
+            expected="{margins}",
+            points=2.0,
+            description="Поля цільової секції за параметром варіанта",
+        ),
+        GradingRule(
+            id="w_ph_font",
+            type=GradingRuleType.DOCX_FONT,
+            target="{text_target}",
+            expected="{body_font}:{body_size}",
+            points=2.5,
+            description="Шрифт і кегль цільових абзаців за варіантом",
+        ),
+        GradingRule(
+            id="w_ph_spacing",
+            type=GradingRuleType.DOCX_LINE_SPACING,
+            target="{text_target}",
+            expected="{line_spacing}",
+            points=2.0,
+            description="Міжрядковий інтервал за варіантом",
+        ),
+        GradingRule(
+            id="w_ph_align",
+            type=GradingRuleType.DOCX_ALIGNMENT,
+            target="{text_target}",
+            expected="{body_alignment}",
+            points=1.5,
+            description="Вирівнювання абзаців за варіантом",
+        ),
+        GradingRule(
+            id="w_ph_table",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="{table_target}",
+            expected=">={min_rows}",
+            points=2.0,
+            description="Кількість рядків цільової таблиці за варіантом",
+        ),
+    ]
+
+    variant_data: dict[str, object] = {
+        "variant_number": 2,
+        "parameters": {
+            "section_target": "section_0",
+            "text_target": "body",
+            "table_target": "table_0.rows",
+            "margins": "left=2cm,right=2cm,top=1.5cm,bottom=1.5cm",
+            "body_font": "Calibri",
+            "body_size": "12",
+            "line_spacing": "1.5",
+            "body_alignment": "left",
+            "min_rows": 5,
+        },
+    }
+
+    grader = DocxGrader()
+    report = grader.evaluate(file_path=docx_path, rules=rules, variant_data=variant_data)
+
+    assert report.total_points == 10.0
+    assert report.max_points == 10.0
+    assert report.passed_count == 5
+    assert report.failed_count == 0
+    results_by_id = {item.rule_id: item for item in report.results}
+    assert results_by_id["w_ph_margins"].target == "section_0"
+    assert results_by_id["w_ph_margins"].expected == "left=2cm,right=2cm,top=1.5cm,bottom=1.5cm"
+    assert results_by_id["w_ph_font"].target == "body"
+    assert results_by_id["w_ph_font"].expected == "Calibri:12"
+    assert results_by_id["w_ph_table"].target == "table_0.rows"
+    assert results_by_id["w_ph_table"].expected == ">=5"
+
+    # Перевірка реальних правил word.json для проблемних варіантів (М1 Вар. 2 та М3 Вар. 2)
+    bundle = build_seed_bundle()
+    word_course = next(course for course in bundle.courses if course.slug == CourseSlug.WORD)
+
+    m1_practical = next(m for m in word_course.modules if m.order_index == 1).practical
+    assert m1_practical is not None
+    m1_rules = [GradingRule.model_validate(r) for r in m1_practical.grading_rules]
+    m1_v2 = next(v for v in m1_practical.variants if v["variant_number"] == 2)
+    m1_v2_docx = build_sample_docx(
+        tmp_path / "word_m1_v2.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=20.0,
+        bottom_mm=20.0,
+        font_name="Calibri",
+        font_size_pt=12.0,
+        line_spacing=1.5,
+        alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
+    )
+    m1_v2_report = grader.evaluate(
+        file_path=m1_v2_docx,
+        rules=m1_rules,
+        variant_data=m1_v2,
+    )
+    assert m1_v2_report.total_points == 10.0
+    assert m1_v2_report.failed_count == 0
+
+    m3_practical = next(m for m in word_course.modules if m.order_index == 3).practical
+    assert m3_practical is not None
+    m3_rules = [GradingRule.model_validate(r) for r in m3_practical.grading_rules]
+    m3_v2 = next(v for v in m3_practical.variants if v["variant_number"] == 2)
+    m3_v2_docx = build_sample_docx(
+        tmp_path / "word_m3_v2.docx",
+        left_mm=20.0,
+        right_mm=20.0,
+        top_mm=15.0,
+        bottom_mm=15.0,
+        font_name="Times New Roman",
+        font_size_pt=14.0,
+        line_spacing=1.15,
+        alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
+    )
+    m3_v2_report = grader.evaluate(
+        file_path=m3_v2_docx,
+        rules=m3_rules,
+        variant_data=m3_v2,
+    )
+    assert m3_v2_report.total_points == 10.0
+    assert m3_v2_report.failed_count == 0
+
+
+def test_accdb_grader_evaluates_access_module_9_multiple_variants(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє, що різні варіанти Модуля 9 Access (включно з 2, 4, 5) набирають 10/10 балів."""
+    bundle = build_seed_bundle()
+    access_course = next(course for course in bundle.courses if course.slug == CourseSlug.ACCESS)
+    m9_module = next(module for module in access_course.modules if module.order_index == 9)
+    assert m9_module.practical is not None
+
+    rules = [GradingRule.model_validate(raw) for raw in m9_module.practical.grading_rules]
+    grader = AccdbGrader()
+    built_paths: dict[int, Path] = {}
+
+    for target_variant_number in (1, 2, 4, 5):
+        variant = next(
+            v
+            for v in m9_module.practical.variants
+            if v["variant_number"] == target_variant_number
+        )
+        raw_params = variant.get("parameters")
+        assert isinstance(raw_params, dict)
+        raw_tables = raw_params.get("tables")
+        assert isinstance(raw_tables, list) and len(raw_tables) >= 3
+
+        accdb_tables: dict[str, list[tuple[str, str]]] = {}
+        for table_entry in raw_tables:
+            assert isinstance(table_entry, dict)
+            table_name = str(table_entry["name"])
+            raw_fields = table_entry["fields"]
+            raw_pks = set(table_entry.get("primary_keys", []))
+            assert isinstance(raw_fields, list)
+            accdb_tables[table_name] = [
+                (str(field), "AUTONUMBER" if field in raw_pks else "SHORT TEXT")
+                for field in raw_fields
+            ]
+
+        accdb_path = tmp_path / f"access_m09_v{target_variant_number}.accdb"
+        accdb_path.write_bytes(build_accdb_bytes(accdb_tables))
+        built_paths[target_variant_number] = accdb_path
+
+        report = grader.evaluate(
+            file_path=accdb_path,
+            rules=rules,
+            variant_data=variant,
+        )
+        assert report.total_points == 10.0, (
+            f"Варіант {target_variant_number} Модуля 9 Access набрав {report.total_points}/10.0"
+        )
+        assert report.max_points == 10.0
+        assert report.passed_count == 4
+        assert report.failed_count == 0
+
+    # База даних Варіанта 1 не повинна проходити перевірку для Варіанта 2
+    variant_2 = next(v for v in m9_module.practical.variants if v["variant_number"] == 2)
+    mismatch_report = grader.evaluate(
+        file_path=built_paths[1],
+        rules=rules,
+        variant_data=variant_2,
+    )
+    assert mismatch_report.total_points == 0.0
+    assert mismatch_report.passed_count == 0
+    assert mismatch_report.failed_count == 4
 
 
 def test_metadata_extraction_and_plagiarism_detection(tmp_path: Path) -> None:
@@ -842,3 +1252,98 @@ def test_metadata_extraction_and_plagiarism_detection(tmp_path: Path) -> None:
     code_1 = "<header>\n  <h1>Розклад</h1>\n</header>"
     code_2 = "  <header>   <h1>Розклад</h1> </header>  "
     assert compute_code_sha256(code_1) == compute_code_sha256(code_2)
+
+
+def test_zip_bomb_protection_blocks_high_ratio_many_entries_and_oversized_uncompressed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє блокування Zip-бомб за коефіцієнтом стиснення, кількістю й розміром файлів."""
+    # 1. ZIP із високим коефіцієнтом стиснення нулів (> 100x при file_size > 1 МБ)
+    ratio_bomb_docx = tmp_path / "ratio_bomb.docx"
+    with zipfile.ZipFile(ratio_bomb_docx, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", b"\x00" * (2 * 1024 * 1024))
+
+    ratio_bomb_xlsx = tmp_path / "ratio_bomb.xlsx"
+    ratio_bomb_xlsx.write_bytes(ratio_bomb_docx.read_bytes())
+
+    with pytest.raises(GradingError) as exc_direct:
+        validate_zip_archive_safety(ratio_bomb_docx)
+    assert exc_direct.value.status_code == 422
+    assert exc_direct.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_meta:
+        extract_core_xml_metadata(ratio_bomb_docx)
+    assert exc_meta.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_docx:
+        DocxGrader().evaluate(file_path=ratio_bomb_docx, rules=[], variant_data={})
+    assert exc_docx.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_xlsx:
+        XlsxGrader().evaluate(file_path=ratio_bomb_xlsx, rules=[], variant_data={})
+    assert exc_xlsx.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    with pytest.raises(GradingError) as exc_import:
+        parse_docx_students(ratio_bomb_docx.read_bytes())
+    assert exc_import.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    # 2. ZIP із понад 500 записами (> MAX_ZIP_ENTRIES)
+    many_entries_zip = tmp_path / "many_entries.docx"
+    with zipfile.ZipFile(many_entries_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx in range(settings.MAX_ZIP_ENTRIES + 1):
+            zf.writestr(f"entry_{idx:04d}.txt", b"ok")
+
+    with pytest.raises(GradingError) as exc_entries:
+        validate_zip_archive_safety(many_entries_zip)
+    assert exc_entries.value.status_code == 422
+    assert exc_entries.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    # 3. Перевищення MAX_ZIP_SINGLE_ENTRY_BYTES та MAX_ZIP_UNCOMPRESSED_BYTES
+    sized_zip = tmp_path / "sized_entries.docx"
+    with zipfile.ZipFile(sized_zip, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("part1.bin", b"A" * 1024)
+        zf.writestr("part2.bin", b"B" * 1024)
+
+    monkeypatch.setattr(settings, "MAX_ZIP_SINGLE_ENTRY_BYTES", 512)
+    with pytest.raises(GradingError) as exc_single:
+        validate_zip_archive_safety(sized_zip)
+    assert exc_single.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+    monkeypatch.setattr(settings, "MAX_ZIP_SINGLE_ENTRY_BYTES", 2048)
+    monkeypatch.setattr(settings, "MAX_ZIP_UNCOMPRESSED_BYTES", 1500)
+    with pytest.raises(GradingError) as exc_total:
+        validate_zip_archive_safety(sized_zip)
+    assert exc_total.value.code == "UNSAFE_ZIP_ARCHIVE"
+
+
+def test_core_xml_parser_rejects_xml_entity_expansion_billion_laughs(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє безпечне відхилення XML Entity Expansion (<!DOCTYPE lolz ...>) через defusedxml."""
+    billion_laughs_xml = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b"<!DOCTYPE lolz [\n"
+        b'  <!ENTITY lol "lol">\n'
+        b'  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">\n'
+        b'  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">\n'
+        b'  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">\n'
+        b"]>\n"
+        b'<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"'
+        b' xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        b"  <dc:creator>&lol4;</dc:creator>\n"
+        b"</cp:coreProperties>\n"
+    )
+
+    with pytest.raises(GradingError) as exc_direct:
+        parse_core_xml_bytes(billion_laughs_xml)
+    assert exc_direct.value.status_code == 422
+    assert exc_direct.value.code == "UNSAFE_XML_CONTENT"
+
+    malicious_docx = build_sample_docx(tmp_path / "xxe_core.docx")
+    _replace_zip_member(malicious_docx, CORE_XML_ARCHIVE_PATH, billion_laughs_xml)
+
+    with pytest.raises(GradingError) as exc_archive:
+        extract_core_xml_metadata(malicious_docx)
+    assert exc_archive.value.status_code == 422
+    assert exc_archive.value.code == "UNSAFE_XML_CONTENT"

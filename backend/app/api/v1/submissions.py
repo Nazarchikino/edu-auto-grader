@@ -120,7 +120,7 @@ async def download_submission_file(
 async def update_submission_grade(
     submission_id: uuid.UUID,
     payload: ManualGradeUpdateRequest,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SubmissionRead:
     """Ручне коригування підсумкового бала та додавання коментаря викладача."""
@@ -128,4 +128,5 @@ async def update_submission_grade(
     return await service.update_manual_grade(
         submission_id=submission_id,
         payload=payload,
+        requester=current_user,
     )

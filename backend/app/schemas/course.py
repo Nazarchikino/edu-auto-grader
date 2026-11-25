@@ -212,12 +212,13 @@ class CourseCreate(BaseModel):
 
 
 class CourseUpdate(BaseModel):
-    """Схема редагування курсу викладачем."""
+    """Схема редагування курсу викладачем або адміністратором."""
 
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, min_length=1)
+    teacher_id: uuid.UUID | None = None
 
 
 class CourseRead(BaseModel):

@@ -14,6 +14,7 @@ from docx.text.run import Run
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.graders.base import BaseGrader
+from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import PracticalFormat
 from app.schemas.grading import (
     CriterionResult,
@@ -87,12 +88,15 @@ class DocxGrader(BaseGrader):
     ) -> GradingReport:
         """Виконує перевірку документа .docx за переліком правил."""
         resolved_path = self.require_file_path(file_path, expected_suffix=".docx")
+        validate_zip_archive_safety(resolved_path)
         document = self._open_document(resolved_path)
 
         results: list[CriterionResult] = []
         for rule in rules:
+            resolved_target = self.resolve_expected(rule.target, variant_data)
             resolved_expected = self.resolve_expected(rule.expected, variant_data)
-            result = self._evaluate_rule(document, rule, resolved_expected)
+            resolved_rule = rule.model_copy(update={"target": resolved_target})
+            result = self._evaluate_rule(document, resolved_rule, resolved_expected)
             results.append(result)
 
         return self.build_report(results)

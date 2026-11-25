@@ -99,7 +99,7 @@ edu-auto-grader/
 │   │   └── media/                  # 184 медіафайли лекцій/тестів (word/, excel/, access/)
 │   ├── app/
 │   │   ├── main.py                 # FastAPI, lifespan (автоочищення), CORS, /media/courses, /health
-│   │   ├── seed.py                 # CLI-ініціалізація та синхронізація курсів (--dry-run, --sync-courses)
+│   │   ├── seed.py                 # CLI-ініціалізація та неруйнівна синхронізація курсів (--sync-courses)
 │   │   ├── core/                   # config.py, database.py, security.py, exceptions.py
 │   │   ├── models/                 # SQLAlchemy 2.0 моделі (user, course, progress)
 │   │   ├── schemas/                # Pydantic v2 контракти (auth, course, grading, submission)
@@ -168,7 +168,8 @@ python -m app.seed --sync-courses
 > [!TIP]
 > Скрипт `app.seed` підтримує прапорці:
 > - `--dry-run` — валідує JSON-пакети 4 курсів і правила `GradingRule` без підключення до PostgreSQL;
-> - `--sync-courses` — оновлює модулі, тести й практичні з `backend/content/courses/*.json`, зберігаючи існуючих користувачів та академічні групи.
+> - `--sync-courses` — **неруйнівно** (in-place `upsert`) оновлює контент курсів, модулів, тестів і практичних із `backend/content/courses/*.json`, зберігаючи користувачів, академічні групи, усі спроби тестів (`QuizAttempt`) та здачі студентів (`Submission`) разом із оцінками й коментарями викладача;
+> - `--allow-destructive-module-delete` — опційний прапорець до `--sync-courses`, який явно дозволяє видаляти зайві модулі або практичні, вилучені з JSON, навіть якщо за ними вже є здачі чи спроби тестів (із безпечним очищенням пов'язаних файлів у `uploads/`).
 
 #### 4. Запуск Backend API (FastAPI + Uvicorn)
 ```powershell

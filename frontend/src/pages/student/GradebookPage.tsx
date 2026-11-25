@@ -206,22 +206,28 @@ export function GradebookPage(): ReactElement {
     const metaMap: Record<string, AttemptMeta> = {};
 
     for (const group of Object.values(groupedByPractical)) {
-      const chronological = [...group].sort(
-        (a, b) =>
+      const chronological = [...group].sort((a, b) => {
+        const timeDiff =
           new Date(a.submitted_at).getTime() -
-          new Date(b.submitted_at).getTime()
-      );
+          new Date(b.submitted_at).getTime();
+        if (timeDiff !== 0) {
+          return timeDiff;
+        }
+        if (a.submitted_at !== b.submitted_at) {
+          return a.submitted_at < b.submitted_at ? -1 : 1;
+        }
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
       const totalAttempts = chronological.length;
       const latestId = chronological[totalAttempts - 1]?.id ?? "";
 
-      let bestScore = -1;
-      let bestId = latestId;
+      let bestItem: SubmissionRead | null = null;
       for (const item of chronological) {
-        if (item.final_score >= bestScore) {
-          bestScore = item.final_score;
-          bestId = item.id;
+        if (bestItem === null || item.final_score >= bestItem.final_score) {
+          bestItem = item;
         }
       }
+      const bestId = bestItem?.id ?? latestId;
 
       chronological.forEach((item, index) => {
         metaMap[item.id] = {

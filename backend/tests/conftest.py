@@ -17,7 +17,6 @@ from openpyxl.chart import BarChart, Reference  # type: ignore[import-untyped]
 from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 from sqlalchemy import Column, Engine, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.engine import Result
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -72,13 +71,13 @@ class SqliteAsyncSessionAdapter:
     def __init__(self, sync_session: Session) -> None:
         self._session = sync_session
 
-    # justified Any: SQLAlchemy Executable generic Tuple result signature varies by query
+    # justified Any: SQLAlchemy 2.0 (Result[_TP]) vs 2.1 (Result[*_Ts]) signatures diverge
     async def execute(
         self,
         statement: Executable,
         *args: Any,
         **kwargs: Any,
-    ) -> Result[Any]:
+    ) -> Any:
         return self._session.execute(statement, *args, **kwargs)
 
     def add(self, instance: object) -> None:

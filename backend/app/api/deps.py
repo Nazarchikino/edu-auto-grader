@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.exceptions import DomainError
 from app.core.security import decode_token
+from app.models.course import Course
 from app.models.user import User, UserRole
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -84,8 +85,35 @@ def require_role(
     return role_checker
 
 
+def ensure_course_owner_or_admin(
+    course: Course,
+    current_user: User,
+    *,
+    detail: str = "Недостатньо прав: цей курс закріплено за іншим викладачем.",
+    code: str = "FORBIDDEN_COURSE_ACCESS",
+    context: dict[str, object] | None = None,
+) -> None:
+    """Перевіряє, що користувач є адміністратором або закріпленим викладачем курсу."""
+    if current_user.role == UserRole.ADMIN:
+        return
+    if current_user.role == UserRole.TEACHER and course.teacher_id == current_user.id:
+        return
+
+    error_context: dict[str, object] = {"course_id": str(course.id)}
+    if context is not None:
+        error_context.update(context)
+
+    raise DomainError(
+        detail,
+        code=code,
+        status_code=403,
+        context=error_context,
+    )
+
+
 __all__ = [
     "bearer_scheme",
+    "ensure_course_owner_or_admin",
     "get_current_user",
     "get_db",
     "require_role",
