@@ -244,10 +244,13 @@ python -m app.services.retention_service
 
 ## Production-розгортання (Docker + Nginx + бекапи)
 
-Готовий production-стек описано у [`docker-compose.prod.yml`](docker-compose.prod.yml) та складається з трьох ізольованих контейнерів:
+Готовий production-стек описано у [`docker-compose.prod.yml`](docker-compose.prod.yml) (ізольований Compose-проєкт `name: edu-auto-grader-prod`) та складається з трьох ізольованих контейнерів:
 - **`db` (`postgres:16-alpine`)** — працює лише у внутрішній мережі `internal` без пробросу порту `5432` назовні;
 - **`backend` (`backend/Dockerfile`)** — `python:3.12-slim` із `mdbtools`, шрифтами `fonts-dejavu-core` (для кириличного PDF-експорту через `fpdf2`), непривілейованим користувачем `appuser`, `APP_ENV=production`, `uvicorn --workers 2 --proxy-headers` і `HEALTHCHECK` на `/api/v1/health/ready`;
 - **`frontend` (`frontend/Dockerfile` + `frontend/nginx.conf`)** — multi-stage збірка React SPA з локально вбудованим Monaco Editor (без запитів до зовнішнього CDN) за реверс-проксі Nginx (`client_max_body_size 35m`, `gzip`, заголовки безпеки, проксування `/api/` та `/media/courses/`).
+
+> [!NOTE]
+> Production-стек використовує окремий простір імен (`edu-auto-grader-prod`) і власні іменовані томи `postgres_data_prod` (PostgreSQL) та `uploads_data_prod` (`/app/uploads`), тому не перетинається з локальною dev-БД (`postgres_data` із [`docker-compose.yml`](docker-compose.yml)).
 
 ### Запуск у production
 
@@ -269,7 +272,7 @@ curl -f http://127.0.0.1:8080/api/v1/health/ready
 
 ### Резервне копіювання та відновлення
 
-Скрипт [`scripts/backup.sh`](scripts/backup.sh) виконує `pg_dump -Fc` із контейнера `db`, архівує том `uploads/` у `.tar.gz` та автоматично видаляє бекапи старші за `RETENTION_BACKUP_DAYS` (за замовчуванням `14` днів). Для відновлення передбачено [`scripts/restore.sh`](scripts/restore.sh):
+Скрипт [`scripts/backup.sh`](scripts/backup.sh) виконує `pg_dump -Fc` із контейнера `db`, архівує том `uploads_data_prod` (`/app/uploads`) у `.tar.gz` та автоматично видаляє бекапи старші за `RETENTION_BACKUP_DAYS` (за замовчуванням `14` днів). Для відновлення передбачено [`scripts/restore.sh`](scripts/restore.sh):
 
 ```bash
 # Щоденний бекап (рекомендовано додати в cron, напр. о 03:00 щодня)

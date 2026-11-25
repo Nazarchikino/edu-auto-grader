@@ -2,10 +2,13 @@
 set -euo pipefail
 
 # Daily backup script for Edu Auto Grader (PostgreSQL custom dump + uploads archive).
+# Targets the isolated production Compose project (edu-auto-grader-prod) and its
+# postgres_data_prod (/var/lib/postgresql/data) and uploads_data_prod (/app/uploads) volumes.
 # Usage:
 #   ./scripts/backup.sh
 #   RETENTION_BACKUP_DAYS=30 BACKUP_DIR=/var/backups/edu-auto-grader ./scripts/backup.sh
 
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-edu-auto-grader-prod}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 ENV_FILE="${ENV_FILE:-.env.production}"
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
@@ -16,7 +19,7 @@ if ! [[ "${RETENTION_BACKUP_DAYS}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-COMPOSE_ARGS=(-f "${COMPOSE_FILE}")
+COMPOSE_ARGS=(-p "${COMPOSE_PROJECT_NAME}" -f "${COMPOSE_FILE}")
 if [[ -f "${ENV_FILE}" ]]; then
   COMPOSE_ARGS+=(--env-file "${ENV_FILE}")
 fi

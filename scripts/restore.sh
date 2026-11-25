@@ -2,6 +2,8 @@
 set -euo pipefail
 
 # Restore script for Edu Auto Grader (PostgreSQL dump + optional uploads archive).
+# Targets the isolated production Compose project (edu-auto-grader-prod) and its
+# postgres_data_prod (/var/lib/postgresql/data) and uploads_data_prod (/app/uploads) volumes.
 # Usage:
 #   ./scripts/restore.sh ./backups/db_20261125_030000.dump [./backups/uploads_20261125_030000.tar.gz] [--yes]
 
@@ -37,10 +39,11 @@ if [[ -n "${UPLOADS_BACKUP_FILE}" && ! -f "${UPLOADS_BACKUP_FILE}" ]]; then
   exit 1
 fi
 
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-edu-auto-grader-prod}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 ENV_FILE="${ENV_FILE:-.env.production}"
 
-COMPOSE_ARGS=(-f "${COMPOSE_FILE}")
+COMPOSE_ARGS=(-p "${COMPOSE_PROJECT_NAME}" -f "${COMPOSE_FILE}")
 if [[ -f "${ENV_FILE}" ]]; then
   COMPOSE_ARGS+=(--env-file "${ENV_FILE}")
 fi
