@@ -476,14 +476,23 @@ async def test_antiplagiarism_flags_sha256_and_core_xml_matches_across_students(
     assert sub2_data["plagiarism_reason"] is not None
     assert "SHA-256" in sub2_data["plagiarism_reason"]
 
-    # 4. Студент 3 змінює вміст файлу (інший SHA-256), але залишає час створення у docProps/core.xml
+    # 4. Студент 3 змінює таблицю у файлі студента 1 (інший SHA-256), але зберігає
+    # оригінальні creator та created у docProps/core.xml (як робить MS Word при редагуванні копії)
     modified_content_docx = build_sample_docx(
         tmp_path / "student3_meta_clone.docx",
         table_rows=6,
         table_cols=4,
-        creator="Шевченко Максим",
+        creator="Бондаренко Ірина Василівна",
         created_iso="2026-11-18T07:45:00Z",
         modified_iso="2026-11-18T16:15:00Z",
+    )
+    rewrite_openxml_core_metadata(
+        modified_content_docx,
+        creator="Бондаренко Ірина Василівна",
+        last_modified_by="Шевченко Максим",
+        created="2026-11-18T07:45:00Z",
+        modified="2026-11-18T16:15:00Z",
+        revision="2",
     )
     sub3_resp = await async_client.post(
         f"/api/v1/practicals/{word_prac.id}/submit",
@@ -1913,3 +1922,156 @@ async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
     assert reset_resp.status_code == 200
     assert reset_resp.json()["max_score"] == 10.0
     assert reset_resp.json()["needs_rules_review"] is False
+
+
+async def test_antiplagiarism_api_html_structural_match_and_classroom_template_clean(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє через API детекцію HTML-плагіату з коментарем/класами та чистий шаблон Word."""
+    import docx as python_docx
+
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    student2 = await _get_user_by_email(db_session, "student2@kpefk.lcloud.in.ua")
+
+    # 1. HTML-практична: копія з коментарем <!-- my work --> та іншими CSS-класами
+    _, html_mod, html_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.HTML,
+    )
+    for st in (student1, student2):
+        await _grant_quiz_pass(db_session, student_id=st.id, module_id=html_mod.id)
+
+    html_orig = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Візитівка</title>
+        <style>.box-a { color: #111; padding: 12px; }</style>
+      </head>
+      <body>
+        <main class="box-a">
+          <h1>Профіль студента</h1>
+          <h2>Навчання</h2>
+          <p>Вивчаю <strong>вебтехнології</strong> та сучасні стандарти HTML5 у коледжі.</p>
+          <h2>Інтереси</h2>
+          <p>Цікавлюся <em>семантичною версткою</em>, доступністю та чистою структурою коду.</p>
+          <p>Регулярно виконую лабораторні та практичні завдання курсу.</p>
+          <blockquote>Якісна розмітка є фундаментом надійного вебінтерфейсу.</blockquote>
+        </main>
+      </body>
+    </html>
+    """
+    html_copy = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Моя робота</title>
+        <style>.student-card { padding: 12px; color: #111; }</style>
+      </head>
+      <body>
+        <!-- my work -->
+        <main class="student-card">
+          <h1>Профіль студента</h1>
+          <h2>Навчання</h2>
+          <p>Вивчаю <strong>вебтехнології</strong> та сучасні стандарти HTML5 у коледжі.</p>
+          <h2>Інтереси</h2>
+          <p>Цікавлюся <em>семантичною версткою</em>, доступністю та чистою структурою коду.</p>
+          <p>Регулярно виконую лабораторні та практичні завдання курсу.</p>
+          <blockquote>Якісна розмітка є фундаментом надійного вебінтерфейсу.</blockquote>
+        </main>
+      </body>
+    </html>
+    """
+
+    html_r1 = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        json={"raw_code": html_orig},
+    )
+    assert html_r1.status_code == 201
+    html_d1 = html_r1.json()
+    assert html_d1["is_plagiarism_flagged"] is False
+    assert html_d1["extracted_metadata"]["content_fingerprint"] is not None
+
+    html_r2 = await async_client.post(
+        f"/api/v1/practicals/{html_prac.id}/submit",
+        headers=make_auth_headers(student2.id, student2.role),
+        json={"raw_code": html_copy},
+    )
+    assert html_r2.status_code == 201
+    html_d2 = html_r2.json()
+    assert html_d2["file_hash"] != html_d1["file_hash"]
+    assert html_d2["is_plagiarism_flagged"] is True
+    assert html_d2["plagiarism_reason"] is not None
+    assert "Збіг структурного вмісту" in html_d2["plagiarism_reason"]
+
+    # 2. Word-практична: два студенти на спільному шаблоні (creator="User", однаковий created)
+    _, word_mod, word_prac = await _get_course_module_and_practical(
+        db_session,
+        CourseSlug.WORD,
+    )
+    for st in (student1, student2):
+        await _grant_quiz_pass(db_session, student_id=st.id, module_id=word_mod.id)
+
+    def _make_template_docx(path: Path, paragraphs: list[str], modified_iso: str) -> Path:
+        doc = python_docx.Document()
+        for line in paragraphs:
+            doc.add_paragraph(line)
+        doc.save(str(path))
+        rewrite_openxml_core_metadata(
+            path,
+            creator="User",
+            last_modified_by="User",
+            created="2026-09-01T08:00:00Z",
+            modified=modified_iso,
+            revision="1",
+        )
+        return path
+
+    word_a = _make_template_docx(
+        tmp_path / "api_tmpl_a.docx",
+        [
+            "Індивідуальний звіт першого студента про налаштування мережевої інфраструктури.",
+            "Наведено таблицю маршрутизації, опис топології локальної мережі та висновки.",
+        ],
+        "2026-11-25T10:05:00Z",
+    )
+    word_b = _make_template_docx(
+        tmp_path / "api_tmpl_b.docx",
+        [
+            "Самостійна робота другого студента з моделювання обліку бібліотечного фонду.",
+            "Створено схему сутностей, правила валідації записів і підсумковий аналіз даних.",
+        ],
+        "2026-11-25T10:18:00Z",
+    )
+
+    w_r1 = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student1.id, student1.role),
+        files={
+            "file": (
+                "work_a.docx",
+                word_a.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert w_r1.status_code == 201
+    assert w_r1.json()["is_plagiarism_flagged"] is False
+
+    w_r2 = await async_client.post(
+        f"/api/v1/practicals/{word_prac.id}/submit",
+        headers=make_auth_headers(student2.id, student2.role),
+        files={
+            "file": (
+                "work_b.docx",
+                word_b.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert w_r2.status_code == 201
+    assert w_r2.json()["is_plagiarism_flagged"] is False
+    assert w_r2.json()["plagiarism_reason"] is None

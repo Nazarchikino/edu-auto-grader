@@ -39,6 +39,7 @@ from app.schemas.grading import (
     GradingReport,
     GradingRule,
     GradingRulesUpdateRequest,
+    PlagiarismCheckResult,
 )
 from app.schemas.submission import (
     MAX_HTML_CODE_LENGTH,
@@ -528,7 +529,10 @@ class SubmissionService:
             compute_submission_hash,
             raw_code=resolved_code,
         )
-        extracted_metadata = ExtractedMetadata()
+        extracted_metadata = await run_in_threadpool(
+            extract_document_metadata,
+            raw_code=resolved_code,
+        )
         grader = GraderFactory.get_grader(format_type)
         report = await run_in_threadpool(
             grader.evaluate,
@@ -609,6 +613,25 @@ class SubmissionService:
 
         return saved_path, file_hash, extracted_metadata, report
 
+    async def _check_plagiarism(
+        self,
+        *,
+        practical: Practical,
+        student_id: uuid.UUID,
+        file_hash: str | None,
+        extracted_metadata: ExtractedMetadata,
+    ) -> PlagiarismCheckResult:
+        """Перевіряє здачу на академічну доброчесність з урахуванням відбитків та варіантів."""
+        return await check_submission_plagiarism(
+            self._db,
+            practical_id=practical.id,
+            student_id=student_id,
+            file_hash=file_hash,
+            metadata=extracted_metadata,
+            variants_count=len(practical.variants),
+            format_type=practical.format_type,
+        )
+
     async def submit_practical(
         self,
         *,
@@ -678,12 +701,11 @@ class SubmissionService:
             )
             stored_file_path = saved_path.as_posix()
 
-        plagiarism_result = await check_submission_plagiarism(
-            self._db,
-            practical_id=practical.id,
+        plagiarism_result = await self._check_plagiarism(
+            practical=practical,
             student_id=student.id,
             file_hash=file_hash,
-            metadata=extracted_metadata,
+            extracted_metadata=extracted_metadata,
         )
 
         if reject_on_plagiarism and plagiarism_result.is_flagged:
@@ -691,7 +713,7 @@ class SubmissionService:
                 await run_in_threadpool(_unlink_file_quietly, saved_path)
             raise PlagiarismDetectedError(
                 plagiarism_result.reason
-                or "Виявлено збіг хешу або метаданих роботи з іншим студентом.",
+                or "Виявлено збіг вмісту, хешу або метаданих роботи з іншим студентом.",
                 context={
                     "practical_id": str(practical.id),
                     "matched_submission_id": (

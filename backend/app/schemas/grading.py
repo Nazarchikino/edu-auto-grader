@@ -1,7 +1,7 @@
 import uuid
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.course import PracticalFormat
 
@@ -142,7 +142,7 @@ class GradingReport(BaseModel):
 
 
 class ExtractedMetadata(BaseModel):
-    """Метадані документа (docProps/core.xml або властивості файлу) для контролю авторства."""
+    """Метадані документа (docProps/core.xml) та структурні відбитки для контролю авторства."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -151,6 +151,17 @@ class ExtractedMetadata(BaseModel):
     created: str | None = None
     modified: str | None = None
     revision: str | None = None
+    content_fingerprint: str | None = None
+    text_shingles: list[str] = Field(default_factory=list)
+    has_unique_content: bool | None = None
+
+    @field_validator("text_shingles", mode="before")
+    @classmethod
+    def _coerce_none_shingles(cls, value: object) -> object:
+        """Забезпечує зворотну сумісність при десеріалізації None у JSONB як порожнього списку."""
+        if value is None:
+            return []
+        return value
 
 
 class PlagiarismCheckResult(BaseModel):

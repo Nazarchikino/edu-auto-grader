@@ -67,6 +67,9 @@ export interface ExtractedMetadata {
   created?: string | null;
   modified?: string | null;
   revision?: string | null;
+  content_fingerprint?: string | null;
+  text_shingles?: string[];
+  has_unique_content?: boolean | null;
   [key: string]: unknown;
 }
 

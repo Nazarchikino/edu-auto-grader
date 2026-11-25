@@ -32,8 +32,10 @@ from app.graders.html_grader import (
 )
 from app.graders.metadata import (
     CORE_XML_ARCHIVE_PATH,
+    GENERIC_CREATOR_NAMES,
     compute_code_sha256,
     compute_file_sha256,
+    compute_shingle_jaccard,
     evaluate_plagiarism,
     extract_core_xml_metadata,
     extract_document_metadata,
@@ -2202,3 +2204,732 @@ def test_graders_validate_rule_definition_accepts_placeholders_and_rejects_inval
             grader.validate_rule_definition(rule)
         assert exc_info.value.status_code == 422
         assert exc_info.value.code == "INVALID_RULE_DEFINITION"
+
+
+def _strip_zip_member(archive_path: Path, member_name: str) -> None:
+    """Видаляє вказаний елемент із OpenXML ZIP-архіву (симуляція Google Docs / LibreOffice)."""
+    kept_entries: list[tuple[zipfile.ZipInfo, bytes]] = []
+    with zipfile.ZipFile(archive_path, mode="r") as src_zip:
+        for info in src_zip.infolist():
+            if info.filename != member_name:
+                kept_entries.append((info, src_zip.read(info.filename)))
+    with zipfile.ZipFile(archive_path, mode="w", compression=zipfile.ZIP_DEFLATED) as dst_zip:
+        for info, data in kept_entries:
+            dst_zip.writestr(info, data)
+
+
+def _write_custom_docx(
+    target_path: Path,
+    *,
+    paragraphs: list[str],
+    table_rows: list[list[str]] | None = None,
+    creator: str | None = "User",
+    created_iso: str | None = "2026-09-01T08:00:00Z",
+    modified_iso: str | None = "2026-11-25T10:00:00Z",
+    strip_core_xml: bool = False,
+) -> Path:
+    """Створює .docx із довільним текстом абзаців/таблиці та заданими метаданими core.xml."""
+    from tests.conftest import rewrite_openxml_core_metadata
+
+    doc = docx.Document()
+    for text in paragraphs:
+        doc.add_paragraph(text)
+    if table_rows:
+        tbl = doc.add_table(rows=len(table_rows), cols=len(table_rows[0]))
+        for r_idx, row in enumerate(table_rows):
+            for c_idx, cell_val in enumerate(row):
+                tbl.cell(r_idx, c_idx).text = cell_val
+    doc.save(str(target_path))
+
+    if strip_core_xml:
+        _strip_zip_member(target_path, CORE_XML_ARCHIVE_PATH)
+    else:
+        rewrite_openxml_core_metadata(
+            target_path,
+            creator=creator,
+            last_modified_by=creator,
+            created=created_iso,
+            modified=modified_iso,
+            revision="1",
+        )
+    return target_path
+
+
+def test_antiplagiarism_no_false_positive_on_shared_template_and_classroom_creator(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє відсутність false positives на шаблонах і системних іменах комп'ютерного класу."""
+    assert {"user", "student", "windows user", "kpefk", "користувач"}.issubset(
+        GENERIC_CREATOR_NAMES
+    )
+
+    student_a = uuid.uuid4()
+    student_b = uuid.uuid4()
+    sub_a_id = uuid.uuid4()
+
+    # 1. Спільний шаблон у класі: однаковий dcterms:created, creator="User", але різний текст
+    docx_a = _write_custom_docx(
+        tmp_path / "template_student_a.docx",
+        paragraphs=[
+            "Лабораторний звіт студента групи КН-31 про архітектуру комп'ютерних мереж.",
+            "У роботі досліджено протоколи маршрутизації, адресацію підмереж та модель OSI.",
+            "Виконано налаштування комутатора та перевірено проходження пакетів між вузлами.",
+        ],
+        creator="User",
+        created_iso="2026-09-01T08:00:00Z",
+        modified_iso="2026-11-25T10:12:00Z",
+    )
+    docx_b = _write_custom_docx(
+        tmp_path / "template_student_b.docx",
+        paragraphs=[
+            "Практична робота присвячена проєктуванню реляційних баз даних для бібліотеки.",
+            "Сформовано нормалізовані таблиці читачів, каталог видань та журнал видачі книг.",
+            "Додано первинні ключі, обмеження цілісності й перевірено зв'язки між сутностями.",
+        ],
+        creator="User",
+        created_iso="2026-09-01T08:00:00Z",
+        modified_iso="2026-11-25T10:25:00Z",
+    )
+
+    meta_a = extract_document_metadata(docx_a)
+    meta_b = extract_document_metadata(docx_b)
+    hash_a = compute_file_sha256(docx_a)
+    hash_b = compute_file_sha256(docx_b)
+    assert meta_a.content_fingerprint is not None
+    assert meta_b.content_fingerprint is not None
+    assert meta_a.content_fingerprint != meta_b.content_fingerprint
+
+    existing_a = [
+        DummySubmissionRecord(
+            id=sub_a_id,
+            student_id=student_a,
+            file_hash=hash_a,
+            extracted_metadata=meta_a,
+        )
+    ]
+
+    template_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=hash_b,
+        metadata=meta_b,
+        existing_submissions=existing_a,
+    )
+    assert template_check.is_flagged is False
+    assert template_check.reason is None
+
+    # 2. Два різні студенти зберегли різні файли в ту саму секунду на ПК з creator="Student"
+    same_sec_a = _write_custom_docx(
+        tmp_path / "classroom_sec_a.docx",
+        paragraphs=[
+            "Опис алгоритмів сортування масивів методом злиття та швидкого сортування у Python.",
+            "Проведено експериментальне порівняння складності алгоритмів на різних наборах даних.",
+        ],
+        creator="Student",
+        created_iso="2026-11-25T09:10:00Z",
+        modified_iso="2026-11-25T10:30:00Z",
+    )
+    same_sec_b = _write_custom_docx(
+        tmp_path / "classroom_sec_b.docx",
+        paragraphs=[
+            "Дослідження принципів криптографічного хешування та цифрових підписів у вебдодатках.",
+            "Розглянуто стандарти SHA-256, захист паролів сіллю та перевірку цілісності файлів.",
+        ],
+        creator="Student",
+        created_iso="2026-11-25T09:42:00Z",
+        modified_iso="2026-11-25T10:30:00Z",
+    )
+
+    sec_meta_a = extract_document_metadata(same_sec_a)
+    sec_meta_b = extract_document_metadata(same_sec_b)
+    sec_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_file_sha256(same_sec_b),
+        metadata=sec_meta_b,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=uuid.uuid4(),
+                student_id=student_a,
+                file_hash=compute_file_sha256(same_sec_a),
+                extracted_metadata=sec_meta_a,
+            )
+        ],
+    )
+    assert sec_check.is_flagged is False
+    assert sec_check.reason is None
+
+    # 3. Збіг created + modified (навіть при системному creator="User") спрацьовує як плагіат
+    same_created_and_modified = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash="b" * 64,
+        metadata=ExtractedMetadata(
+            creator="User",
+            created="2026-09-01T08:00:00Z",
+            modified="2026-11-25T10:12:00Z",
+        ),
+        existing_submissions=existing_a,
+    )
+    assert same_created_and_modified.is_flagged is True
+    assert same_created_and_modified.reason is not None
+    assert "docProps/core.xml" in same_created_and_modified.reason
+
+    # 4. Несистемний creator + modified спрацьовує як плагіат
+    named_author_match = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash="c" * 64,
+        metadata=ExtractedMetadata(
+            creator="Мельник Олександр",
+            created="2026-11-25T09:50:00Z",
+            modified="2026-11-25T11:15:00Z",
+        ),
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=uuid.uuid4(),
+                student_id=student_a,
+                file_hash="d" * 64,
+                extracted_metadata=ExtractedMetadata(
+                    creator="Мельник Олександр",
+                    created="2026-11-25T09:00:00Z",
+                    modified="2026-11-25T11:15:00Z",
+                ),
+            )
+        ],
+    )
+    assert named_author_match.is_flagged is True
+    assert named_author_match.reason is not None
+    assert "docProps/core.xml" in named_author_match.reason
+
+
+def test_antiplagiarism_detects_resaved_docx_without_core_xml_and_minor_edit(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє виявлення копії .docx без core.xml (Google Docs) та з 1 зміненим словом."""
+    student_a = uuid.uuid4()
+    student_b = uuid.uuid4()
+    sub_a_id = uuid.uuid4()
+
+    original_paragraphs = [
+        "Практична робота з автоматизації обробки текстових документів у фаховому коледжі.",
+        "Метою завдання є формування навичок налаштування полів сторінки, шрифтової гарнітури, "
+        "міжрядкових інтервалів та вирівнювання основного тексту відповідно до методичних вимог.",
+        "У ході виконання створено структурований звіт із нумерованими розділами, "
+        "маркованим переліком ключових результатів і зведеною аналітичною таблицею показників.",
+        "Отримані результати підтверджують коректність застосованих стилів форматування.",
+    ]
+    original_table = [
+        ["Показник", "Значення", "Примітка"],
+        ["Шрифт", "Times New Roman", "Основний текст"],
+        ["Інтервал", "Півтора рядка", "Вимога стандарту"],
+    ]
+
+    orig_docx = _write_custom_docx(
+        tmp_path / "orig_report.docx",
+        paragraphs=original_paragraphs,
+        table_rows=original_table,
+        creator="Коваленко Анна",
+        created_iso="2026-11-20T09:00:00Z",
+        modified_iso="2026-11-20T09:40:00Z",
+    )
+
+    # Копія 1: повністю очищений core.xml (симуляція перезбереження через Google Docs)
+    resaved_exact_docx = _write_custom_docx(
+        tmp_path / "resaved_google_docs.docx",
+        paragraphs=original_paragraphs,
+        table_rows=original_table,
+        strip_core_xml=True,
+    )
+
+    # Копія 2: очищений core.xml + змінене одне слово у тексті
+    edited_paragraphs = list(original_paragraphs)
+    edited_paragraphs[0] = (
+        "Практична робота з автоматизації підготовки текстових документів у фаховому коледжі."
+    )
+    edited_docx = _write_custom_docx(
+        tmp_path / "resaved_one_word_changed.docx",
+        paragraphs=edited_paragraphs,
+        table_rows=original_table,
+        strip_core_xml=True,
+    )
+
+    meta_orig = extract_document_metadata(orig_docx)
+    meta_resaved = extract_document_metadata(resaved_exact_docx)
+    meta_edited = extract_document_metadata(edited_docx)
+
+    assert meta_orig.content_fingerprint is not None
+    assert len(meta_orig.text_shingles) >= 12
+    assert meta_resaved.creator is None
+    assert meta_resaved.created is None
+    assert meta_resaved.content_fingerprint == meta_orig.content_fingerprint
+    assert meta_edited.content_fingerprint != meta_orig.content_fingerprint
+
+    similarity = compute_shingle_jaccard(meta_orig.text_shingles, meta_edited.text_shingles)
+    assert similarity is not None
+    assert similarity >= 0.85
+
+    existing = [
+        DummySubmissionRecord(
+            id=sub_a_id,
+            student_id=student_a,
+            file_hash=compute_file_sha256(orig_docx),
+            extracted_metadata=meta_orig,
+        )
+    ]
+
+    # Перевірка 1: точний збіг структурного відбитка без core.xml
+    resaved_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_file_sha256(resaved_exact_docx),
+        metadata=meta_resaved,
+        existing_submissions=existing,
+    )
+    assert resaved_check.is_flagged is True
+    assert resaved_check.matched_submission_id == sub_a_id
+    assert resaved_check.reason is not None
+    assert "Збіг структурного вмісту" in resaved_check.reason
+
+    # Перевірка 2: очищений core.xml + 1 змінене слово -> детекція через MinHash Jaccard
+    edited_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_file_sha256(edited_docx),
+        metadata=meta_edited,
+        existing_submissions=existing,
+    )
+    assert edited_check.is_flagged is True
+    assert edited_check.matched_submission_id == sub_a_id
+    assert edited_check.reason is not None
+    assert "Висока текстова схожість" in edited_check.reason
+
+
+def test_antiplagiarism_detects_html_copy_with_comment_and_renamed_css_classes() -> None:
+    """Перевіряє виявлення копії HTML із доданим коментарем і перейменованими CSS-класами."""
+    student_a = uuid.uuid4()
+    student_b = uuid.uuid4()
+    sub_a_id = uuid.uuid4()
+
+    html_a = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Портал відділення</title>
+        <style>
+          .hero-banner { display: flex; padding: 20px; color: #1e293b; }
+          #course-grid { gap: 16px; background-color: #f8fafc; }
+        </style>
+      </head>
+      <body>
+        <header id="top-bar" class="hero-banner">
+          <h1>ІТ-відділення фахового коледжу</h1>
+          <nav><a href="#about">Про відділення</a></nav>
+        </header>
+        <main id="course-grid" style="margin: 12px; padding: 8px;">
+          <section>
+            <h2>Освітні програми</h2>
+            <p>
+              Підготовка фахівців із розробки програмного забезпечення та сучасних вебтехнологій.
+            </p>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+
+    html_b = """<!DOCTYPE html>
+    <html lang="uk">
+      <head>
+        <meta charset="UTF-8">
+        <title>Мій варіант сторінки</title>
+        <style>
+          /* custom styles */
+          #renamed-grid { background-color: #f8fafc; gap: 16px; }
+          .my-header-box { color: #1e293b; display: flex; padding: 20px; }
+        </style>
+      </head>
+      <body>
+        <!-- my work -->
+        <header id="nav-wrapper" class="my-header-box">
+          <h1>ІТ-відділення фахового коледжу</h1>
+          <nav><a href="#about">Про відділення</a></nav>
+        </header>
+        <main id="renamed-grid" style="padding: 8px; margin: 12px;">
+          <section>
+            <!-- section comment -->
+            <h2>Освітні програми</h2>
+            <p>
+              Підготовка фахівців із розробки програмного забезпечення та сучасних вебтехнологій.
+            </p>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+
+    hash_a = compute_code_sha256(html_a)
+    hash_b = compute_code_sha256(html_b)
+    assert hash_a != hash_b
+
+    meta_a = extract_document_metadata(raw_code=html_a)
+    meta_b = extract_document_metadata(raw_code=html_b)
+    assert meta_a.content_fingerprint is not None
+    assert meta_a.content_fingerprint == meta_b.content_fingerprint
+
+    plagiarism = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=hash_b,
+        metadata=meta_b,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=sub_a_id,
+                student_id=student_a,
+                file_hash=hash_a,
+                extracted_metadata=meta_a,
+            )
+        ],
+        variants_count=10,
+        format_type=PracticalFormat.HTML,
+    )
+    assert plagiarism.is_flagged is True
+    assert plagiarism.matched_submission_id == sub_a_id
+    assert plagiarism.reason is not None
+    assert "Збіг структурного вмісту" in plagiarism.reason
+
+    # Чесні студенти з однаковим простим HTML-скелетом, але зовсім різними текстами (>15 слів)
+    honest_html_1 = """<!DOCTYPE html>
+    <html lang="uk"><body>
+      <h1>Лабораторія електроніки коледжу</h1>
+      <h2>Обладнання</h2>
+      <p>
+        У кабінеті встановлено сучасні <strong>осцилографи</strong>,
+        блоки живлення та стенди для паяння схем.
+      </p>
+      <h2>Заняття</h2>
+      <p>
+        Студенти відпрацьовують <em>діагностику</em> мікроконтролерів
+        і збирають власні прототипи пристроїв.
+      </p>
+      <p>Кожна група виконує серію практичних вимірювань за індивідуальними схемами.</p>
+      <blockquote>Точність інженерних розрахунків гарантує надійність приладу.</blockquote>
+    </body></html>
+    """
+    honest_html_2 = """<!DOCTYPE html>
+    <html lang="uk"><body>
+      <h1>Спортивний клуб студентів</h1>
+      <h2>Секції</h2>
+      <p>
+        Протягом семестру працюють гуртки <strong>волейболу</strong>,
+        легкої атлетики, тенісу й шахових турнірів.
+      </p>
+      <h2>Змагання</h2>
+      <p>
+        Команди регулярно здобувають <em>перемоги</em> на обласних
+        спартакіадах серед закладів освіти.
+      </p>
+      <p>Тренування проходять тричі на тиждень у новому гімнастичному залі корпусу.</p>
+      <blockquote>Систематичні тренування формують витривалість та командний дух.</blockquote>
+    </body></html>
+    """
+    honest_meta_1 = extract_document_metadata(raw_code=honest_html_1)
+    honest_meta_2 = extract_document_metadata(raw_code=honest_html_2)
+    assert honest_meta_1.content_fingerprint == honest_meta_2.content_fingerprint
+    honest_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_code_sha256(honest_html_2),
+        metadata=honest_meta_2,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=uuid.uuid4(),
+                student_id=student_a,
+                file_hash=compute_code_sha256(honest_html_1),
+                extracted_metadata=honest_meta_1,
+            )
+        ],
+        variants_count=10,
+        format_type=PracticalFormat.HTML,
+    )
+    assert honest_check.is_flagged is False
+
+
+def test_antiplagiarism_detects_resaved_xlsx_without_core_xml_and_respects_single_variant(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє виявлення перезбереженого .xlsx без core.xml та захист 1-варіантних вправ."""
+    from tests.conftest import rewrite_openxml_core_metadata
+
+    student_a = uuid.uuid4()
+    student_b = uuid.uuid4()
+    sub_a_id = uuid.uuid4()
+
+    def _build_calc_xlsx(
+        path: Path,
+        *,
+        sheet_title: str,
+        localized_formulas: bool = False,
+        creator: str | None = "Ткаченко Олег",
+        created_iso: str | None = "2026-11-20T11:00:00Z",
+        modified_iso: str | None = "2026-11-20T11:20:00Z",
+        strip_core_xml: bool = False,
+    ) -> Path:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        assert ws is not None
+        ws.title = sheet_title
+        ws["A1"] = "Товар"
+        ws["B1"] = "Ціна"
+        for row_idx in range(2, 7):
+            ws[f"A{row_idx}"] = f"Позиція {row_idx - 1}"
+            ws[f"B{row_idx}"] = row_idx * 100
+        if localized_formulas:
+            ws["B7"] = "=СУММ(B2:B6)"
+            ws["B8"] = "=СЕРЕДНЄ(B2:B6)"
+            ws["B9"] = '=ЯКЩО(B7>1000; "Високий"; "Звичайний")'
+        else:
+            ws["B7"] = "=SUM(B2:B6)"
+            ws["B8"] = "=AVERAGE(B2:B6)"
+            ws["B9"] = '=IF(B7>1000, "Високий", "Звичайний")'
+        wb.save(str(path))
+        wb.close()
+        if strip_core_xml:
+            _strip_zip_member(path, CORE_XML_ARCHIVE_PATH)
+        else:
+            rewrite_openxml_core_metadata(
+                path,
+                creator=creator,
+                last_modified_by=creator,
+                created=created_iso,
+                modified=modified_iso,
+                revision="1",
+            )
+        return path
+
+    xlsx_orig = _build_calc_xlsx(tmp_path / "orig.xlsx", sheet_title="Розрахунок")
+    xlsx_resaved_no_core = _build_calc_xlsx(
+        tmp_path / "resaved_no_core.xlsx",
+        sheet_title="Лист1",
+        localized_formulas=True,
+        strip_core_xml=True,
+    )
+
+    meta_orig = extract_document_metadata(xlsx_orig)
+    meta_resaved = extract_document_metadata(xlsx_resaved_no_core)
+    hash_orig = compute_file_sha256(xlsx_orig)
+    hash_resaved = compute_file_sha256(xlsx_resaved_no_core)
+
+    assert hash_orig != hash_resaved
+    assert meta_orig.content_fingerprint is not None
+    assert meta_resaved.creator is None
+    assert meta_resaved.created is None
+    assert meta_resaved.content_fingerprint == meta_orig.content_fingerprint
+
+    resaved_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=hash_resaved,
+        metadata=meta_resaved,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=sub_a_id,
+                student_id=student_a,
+                file_hash=hash_orig,
+                extracted_metadata=meta_orig,
+            )
+        ],
+    )
+    assert resaved_check.is_flagged is True
+    assert resaved_check.matched_submission_id == sub_a_id
+    assert resaved_check.reason is not None
+    assert "Збіг структурного вмісту" in resaved_check.reason
+
+    # 1-варіантна вправа Excel у класі: два чесні студенти з різними created і creator="Student"
+    xlsx_class_a = _build_calc_xlsx(
+        tmp_path / "class_a.xlsx",
+        sheet_title="Звіт",
+        creator="Student",
+        created_iso="2026-11-25T10:00:00Z",
+        modified_iso="2026-11-25T10:15:00Z",
+    )
+    xlsx_class_b = _build_calc_xlsx(
+        tmp_path / "class_b.xlsx",
+        sheet_title="Звіт",
+        creator="Student",
+        created_iso="2026-11-25T10:08:00Z",
+        modified_iso="2026-11-25T10:22:00Z",
+    )
+    class_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_file_sha256(xlsx_class_b),
+        metadata=extract_document_metadata(xlsx_class_b),
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=uuid.uuid4(),
+                student_id=student_a,
+                file_hash=compute_file_sha256(xlsx_class_a),
+                extracted_metadata=extract_document_metadata(xlsx_class_a),
+            )
+        ],
+        variants_count=1,
+        format_type=PracticalFormat.XLSX,
+    )
+    assert class_check.is_flagged is False
+
+    # Та сама 1-варіантна вправа, але копія з очищеним core.xml (Google Sheets) -> плагіат
+    stripped_single_variant_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=hash_resaved,
+        metadata=meta_resaved,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=sub_a_id,
+                student_id=student_a,
+                file_hash=hash_orig,
+                extracted_metadata=meta_orig,
+            )
+        ],
+        variants_count=1,
+        format_type=PracticalFormat.XLSX,
+    )
+    assert stripped_single_variant_check.is_flagged is True
+
+
+def test_antiplagiarism_accdb_fingerprint_corrupt_safety_and_backward_compat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє відбитки .accdb (із mdbtools fallback), стійкість до битих файлів і JSONB."""
+    student_a = uuid.uuid4()
+    student_b = uuid.uuid4()
+    sub_a_id = uuid.uuid4()
+
+    # 1. Валідні .accdb із різними бінарними SHA-256 (інший запит), але ідентичною схемою таблиць
+    accdb_a = tmp_path / "db_a.accdb"
+    accdb_a.write_bytes(
+        build_accdb_bytes(
+            {"Students": [("ID", "AUTONUMBER"), ("FullName", "TEXT(150)")]},
+            queries=["QueryA"],
+        )
+    )
+    accdb_b = tmp_path / "db_b.accdb"
+    accdb_b.write_bytes(
+        build_accdb_bytes(
+            {"Students": [("ID", "AUTONUMBER"), ("FullName", "TEXT(150)")]},
+            queries=["QueryB"],
+        )
+    )
+    meta_a = extract_document_metadata(accdb_a)
+    meta_b = extract_document_metadata(accdb_b)
+    assert meta_a.content_fingerprint is not None
+    assert len(meta_a.content_fingerprint) == 64
+    assert meta_a.content_fingerprint == meta_b.content_fingerprint
+    assert meta_a.has_unique_content is False
+
+    # На 1-варіантній практичній Access порожня схема без даних не дає false positive
+    single_var_schema_only = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_file_sha256(accdb_b),
+        metadata=meta_b,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=sub_a_id,
+                student_id=student_a,
+                file_hash=compute_file_sha256(accdb_a),
+                extracted_metadata=meta_a,
+            )
+        ],
+        variants_count=1,
+        format_type=PracticalFormat.ACCDB,
+    )
+    assert single_var_schema_only.is_flagged is False
+
+    # На багатоваріантній практичній Access (>1 варіанта) збіг відбитка прапориться
+    multi_var_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash=compute_file_sha256(accdb_b),
+        metadata=meta_b,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=sub_a_id,
+                student_id=student_a,
+                file_hash=compute_file_sha256(accdb_a),
+                extracted_metadata=meta_a,
+            )
+        ],
+        variants_count=10,
+        format_type=PracticalFormat.ACCDB,
+    )
+    assert multi_var_check.is_flagged is True
+
+    # 2. Fallback mdb-tables/mdb-export із рядками даних фіксує has_unique_content=True
+    fake_accdb = tmp_path / "mdb_fallback.accdb"
+    fake_accdb.write_bytes(b"\x00\x01\x00\x00" + (b"\x00" * 64))
+
+    def _fake_which(name: str) -> str | None:
+        if name in {"mdb-tables", "mdb-export"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    def _fake_run(
+        cmd: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = (capture_output, text, timeout, check)
+        if cmd[0].endswith("mdb-tables"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="MSysObjects\nFriends\n", stderr="")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="ID,FullName\n1,Іваненко Петро\n2,Петренко Олена\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(shutil, "which", _fake_which)
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    meta_with_rows = extract_document_metadata(fake_accdb)
+    assert meta_with_rows.content_fingerprint is not None
+    assert meta_with_rows.has_unique_content is True
+
+    rows_single_var_check = evaluate_plagiarism(
+        student_id=student_b,
+        file_hash="e" * 64,
+        metadata=meta_with_rows,
+        existing_submissions=[
+            DummySubmissionRecord(
+                id=sub_a_id,
+                student_id=student_a,
+                file_hash="d" * 64,
+                extracted_metadata=meta_with_rows,
+            )
+        ],
+        variants_count=1,
+        format_type=PracticalFormat.ACCDB,
+    )
+    assert rows_single_var_check.is_flagged is True
+
+    # 3. Битий .accdb та пошкоджені внутрішні XML у .docx/.xlsx не кидають 500
+    corrupt_accdb = tmp_path / "broken.accdb"
+    corrupt_accdb.write_bytes(b"corrupt-access-binary-data")
+    corrupt_accdb_meta = extract_document_metadata(corrupt_accdb)
+    assert corrupt_accdb_meta.content_fingerprint is None
+
+    broken_inner_docx = tmp_path / "broken_inner.docx"
+    with zipfile.ZipFile(broken_inner_docx, mode="w") as zf:
+        zf.writestr("word/document.xml", b"<<<not-valid-xml>>>")
+    broken_docx_meta = extract_document_metadata(broken_inner_docx)
+    assert broken_docx_meta.content_fingerprint is None
+    assert broken_docx_meta.text_shingles == []
+
+    broken_inner_xlsx = tmp_path / "broken_inner.xlsx"
+    with zipfile.ZipFile(broken_inner_xlsx, mode="w") as zf:
+        zf.writestr("xl/workbook.xml", b"<<<not-valid-xml>>>")
+    broken_xlsx_meta = extract_document_metadata(broken_inner_xlsx)
+    assert broken_xlsx_meta.content_fingerprint is None
+
+    # 4. Зворотна сумісність десеріалізації старих записів JSONB без нових полів
+    legacy_meta = ExtractedMetadata.model_validate(
+        {"creator": "Legacy Author", "created": "2025-10-01T12:00:00Z"}
+    )
+    assert legacy_meta.content_fingerprint is None
+    assert legacy_meta.text_shingles == []
+    assert legacy_meta.has_unique_content is None
+
+    null_shingles_meta = ExtractedMetadata.model_validate({"text_shingles": None})
+    assert null_shingles_meta.text_shingles == []
