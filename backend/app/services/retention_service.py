@@ -9,6 +9,7 @@ from typing import Literal
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
@@ -123,6 +124,75 @@ def delete_submission_files_for_paths(
     return deleted_count
 
 
+async def delete_submission_file_safely_async(
+    raw_file_path: str | None,
+    *,
+    upload_dir: Path,
+) -> Literal["deleted", "missing", "unsafe", "empty"]:
+    """Асинхронно видаляє фізичний файл здачі у threadpool лише в межах `upload_dir`."""
+    return await run_in_threadpool(
+        delete_submission_file_safely,
+        raw_file_path,
+        upload_dir=upload_dir,
+    )
+
+
+async def delete_submission_files_for_paths_async(
+    file_paths: Iterable[str | None],
+    *,
+    upload_dir: Path,
+) -> int:
+    """Асинхронно видаляє унікальні файли здач у threadpool без блокування Event Loop."""
+    materialized_paths = list(file_paths)
+    if not materialized_paths:
+        return 0
+    return await run_in_threadpool(
+        delete_submission_files_for_paths,
+        materialized_paths,
+        upload_dir=upload_dir,
+    )
+
+
+def _inspect_submission_file_paths(
+    file_paths: Sequence[str],
+    *,
+    upload_dir: Path,
+) -> tuple[int, int, int]:
+    """Перевіряє фізичну наявність файлів на диску для dry-run очищення (у threadpool)."""
+    existing_files = 0
+    missing_files = 0
+    skipped_unsafe_paths = 0
+    for raw_path in file_paths:
+        resolved_path = resolve_submission_file_path(raw_path, upload_dir)
+        if resolved_path is None:
+            skipped_unsafe_paths += 1
+        elif resolved_path.is_file():
+            existing_files += 1
+        else:
+            missing_files += 1
+    return existing_files, missing_files, skipped_unsafe_paths
+
+
+def _delete_submission_file_paths_with_stats(
+    file_paths: Sequence[str],
+    *,
+    upload_dir: Path,
+) -> tuple[int, int, int]:
+    """Видаляє список файлів із диска у threadpool і повертає статистику результатів."""
+    deleted_files = 0
+    missing_files = 0
+    skipped_unsafe_paths = 0
+    for raw_path in file_paths:
+        outcome = delete_submission_file_safely(raw_path, upload_dir=upload_dir)
+        if outcome == "deleted":
+            deleted_files += 1
+        elif outcome == "missing":
+            missing_files += 1
+        elif outcome == "unsafe":
+            skipped_unsafe_paths += 1
+    return deleted_files, missing_files, skipped_unsafe_paths
+
+
 async def cleanup_expired_submissions(
     session: AsyncSession,
     *,
@@ -172,21 +242,22 @@ async def cleanup_expired_submissions(
     cleared_raw_code = 0
 
     if dry_run:
+        dry_run_paths: list[str] = []
         for submission in expired_submissions:
             if submission.file_path is not None and submission.file_path.strip():
-                resolved_path = resolve_submission_file_path(
-                    submission.file_path,
-                    effective_upload_dir,
-                )
-                if resolved_path is None:
-                    skipped_unsafe_paths += 1
-                elif resolved_path.is_file():
-                    deleted_files += 1
-                else:
-                    missing_files += 1
+                dry_run_paths.append(submission.file_path)
             if submission.raw_code is not None:
                 cleared_raw_code += 1
             cleaned_submissions += 1
+
+        if dry_run_paths:
+            deleted_files, missing_files, skipped_unsafe_paths = (
+                await run_in_threadpool(
+                    _inspect_submission_file_paths,
+                    dry_run_paths,
+                    upload_dir=effective_upload_dir,
+                )
+            )
 
         return RetentionCleanupSummary(
             cutoff=cutoff,
@@ -214,17 +285,12 @@ async def cleanup_expired_submissions(
     if expired_submissions:
         await session.commit()
 
-    for raw_path in paths_to_delete:
-        outcome = delete_submission_file_safely(
-            raw_path,
+    if paths_to_delete:
+        deleted_files, missing_files, skipped_unsafe_paths = await run_in_threadpool(
+            _delete_submission_file_paths_with_stats,
+            paths_to_delete,
             upload_dir=effective_upload_dir,
         )
-        if outcome == "deleted":
-            deleted_files += 1
-        elif outcome == "missing":
-            missing_files += 1
-        elif outcome == "unsafe":
-            skipped_unsafe_paths += 1
 
     return RetentionCleanupSummary(
         cutoff=cutoff,
@@ -342,7 +408,9 @@ __all__ = [
     "RetentionCleanupSummary",
     "cleanup_expired_submissions",
     "delete_submission_file_safely",
+    "delete_submission_file_safely_async",
     "delete_submission_files_for_paths",
+    "delete_submission_files_for_paths_async",
     "main",
     "resolve_submission_file_path",
     "run_periodic_retention_cleanup",

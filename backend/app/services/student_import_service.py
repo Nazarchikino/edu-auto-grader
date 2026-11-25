@@ -11,10 +11,11 @@ import docx
 from docx.opc.exceptions import PackageNotFoundError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.exceptions import DomainError, InvalidFileFormatError
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.core.upload_utils import format_size_limit_mb
 from app.graders.metadata import validate_zip_archive_safety
 from app.models.course import Practical
@@ -710,9 +711,15 @@ class StudentImportService:
             )
 
         if lower_filename.endswith(".docx"):
-            candidates, skipped_items = parse_docx_students(file_bytes)
+            candidates, skipped_items = await run_in_threadpool(
+                parse_docx_students,
+                file_bytes,
+            )
         else:
-            candidates, skipped_items = parse_txt_students(file_bytes)
+            candidates, skipped_items = await run_in_threadpool(
+                parse_txt_students,
+                file_bytes,
+            )
 
         if not candidates and not skipped_items:
             raise DomainError(
@@ -819,11 +826,12 @@ class StudentImportService:
             variant_index = calculate_variant_index(assigned_list_number, total_variants)
             variant_number = variant_index + 1
 
+            password_hash = await hash_password_async(temp_password)
             user_id = uuid.uuid4()
             user = User(
                 id=user_id,
                 email=resolved_email,
-                password_hash=hash_password(temp_password),
+                password_hash=password_hash,
                 full_name=candidate.full_name,
                 role=UserRole.STUDENT,
                 group_id=group.id,

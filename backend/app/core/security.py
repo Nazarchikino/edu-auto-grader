@@ -6,6 +6,7 @@ from typing import Literal
 import bcrypt
 import jwt
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.exceptions import DomainError
@@ -52,6 +53,16 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
         )
     except ValueError:
         return False
+
+
+async def hash_password_async(plain_password: str) -> str:
+    """Асинхронно хешує пароль через bcrypt у threadpool без блокування Event Loop."""
+    return await run_in_threadpool(hash_password, plain_password)
+
+
+async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+    """Асинхронно перевіряє пароль через bcrypt у threadpool без блокування Event Loop."""
+    return await run_in_threadpool(verify_password, plain_password, hashed_password)
 
 
 def _encode_jwt_token(

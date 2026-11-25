@@ -1601,3 +1601,59 @@ async def test_submit_html_starter_template_and_empty_body_returns_422(
     my_subs_resp = await async_client.get("/api/v1/submissions/me", headers=headers)
     assert my_subs_resp.status_code == 200
     assert my_subs_resp.json() == []
+
+
+async def test_check_files_exist_batch_handles_existing_missing_and_path_traversal(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє пакетну перевірку файлів: існуючі, відсутні та Path Traversal -> False."""
+    from starlette.concurrency import run_in_threadpool
+
+    from app.services.submission_service import _check_files_exist_batch
+
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir()
+
+    existing_abs_file = uploads_dir / "prac-1" / "student-1" / "sub-1.docx"
+    existing_abs_file.parent.mkdir(parents=True)
+    existing_abs_file.write_bytes(b"valid-docx-payload")
+
+    existing_rel_file = uploads_dir / "prac-1" / "student-2" / "sub-2.xlsx"
+    existing_rel_file.parent.mkdir(parents=True)
+    existing_rel_file.write_bytes(b"valid-xlsx-payload")
+
+    outside_secret = tmp_path / "outside_secret.docx"
+    outside_secret.write_bytes(b"sensitive-content")
+
+    existing_abs_key = existing_abs_file.as_posix()
+    existing_rel_key = "prac-1/student-2/sub-2.xlsx"
+    missing_key = (uploads_dir / "prac-1" / "student-1" / "missing.docx").as_posix()
+    outside_abs_key = outside_secret.as_posix()
+    traversal_rel_key = "../outside_secret.docx"
+    subdir_key = (uploads_dir / "prac-1").as_posix()
+
+    input_paths = [
+        existing_abs_key,
+        existing_abs_key,
+        existing_rel_key,
+        missing_key,
+        outside_abs_key,
+        traversal_rel_key,
+        subdir_key,
+        "",
+        "   ",
+    ]
+
+    result = await run_in_threadpool(
+        _check_files_exist_batch,
+        input_paths,
+        uploads_dir,
+    )
+
+    assert (existing_abs_key in result) is True
+    assert (existing_rel_key in result) is True
+    assert (missing_key in result) is False
+    assert (outside_abs_key in result) is False
+    assert (traversal_rel_key in result) is False
+    assert (subdir_key in result) is False
+    assert result == {existing_abs_key, existing_rel_key}

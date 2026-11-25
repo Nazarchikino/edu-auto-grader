@@ -48,7 +48,7 @@ from app.schemas.course import (
 )
 from app.schemas.grading import GradingRule
 from app.services.quiz_service import QuizService
-from app.services.retention_service import delete_submission_files_for_paths
+from app.services.retention_service import delete_submission_files_for_paths_async
 
 router = APIRouter(tags=["courses"])
 
@@ -630,7 +630,7 @@ async def delete_module(
     await db.commit()
 
     if submission_file_paths:
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths,
             upload_dir=settings.UPLOADS_DIR,
         )
@@ -954,7 +954,7 @@ async def delete_practical(
     await db.commit()
 
     if submission_file_paths:
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths,
             upload_dir=settings.UPLOADS_DIR,
         )

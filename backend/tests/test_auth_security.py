@@ -1,3 +1,4 @@
+import threading
 import uuid
 
 import bcrypt
@@ -7,7 +8,13 @@ from sqlalchemy import select
 
 from app.core.config import DEFAULT_JWT_SECRET_KEY, Settings, settings
 from app.core.rate_limit import SlidingWindowRateLimiter
-from app.core.security import PASSWORD_HASH_PREFIX, hash_password, verify_password
+from app.core.security import (
+    PASSWORD_HASH_PREFIX,
+    hash_password,
+    hash_password_async,
+    verify_password,
+    verify_password_async,
+)
 from app.models.user import AcademicGroup, User
 from tests.conftest import SqliteAsyncSessionAdapter, make_auth_headers
 
@@ -477,3 +484,51 @@ async def test_login_rate_limiting_blocks_after_n_failures_and_resets_on_success
         json={"email": "student2@kpefk.lcloud.in.ua", "password": "Student123!"},
     )
     assert other_user_login.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_hash_and_verify_password_async_offload_to_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє роботу hash_password_async / verify_password_async у пулі потоків."""
+    from app.core import security as security_module
+
+    long_cyrillic_password = (
+        "АсинхроннийКириличнийПарольДовшийЗа72БайтиДляПеревіркиThreadpool2026!"
+    )
+    assert len(long_cyrillic_password.encode("utf-8")) > 100
+
+    # 1. Реальне хешування та верифікація через threadpool
+    hashed = await hash_password_async(long_cyrillic_password)
+    assert hashed.startswith(PASSWORD_HASH_PREFIX)
+    assert await verify_password_async(long_cyrillic_password, hashed) is True
+    assert await verify_password_async(f"{long_cyrillic_password}x", hashed) is False
+    assert await verify_password_async(long_cyrillic_password, "") is False
+
+    # Зворотна сумісність із legacy bcrypt-хешем через async-обгортку
+    legacy_hash = bcrypt.hashpw(b"LegacyAsync1!", bcrypt.gensalt(rounds=4)).decode(
+        "utf-8"
+    )
+    assert await verify_password_async("LegacyAsync1!", legacy_hash) is True
+    assert await verify_password_async("WrongAsync1!", legacy_hash) is False
+    assert await verify_password_async(long_cyrillic_password, legacy_hash) is False
+
+    # 2. Підтверджуємо виконання у фоновому потоці (відмінному від потоку Event Loop)
+    event_loop_thread_id = threading.get_ident()
+    observed_thread_ids: list[int] = []
+
+    def _recording_hash(plain_password: str) -> str:
+        observed_thread_ids.append(threading.get_ident())
+        return hash_password(plain_password)
+
+    def _recording_verify(plain_password: str, password_hash: str) -> bool:
+        observed_thread_ids.append(threading.get_ident())
+        return verify_password(plain_password, password_hash)
+
+    monkeypatch.setattr(security_module, "hash_password", _recording_hash)
+    monkeypatch.setattr(security_module, "verify_password", _recording_verify)
+
+    worker_hash = await hash_password_async("WorkerThreadPass1!")
+    assert await verify_password_async("WorkerThreadPass1!", worker_hash) is True
+    assert len(observed_thread_ids) == 2
+    assert all(tid != event_loop_thread_id for tid in observed_thread_ids)

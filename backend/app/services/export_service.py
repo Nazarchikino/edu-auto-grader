@@ -22,6 +22,7 @@ from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untype
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.core.exceptions import DomainError
 from app.models.course import Course, CourseSlug, Module, Practical
@@ -1097,13 +1098,15 @@ class ExportService:
         )
 
         if export_format == ExportFormat.XLSX:
-            content = render_group_journal_xlsx(
+            content = await run_in_threadpool(
+                render_group_journal_xlsx,
                 journal=bundle.journal,
                 practicals=bundle.practicals,
             )
             media_type = XLSX_MEDIA_TYPE
         else:
-            content = render_group_journal_pdf(
+            content = await run_in_threadpool(
+                render_group_journal_pdf,
                 journal=bundle.journal,
                 practicals=bundle.practicals,
             )

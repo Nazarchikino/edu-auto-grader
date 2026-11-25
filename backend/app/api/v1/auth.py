@@ -13,8 +13,8 @@ from app.core.rate_limit import build_login_rate_limit_key, login_rate_limiter
 from app.core.security import (
     create_token_pair,
     decode_token,
-    hash_password,
-    verify_password,
+    hash_password_async,
+    verify_password_async,
 )
 from app.models.user import User
 from app.schemas.auth import (
@@ -84,7 +84,10 @@ async def login(
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
 
-    if user is None or not verify_password(payload.password, user.password_hash):
+    if user is None or not await verify_password_async(
+        payload.password,
+        user.password_hash,
+    ):
         if settings.ENABLE_LOGIN_RATE_LIMIT:
             login_rate_limiter.record_failure(
                 rate_limit_key,
@@ -153,14 +156,17 @@ async def change_password(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ChangePasswordResponse:
     """Змінює пароль поточного користувача, відкликає старі сесії та повертає нові токени."""
-    if not verify_password(payload.current_password, current_user.password_hash):
+    if not await verify_password_async(
+        payload.current_password,
+        current_user.password_hash,
+    ):
         raise DomainError(
             "Поточний пароль вказано невірно.",
             code="INVALID_CURRENT_PASSWORD",
             status_code=400,
         )
 
-    current_user.password_hash = hash_password(payload.new_password)
+    current_user.password_hash = await hash_password_async(payload.new_password)
     current_user.must_change_password = False
     current_user.token_version += 1
     await db.commit()

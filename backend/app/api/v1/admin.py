@@ -10,7 +10,7 @@ from app.api.deps import get_db, require_role
 from app.api.v1.auth import serialize_user
 from app.core.config import settings
 from app.core.exceptions import DomainError
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.core.upload_utils import read_upload_file_limited
 from app.models.course import Course
 from app.models.progress import Submission
@@ -26,7 +26,7 @@ from app.schemas.auth import (
     UserRead,
     UserUpdate,
 )
-from app.services.retention_service import delete_submission_files_for_paths
+from app.services.retention_service import delete_submission_files_for_paths_async
 from app.services.student_import_service import StudentImportService, generate_temp_password
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -339,9 +339,10 @@ async def create_admin_user(
             resolved_group_id = payload.group_id
         resolved_list_number = payload.list_number
 
+    password_hash = await hash_password_async(payload.password)
     user = User(
         email=email,
-        password_hash=hash_password(payload.password),
+        password_hash=password_hash,
         full_name=full_name,
         role=payload.role,
         group_id=resolved_group_id,
@@ -434,7 +435,7 @@ async def update_admin_user(
         user.list_number = None
 
     if "password" in fields_set and payload.password is not None:
-        user.password_hash = hash_password(payload.password)
+        user.password_hash = await hash_password_async(payload.password)
         user.token_version += 1
         if user.id != current_admin.id:
             user.must_change_password = True
@@ -463,7 +464,7 @@ async def reset_admin_user_password(
         else generate_temp_password()
     )
 
-    user.password_hash = hash_password(resolved_password)
+    user.password_hash = await hash_password_async(resolved_password)
     user.token_version += 1
     user.must_change_password = True
 
@@ -527,7 +528,7 @@ async def delete_admin_user(
     await db.commit()
 
     if submission_file_paths:
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths,
             upload_dir=settings.UPLOADS_DIR,
         )

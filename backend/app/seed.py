@@ -33,7 +33,7 @@ from app.models.user import (
     UserRole,
 )
 from app.schemas.grading import GradingRule
-from app.services.retention_service import delete_submission_files_for_paths
+from app.services.retention_service import delete_submission_files_for_paths_async
 
 logger = logging.getLogger(__name__)
 
@@ -609,7 +609,7 @@ async def seed_database(
         effective_upload_dir = (
             upload_dir if upload_dir is not None else settings.UPLOADS_DIR
         )
-        delete_submission_files_for_paths(
+        await delete_submission_files_for_paths_async(
             submission_file_paths_to_delete,
             upload_dir=effective_upload_dir,
         )
