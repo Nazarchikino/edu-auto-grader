@@ -1722,9 +1722,11 @@ export function ModuleViewPage(): ReactElement {
                   {/* Гілка Б (HTML): Вбудована HTML-пісочниця (Monaco Editor + <iframe sandbox>) */}
                   {practicalDetail.format_type === "html" ? (
                     <HtmlSandbox
+                      practicalId={practicalDetail.id}
                       practicalTitle={practicalDetail.title}
                       variant={practicalDetail.variant}
                       variantNumber={practicalDetail.variant_number}
+                      userId={user?.id}
                       isSubmitting={isSubmittingPractical}
                       onSubmitCode={handleHtmlSandboxSubmit}
                     />
