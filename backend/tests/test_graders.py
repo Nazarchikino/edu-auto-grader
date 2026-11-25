@@ -1,15 +1,28 @@
+import math
+import shutil
+import subprocess
 import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import docx
 import openpyxl  # type: ignore[import-untyped]
 import pytest
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt
 
 from app.core.config import settings
 from app.core.exceptions import GradingError, InvalidFileFormatError
-from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
+from app.graders.accdb_grader import (
+    AccdbGrader,
+    _parse_msys_objects_csv,
+    _parse_msys_relationships_csv,
+    build_accdb_bytes,
+)
 from app.graders.docx_grader import DocxGrader
 from app.graders.factory import GraderFactory
 from app.graders.html_grader import (
@@ -27,7 +40,7 @@ from app.graders.metadata import (
     parse_core_xml_bytes,
     validate_zip_archive_safety,
 )
-from app.graders.xlsx_grader import XlsxGrader
+from app.graders.xlsx_grader import XlsxGrader, _canonicalize_formula
 from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import ExtractedMetadata, GradingRule, GradingRuleType
 from app.seed import build_seed_bundle
@@ -1347,3 +1360,602 @@ def test_core_xml_parser_rejects_xml_entity_expansion_billion_laughs(
         extract_core_xml_metadata(malicious_docx)
     assert exc_archive.value.status_code == 422
     assert exc_archive.value.code == "UNSAFE_XML_CONTENT"
+
+
+def test_xlsx_grader_evaluates_uncached_complex_cross_sheet_and_localized_formulas(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє AST-обчислення формул без кешу (LibreOffice/Sheets), локалізації та цикли."""
+    # Перевірка локалізації у _canonicalize_formula без пошкодження тексту в лапках
+    assert (
+        _canonicalize_formula(
+            '=ЯКЩО(І(A1>0; B1<10); "ЯКЩО(СУММ(A1))"; "Ні")',
+            strip_dollar=False,
+        )
+        == 'IF(AND(A1>0,B1<10),"ЯКЩО(СУММ(A1))","Ні")'
+    )
+    assert (
+        _canonicalize_formula(
+            "=СУММ($B$2:$B$5)+ВПР(C2;'Квартал 1'!$A$2:$B$5;2;FALSE)",
+            strip_dollar=True,
+        )
+        == "SUM(B2:B5)+VLOOKUP(C2,'Квартал 1'!A2:B5,2,FALSE)"
+    )
+
+    xlsx_path = tmp_path / "uncached_complex.xlsx"
+    wb = openpyxl.Workbook()
+    ws_main = wb.active
+    assert ws_main is not None
+    ws_main.title = "Розрахунок"
+
+    ws_ref = wb.create_sheet(title="Довідник")
+    ws_ref["A1"] = "Код"
+    ws_ref["B1"] = "Ціна"
+    ws_ref["A2"] = "P1"
+    ws_ref["B2"] = 120.0
+    ws_ref["A3"] = "P2"
+    ws_ref["B3"] = 250.0
+    ws_ref["A4"] = "P3"
+    ws_ref["B4"] = 400.0
+    # Таблиця шкали для наближеного VLOOKUP (TRUE)
+    ws_ref["D2"] = 0
+    ws_ref["E2"] = "Незадовільно"
+    ws_ref["D3"] = 60
+    ws_ref["E3"] = "Задовільно"
+    ws_ref["D4"] = 75
+    ws_ref["E4"] = "Добре"
+    ws_ref["D5"] = 90
+    ws_ref["E5"] = "Відмінно"
+
+    ws_quoted = wb.create_sheet(title="Квартал 1")
+    ws_quoted["B2"] = 5.0
+
+    # Вхідні дані на основному аркуші (без кешованих результатів формул!)
+    ws_main["B2"] = 10.0
+    ws_main["C2"] = 5.0
+    ws_main["D2"] = 3.0
+    ws_main["B3"] = 20.0
+    ws_main["B4"] = 30.0
+    ws_main["A5"] = "P2"
+    ws_main["A6"] = 82.0
+    ws_main["A7"] = 0.0
+    ws_main["A8"] = "ІТ"
+    ws_main["B8"] = 100.0
+    ws_main["A9"] = "Економіка"
+    ws_main["B9"] = 200.0
+    ws_main["A10"] = "ІТ"
+    ws_main["B10"] = 350.0
+
+    # 1. Вкладені дужки та міжсторінкове посилання з лапками: (10+5)*3 + 5 = 50
+    ws_main["E2"] = "=(B2+C2)*D2+'Квартал 1'!$B$2"
+    # 2. IF + AND/OR/NOT (ліниве обчислення у E4 уникає ділення на нуль)
+    ws_main["E3"] = '=IF(AND(B2>5, OR(C2=5, NOT(D2=3))), "Пройдено", "Провал")'
+    ws_main["E4"] = "=IF(A7=0, 42, 100/A7)"
+    # 3. VLOOKUP точний (FALSE) та наближений (TRUE) по міжсторінковому діапазону Довідник!
+    ws_main["E5"] = "=VLOOKUP(A5, Довідник!$A$2:$B$4, 2, FALSE)"
+    ws_main["E6"] = "=VLOOKUP(A6, Довідник!$D$2:$E$5, 2, TRUE)"
+    # 4. Математичні функції: SQRT, EXP, COS, SIN, ABS, ROUND, POWER
+    ws_main["E7"] = "=ROUND(SQRT(16) + EXP(0) + COS(0) + SIN(0) + ABS(-3.5) + POWER(2, 3), 1)"
+    # 5. Локалізовані українські/російські назви функцій (СУММ, ЯКЩО, ВПР, КОРІНЬ, ОКРУГЛ)
+    ws_main["E8"] = "=СУММ(B2:B4)"
+    ws_main["E9"] = '=ЯКЩО(І(B2=10; C2=5); ВПР(A5; Довідник!$A$2:$B$4; 2; 0); 0)'
+    ws_main["E10"] = "=ОКРУГЛ(КОРІНЬ(2) * 10; 2)"
+    # 6. SUMIF, COUNTIF, COUNTA
+    ws_main["E11"] = '=SUMIF(A8:A10, "ІТ", B8:B10)'
+    ws_main["E12"] = '=COUNTIF(B8:B10, ">=200")'
+    ws_main["E13"] = "=COUNTA(A8:A10)"
+    # 7. Циклічні посилання та перевищення ліміту глибини рекурсії (> 30) не зависають
+    ws_main["F1"] = "=F2+1"
+    ws_main["F2"] = "=F1+1"
+    ws_main["F3"] = "=F3*2"
+    ws_main["F4"] = "=" + ("ABS(" * 35) + "1" + (")" * 35)
+
+    wb.save(str(xlsx_path))
+    wb.close()
+
+    # Переконуємося, що data_only=True справді містить None для формульних комірок
+    check_wb = openpyxl.load_workbook(str(xlsx_path), data_only=True)
+    assert check_wb["Розрахунок"]["E2"].value is None
+    assert check_wb["Розрахунок"]["E5"].value is None
+    assert check_wb["Розрахунок"]["E9"].value is None
+    check_wb.close()
+
+    rules = [
+        GradingRule(
+            id="r_nested_cross",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E2",
+            expected="50",
+            points=1.0,
+            description="Вкладені дужки та міжсторінкове посилання у лапках",
+        ),
+        GradingRule(
+            id="r_if_and_or",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E3",
+            expected="Пройдено",
+            points=1.0,
+            description="IF з AND/OR/NOT повертає рядок",
+        ),
+        GradingRule(
+            id="r_if_lazy",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E4",
+            expected="42",
+            points=1.0,
+            description="IF ліниво не обчислює гілку з діленням на нуль",
+        ),
+        GradingRule(
+            id="r_vlookup_exact",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E5",
+            expected="250",
+            points=1.0,
+            description="Точний VLOOKUP по міжсторінковому діапазону Довідник!",
+        ),
+        GradingRule(
+            id="r_vlookup_approx",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E6",
+            expected="Добре",
+            points=1.0,
+            description="Наближений VLOOKUP (TRUE) по відсортованій шкалі",
+        ),
+        GradingRule(
+            id="r_math",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E7",
+            expected="17.5",
+            points=1.0,
+            description="SQRT + EXP + COS + SIN + ABS + POWER + ROUND",
+        ),
+        GradingRule(
+            id="r_loc_sum_formula",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Розрахунок!E8",
+            expected="SUM(B2:B4)",
+            points=1.0,
+            description="Локалізована СУММ нормалізується до SUM",
+        ),
+        GradingRule(
+            id="r_loc_sum_val",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E8",
+            expected="60",
+            points=1.0,
+            description="Обчислене значення локалізованої СУММ",
+        ),
+        GradingRule(
+            id="r_loc_if_vlookup_formula",
+            type=GradingRuleType.XLSX_FORMULA,
+            target="Розрахунок!E9",
+            expected="func:VLOOKUP",
+            points=1.0,
+            description="Локалізована ВПР проходить перевірку func:VLOOKUP",
+        ),
+        GradingRule(
+            id="r_loc_if_vlookup_val",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E9",
+            expected="250",
+            points=1.0,
+            description="Обчислення ЯКЩО + І + ВПР без кешу",
+        ),
+        GradingRule(
+            id="r_loc_round_sqrt",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E10",
+            expected=str(round(math.sqrt(2.0) * 10.0, 2)),
+            points=1.0,
+            description="Обчислення ОКРУГЛ(КОРІНЬ(2)*10; 2)",
+        ),
+        GradingRule(
+            id="r_sumif",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E11",
+            expected="450",
+            points=1.0,
+            description="Обчислення SUMIF за текстовим критерієм",
+        ),
+        GradingRule(
+            id="r_countif",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E12",
+            expected="2",
+            points=1.0,
+            description="Обчислення COUNTIF за числовим оператором",
+        ),
+        GradingRule(
+            id="r_counta",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!E13",
+            expected="3",
+            points=1.0,
+            description="Обчислення COUNTA",
+        ),
+        GradingRule(
+            id="r_cycle_mutual",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!F1",
+            expected="not_null",
+            points=1.0,
+            description="Взаємне циклічне посилання не зависає і повертає None",
+        ),
+        GradingRule(
+            id="r_cycle_self",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!F3",
+            expected="not_null",
+            points=1.0,
+            description="Самопосилання не зависає і повертає None",
+        ),
+        GradingRule(
+            id="r_depth_overflow",
+            type=GradingRuleType.XLSX_VALUE,
+            target="Розрахунок!F4",
+            expected="not_null",
+            points=1.0,
+            description="Глибоке вкладення > 30 дужок безпечно повертає None",
+        ),
+    ]
+
+    report = XlsxGrader().evaluate(file_path=xlsx_path, rules=rules, variant_data={})
+    by_id = {item.rule_id: item for item in report.results}
+
+    for ok_id in (
+        "r_nested_cross",
+        "r_if_and_or",
+        "r_if_lazy",
+        "r_vlookup_exact",
+        "r_vlookup_approx",
+        "r_math",
+        "r_loc_sum_formula",
+        "r_loc_sum_val",
+        "r_loc_if_vlookup_formula",
+        "r_loc_if_vlookup_val",
+        "r_loc_round_sqrt",
+        "r_sumif",
+        "r_countif",
+        "r_counta",
+    ):
+        assert by_id[ok_id].passed is True, f"Rule {ok_id} failed: {by_id[ok_id].feedback}"
+
+    assert by_id["r_cycle_mutual"].passed is False
+    assert by_id["r_cycle_mutual"].actual is None
+    assert by_id["r_cycle_self"].passed is False
+    assert by_id["r_cycle_self"].actual is None
+    assert by_id["r_depth_overflow"].passed is False
+    assert by_id["r_depth_overflow"].actual is None
+    assert report.passed_count == 14
+    assert report.failed_count == 3
+
+
+def test_docx_grader_inherits_font_from_base_style_chain_and_doc_defaults(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє повне спадкування шрифтів через ланцюжок base_style та <w:docDefaults>."""
+    grader = DocxGrader()
+
+    # Сценарій 1: Ланцюжок base_style (GrandChild -> Child -> Parent), run.font == None
+    chain_docx = tmp_path / "base_style_chain.docx"
+    doc1 = docx.Document()
+    parent_style = doc1.styles.add_style("CollegeBase", WD_STYLE_TYPE.PARAGRAPH)
+    parent_style.font.name = "Times New Roman"
+    child_style = doc1.styles.add_style("CollegeChild", WD_STYLE_TYPE.PARAGRAPH)
+    child_style.base_style = parent_style
+    child_style.font.size = Pt(14)
+    grandchild_style = doc1.styles.add_style("CollegeLeaf", WD_STYLE_TYPE.PARAGRAPH)
+    grandchild_style.base_style = child_style
+
+    p1 = doc1.add_paragraph(style="CollegeLeaf")
+    r1 = p1.add_run("Текст без явного шрифту на рівні Run.")
+    assert r1.font.name is None
+    assert r1.font.size is None
+    doc1.save(str(chain_docx))
+
+    rule_chain = GradingRule(
+        id="w_chain",
+        type=GradingRuleType.DOCX_FONT,
+        target="body",
+        expected="Times New Roman:14",
+        points=5.0,
+        description="Шрифт успадковується через ланцюжок base_style",
+    )
+    report_chain = grader.evaluate(file_path=chain_docx, rules=[rule_chain], variant_data={})
+    assert report_chain.passed_count == 1
+    assert report_chain.results[0].actual == "Times New Roman:14"
+
+    reopened_doc1 = docx.Document(str(chain_docx))
+    assert grader._resolve_paragraph_font_name(reopened_doc1, reopened_doc1.paragraphs[0]) == (
+        "Times New Roman"
+    )
+    assert grader._resolve_paragraph_font_size(reopened_doc1, reopened_doc1.paragraphs[0]) == 14.0
+
+    # Сценарій 2: Шрифт і кегль задані виключно у <w:docDefaults><w:rPrDefault><w:rPr>
+    defaults_docx = tmp_path / "doc_defaults_only.docx"
+    doc2 = docx.Document()
+    styles_el = doc2.styles.element
+    existing_defaults = styles_el.find(qn("w:docDefaults"))
+    if existing_defaults is not None:
+        styles_el.remove(existing_defaults)
+
+    doc_defaults_el = OxmlElement("w:docDefaults")
+    rpr_default_el = OxmlElement("w:rPrDefault")
+    rpr_el = OxmlElement("w:rPr")
+    rfonts_el = OxmlElement("w:rFonts")
+    rfonts_el.set(qn("w:ascii"), "Georgia")
+    rfonts_el.set(qn("w:hAnsi"), "Georgia")
+    sz_el = OxmlElement("w:sz")
+    sz_el.set(qn("w:val"), "28")  # 28 half-points == 14 pt
+    rpr_el.append(rfonts_el)
+    rpr_el.append(sz_el)
+    rpr_default_el.append(rpr_el)
+    doc_defaults_el.append(rpr_default_el)
+    styles_el.insert(0, doc_defaults_el)
+
+    p2 = doc2.add_paragraph("Абзац зі стилем Normal без явних властивостей шрифту.")
+    assert p2.runs[0].font.name is None
+    assert p2.runs[0].font.size is None
+    doc2.save(str(defaults_docx))
+
+    rule_defaults = GradingRule(
+        id="w_defaults",
+        type=GradingRuleType.DOCX_FONT,
+        target="body",
+        expected="Georgia:14",
+        points=5.0,
+        description="Шрифт і кегль зчитуються з w:docDefaults",
+    )
+    report_defaults = grader.evaluate(
+        file_path=defaults_docx, rules=[rule_defaults], variant_data={}
+    )
+    assert report_defaults.passed_count == 1
+    assert report_defaults.results[0].actual == "Georgia:14"
+
+    reopened_doc2 = docx.Document(str(defaults_docx))
+    assert grader._resolve_paragraph_font_name(reopened_doc2, reopened_doc2.paragraphs[0]) == (
+        "Georgia"
+    )
+    assert grader._resolve_paragraph_font_size(reopened_doc2, reopened_doc2.paragraphs[0]) == 14.0
+
+
+def test_accdb_grader_inspects_queries_forms_reports_relationships_and_mdb_export_csv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Перевіряє MSysObjects/MSysRelationships в AccdbGrader (access-parser + mdb-export CSV)."""
+    # 1. Прямий витяг із бінарного .accdb через access-parser (з фільтрацією прихованих)
+    full_accdb_path = tmp_path / "full_objects.accdb"
+    full_accdb_path.write_bytes(
+        build_accdb_bytes(
+            tables={
+                "Students": [("ID", "AUTONUMBER"), ("FullName", "TEXT(120)")],
+                "Grades": [("ID", "AUTONUMBER"), ("StudentID", "LONG"), ("Score", "DOUBLE")],
+            },
+            queries=["Запит_Успішність", "Query_TopStudents"],
+            forms=["Форма_Студенти"],
+            reports=["Звіт_Відомість"],
+            relationships=[
+                ("Grades", "Students", "StudentID", "ID", "Rel_Students_Grades"),
+            ],
+            extra_msys_objects=[
+                ("~sq_fHiddenTempQuery", 5, 0),
+                ("HiddenFormByFlag", -32768, 8),
+                ("MSysNavPaneForm", -32768, -2147483648),
+                ("SystemReportFlag2", -32764, 2),
+            ],
+        )
+    )
+
+    rules = [
+        GradingRule(
+            id="q_by_name_ok",
+            type=GradingRuleType.ACCDB_QUERY_EXISTS,
+            target="Запит_Успішність",
+            expected="true",
+            points=1.0,
+            description="Існує запит Запит_Успішність",
+        ),
+        GradingRule(
+            id="q_by_count_ok",
+            type=GradingRuleType.ACCDB_QUERY_EXISTS,
+            target="*",
+            expected="min>=2",
+            points=1.0,
+            description="У БД щонайменше 2 користувацькі запити (без ~sq_)",
+        ),
+        GradingRule(
+            id="q_hidden_ignored",
+            type=GradingRuleType.ACCDB_QUERY_EXISTS,
+            target="~sq_fHiddenTempQuery",
+            expected="true",
+            points=1.0,
+            description="Тимчасовий запит ~sq_ ігнорується",
+        ),
+        GradingRule(
+            id="f_by_name_ok",
+            type=GradingRuleType.ACCDB_FORM_EXISTS,
+            target="Форма_Студенти",
+            expected="true",
+            points=1.0,
+            description="Існує форма Форма_Студенти",
+        ),
+        GradingRule(
+            id="f_hidden_ignored",
+            type=GradingRuleType.ACCDB_FORM_EXISTS,
+            target="*",
+            expected="==1",
+            points=1.0,
+            description="Рівно 1 видима форма (приховані та MSys відфільтровані)",
+        ),
+        GradingRule(
+            id="r_by_name_ok",
+            type=GradingRuleType.ACCDB_REPORT_EXISTS,
+            target="Звіт_Відомість",
+            expected="true",
+            points=1.0,
+            description="Існує звіт Звіт_Відомість",
+        ),
+        GradingRule(
+            id="r_missing_fail",
+            type=GradingRuleType.ACCDB_REPORT_EXISTS,
+            target="Неіснуючий_Звіт",
+            expected="true",
+            points=1.0,
+            description="Відсутній звіт має провалити перевірку",
+        ),
+        GradingRule(
+            id="rel_arrow_ok",
+            type=GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+            target="Students->Grades",
+            expected="true",
+            points=1.0,
+            description="Зв'язок Students->Grades розпізнано незалежно від напрямку",
+        ),
+        GradingRule(
+            id="rel_comma_ok",
+            type=GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+            target="Grades,Students",
+            expected="true",
+            points=1.0,
+            description="Зв'язок Grades,Students розпізнано",
+        ),
+        GradingRule(
+            id="rel_wildcard_ok",
+            type=GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+            target="*",
+            expected="min>=1",
+            points=1.0,
+            description="Кількість зв'язків >= 1",
+        ),
+        GradingRule(
+            id="rel_missing_fail",
+            type=GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+            target="Students->Courses",
+            expected="true",
+            points=1.0,
+            description="Неіснуючий зв'язок провалює перевірку",
+        ),
+    ]
+
+    grader = AccdbGrader()
+    report = grader.evaluate(file_path=full_accdb_path, rules=rules, variant_data={})
+    by_id = {item.rule_id: item for item in report.results}
+
+    assert by_id["q_by_name_ok"].passed is True
+    assert by_id["q_by_count_ok"].passed is True
+    assert by_id["q_by_count_ok"].actual == "2"
+    assert by_id["q_hidden_ignored"].passed is False
+    assert by_id["f_by_name_ok"].passed is True
+    assert by_id["f_hidden_ignored"].passed is True
+    assert by_id["f_hidden_ignored"].actual == "1"
+    assert by_id["r_by_name_ok"].passed is True
+    assert by_id["r_missing_fail"].passed is False
+    assert by_id["rel_arrow_ok"].passed is True
+    assert by_id["rel_comma_ok"].passed is True
+    assert by_id["rel_wildcard_ok"].passed is True
+    assert by_id["rel_missing_fail"].passed is False
+    assert report.passed_count == 8
+    assert report.failed_count == 3
+
+    # 2. Тест CSV-парсерів та fallback-інтеграції через mdb-export (Linux/Docker шлях)
+    msys_objects_csv = (
+        "Id,Name,Type,Flags\n"
+        "101,Запит_Боржники,5,0\n"
+        "102,~sq_Internal,5,3\n"
+        "103,Форма_Картка,-32768,0\n"
+        "104,ПрихованаФорма,-32768,8\n"
+        "105,Звіт_Підсумок,-32764,0\n"
+        "106,MSysHiddenReport,-32764,-2147483648\n"
+    )
+    msys_rels_csv = (
+        "szObject,szReferencedObject,szColumn,szReferencedColumn,szRelationship\n"
+        "Orders,Customers,CustomerID,ID,FK_Orders_Customers\n"
+    )
+
+    csv_q, csv_f, csv_r = _parse_msys_objects_csv(msys_objects_csv)
+    assert csv_q == ("Запит_Боржники",)
+    assert csv_f == ("Форма_Картка",)
+    assert csv_r == ("Звіт_Підсумок",)
+
+    csv_rels = _parse_msys_relationships_csv(msys_rels_csv)
+    assert len(csv_rels) == 1
+    assert csv_rels[0].source_table == "Orders"
+    assert csv_rels[0].referenced_table == "Customers"
+
+    # База без об'єктів у бінарному MSysObjects — mdb-export fallback має підхопити об'єкти з CSV
+    bare_accdb_path = tmp_path / "bare_for_mdbtools.accdb"
+    bare_accdb_path.write_bytes(
+        build_accdb_bytes(
+            tables={
+                "Customers": [("ID", "AUTONUMBER"), ("Title", "TEXT")],
+                "Orders": [("ID", "AUTONUMBER"), ("CustomerID", "LONG")],
+            }
+        )
+    )
+
+    def _fake_which(binary_name: str) -> str | None:
+        if binary_name == "mdb-export":
+            return "/usr/bin/mdb-export"
+        return None
+
+    def _fake_subprocess_run(
+        cmd: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert capture_output is True
+        assert text is True
+        assert timeout == 10
+        assert check is False
+        table_arg = cmd[-1]
+        if table_arg == "MSysObjects":
+            return subprocess.CompletedProcess(cmd, 0, stdout=msys_objects_csv, stderr="")
+        if table_arg == "MSysRelationships":
+            return subprocess.CompletedProcess(cmd, 0, stdout=msys_rels_csv, stderr="")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not found")
+
+    monkeypatch.setattr(shutil, "which", _fake_which)
+    monkeypatch.setattr(subprocess, "run", _fake_subprocess_run)
+
+    mdb_rules = [
+        GradingRule(
+            id="mdb_q",
+            type=GradingRuleType.ACCDB_QUERY_EXISTS,
+            target="Запит_Боржники",
+            expected="true",
+            points=2.5,
+            description="Запит знайдено через mdb-export",
+        ),
+        GradingRule(
+            id="mdb_f",
+            type=GradingRuleType.ACCDB_FORM_EXISTS,
+            target="any",
+            expected="min>=1",
+            points=2.5,
+            description="Форма знайдена через mdb-export",
+        ),
+        GradingRule(
+            id="mdb_r",
+            type=GradingRuleType.ACCDB_REPORT_EXISTS,
+            target="Звіт_Підсумок",
+            expected="true",
+            points=2.5,
+            description="Звіт знайдено через mdb-export",
+        ),
+        GradingRule(
+            id="mdb_rel",
+            type=GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+            target="Customers->Orders",
+            expected="true",
+            points=2.5,
+            description="Зв'язок знайдено через mdb-export",
+        ),
+    ]
+    mdb_report = grader.evaluate(file_path=bare_accdb_path, rules=mdb_rules, variant_data={})
+    assert mdb_report.total_points == 10.0
+    assert mdb_report.passed_count == 4
+    assert mdb_report.failed_count == 0

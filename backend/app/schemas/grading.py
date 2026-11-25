@@ -26,6 +26,10 @@ class GradingRuleType(StrEnum):
     ACCDB_TABLE_EXISTS = "accdb_table_exists"
     ACCDB_COLUMN_EXISTS = "accdb_column_exists"
     ACCDB_COLUMN_TYPE = "accdb_column_type"
+    ACCDB_QUERY_EXISTS = "accdb_query_exists"
+    ACCDB_FORM_EXISTS = "accdb_form_exists"
+    ACCDB_REPORT_EXISTS = "accdb_report_exists"
+    ACCDB_RELATIONSHIP_EXISTS = "accdb_relationship_exists"
 
     # HTML5 (BeautifulSoup4 DOM)
     HTML_TAG_EXISTS = "html_tag_exists"

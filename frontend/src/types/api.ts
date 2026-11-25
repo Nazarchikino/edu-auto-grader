@@ -1,6 +1,8 @@
 import type { CourseSlug } from "./course";
 import type { ExtractedMetadata, GradingReport } from "./grading";
 
+export { GRADING_RULE_TYPES, type GradingRuleType } from "./grading";
+
 export const USER_ROLES = ["student", "teacher", "admin"] as const;
 
 export type UserRole = (typeof USER_ROLES)[number];

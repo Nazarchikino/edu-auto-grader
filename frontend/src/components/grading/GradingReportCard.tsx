@@ -93,6 +93,22 @@ const RULE_TYPE_META: Record<GradingRuleType, RuleTypeMeta> = {
     label: "Тип даних поля таблиці",
     engineLabel: "Access • access-parser",
   },
+  accdb_query_exists: {
+    label: "Наявність запиту у БД",
+    engineLabel: "Access • MSysObjects",
+  },
+  accdb_form_exists: {
+    label: "Наявність форми у БД",
+    engineLabel: "Access • MSysObjects",
+  },
+  accdb_report_exists: {
+    label: "Наявність звіту у БД",
+    engineLabel: "Access • MSysObjects",
+  },
+  accdb_relationship_exists: {
+    label: "Зв'язок між таблицями БД",
+    engineLabel: "Access • MSysRelationships",
+  },
   html_tag_exists: {
     label: "Наявність HTML-тегу за селектором",
     engineLabel: "HTML5 • BeautifulSoup4 DOM",

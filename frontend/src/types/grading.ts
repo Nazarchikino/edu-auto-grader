@@ -18,6 +18,10 @@ export const GRADING_RULE_TYPES = [
   "accdb_table_exists",
   "accdb_column_exists",
   "accdb_column_type",
+  "accdb_query_exists",
+  "accdb_form_exists",
+  "accdb_report_exists",
+  "accdb_relationship_exists",
   // HTML5 (BeautifulSoup4 DOM)
   "html_tag_exists",
   "html_tag_count",

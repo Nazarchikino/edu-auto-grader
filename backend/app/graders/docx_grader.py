@@ -30,6 +30,7 @@ _W_TAG_NUMPR = f"{{{_W_NS}}}numPr"
 _W_TAG_NUMID = f"{{{_W_NS}}}numId"
 _W_TAG_RFONTS = f"{{{_W_NS}}}rFonts"
 _W_TAG_SZ = f"{{{_W_NS}}}sz"
+_W_TAG_SZ_CS = f"{{{_W_NS}}}szCs"
 _W_TAG_SPACING = f"{{{_W_NS}}}spacing"
 _W_TAG_JC = f"{{{_W_NS}}}jc"
 _W_TAG_DOC_DEFAULTS = f"{{{_W_NS}}}docDefaults"
@@ -39,6 +40,7 @@ _W_ATTR_VAL = f"{{{_W_NS}}}val"
 _W_ATTR_ASCII = f"{{{_W_NS}}}ascii"
 _W_ATTR_HANSI = f"{{{_W_NS}}}hAnsi"
 _W_ATTR_CS = f"{{{_W_NS}}}cs"
+_W_ATTR_EAST_ASIA = f"{{{_W_NS}}}eastAsia"
 _W_ATTR_LINE = f"{{{_W_NS}}}line"
 _W_ATTR_LINE_RULE = f"{{{_W_NS}}}lineRule"
 
@@ -737,8 +739,42 @@ class DocxGrader(BaseGrader):
 
         return results
 
+    def _resolve_paragraph_font_name(
+        self,
+        document: DocxDocument,
+        paragraph: Paragraph,
+        run: Run | None = None,
+    ) -> str | None:
+        """Визначає ефективну гарнітуру шрифту абзацу або конкретного Run із повним спадкуванням."""
+        if run is not None:
+            run_name, _ = self._resolve_run_font(run)
+            if run_name is not None:
+                return run_name
+            fallback_name, _ = self._resolve_paragraph_level_font(document, paragraph)
+            return fallback_name
+
+        resolved_fonts = self._resolve_paragraph_fonts(document, paragraph)
+        return resolved_fonts[0][0] if resolved_fonts else None
+
+    def _resolve_paragraph_font_size(
+        self,
+        document: DocxDocument,
+        paragraph: Paragraph,
+        run: Run | None = None,
+    ) -> float | None:
+        """Визначає ефективний кегль (у пт) абзацу або конкретного Run із повним спадкуванням."""
+        if run is not None:
+            _, run_size = self._resolve_run_font(run)
+            if run_size is not None:
+                return run_size
+            _, fallback_size = self._resolve_paragraph_level_font(document, paragraph)
+            return fallback_size
+
+        resolved_fonts = self._resolve_paragraph_fonts(document, paragraph)
+        return resolved_fonts[0][1] if resolved_fonts else None
+
     def _resolve_run_font(self, run: Run) -> tuple[str | None, float | None]:
-        """Витягує ім'я та розмір шрифту безпосередньо з Run та його стилю."""
+        """Витягує ім'я та розмір шрифту безпосередньо з Run та ланцюжка його стилю."""
         name: str | None = run.font.name
         size_pt: float | None = float(run.font.size.pt) if run.font.size is not None else None
 
@@ -763,7 +799,7 @@ class DocxGrader(BaseGrader):
         document: DocxDocument,
         paragraph: Paragraph,
     ) -> tuple[str | None, float | None]:
-        """Визначає шрифт на рівні абзацу, ланцюжка його стилів, Normal та docDefaults."""
+        """Визначає шрифт на рівні абзацу, ланцюжка style.base_style, Normal та w:docDefaults."""
         name: str | None = None
         size_pt: float | None = None
 
@@ -778,7 +814,8 @@ class DocxGrader(BaseGrader):
             if size_pt is None:
                 size_pt = style_size
 
-        if name is None or size_pt is None:
+        # Якщо стиль абзацу не вказаний явно, успадковуємо від дефолтного стилю абзаців (Normal)
+        if (name is None or size_pt is None) and paragraph.style is None:
             try:
                 normal_style = document.styles["Normal"]
             except KeyError:
@@ -803,17 +840,22 @@ class DocxGrader(BaseGrader):
         self,
         style: BaseStyle,
     ) -> tuple[str | None, float | None]:
-        """Проходить ланцюжок base_style для пошуку успадкованої гарнітури та кегля."""
+        """Рекурсивно проходить ланцюжок style.base_style із захистом від циклів seen_style_ids."""
         name: str | None = None
         size_pt: float | None = None
         current: BaseStyle | None = style
-        visited: set[str] = set()
+        seen_style_ids: set[str] = set()
 
         while current is not None:
-            style_id = str(getattr(current, "style_id", id(current)))
-            if style_id in visited:
+            raw_style_id = getattr(current, "style_id", None)
+            style_key = (
+                raw_style_id
+                if isinstance(raw_style_id, str) and raw_style_id
+                else f"id:{id(current)}"
+            )
+            if style_key in seen_style_ids:
                 break
-            visited.add(style_id)
+            seen_style_ids.add(style_key)
 
             font = getattr(current, "font", None)
             if font is not None:
@@ -865,13 +907,15 @@ class DocxGrader(BaseGrader):
 
         rfonts = rpr_element.find(_W_TAG_RFONTS)
         if rfonts is not None and hasattr(rfonts, "get"):
-            for attr in (_W_ATTR_ASCII, _W_ATTR_HANSI, _W_ATTR_CS):
+            for attr in (_W_ATTR_ASCII, _W_ATTR_HANSI, _W_ATTR_CS, _W_ATTR_EAST_ASIA):
                 candidate = rfonts.get(attr)
                 if isinstance(candidate, str) and candidate.strip():
                     name = candidate.strip()
                     break
 
         sz = rpr_element.find(_W_TAG_SZ)
+        if sz is None:
+            sz = rpr_element.find(_W_TAG_SZ_CS)
         if sz is not None and hasattr(sz, "get"):
             raw_half_points = sz.get(_W_ATTR_VAL)
             if isinstance(raw_half_points, str):
