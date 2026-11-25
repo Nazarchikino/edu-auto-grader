@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.deps import ensure_course_owner_or_admin
 from app.core.config import settings
 from app.core.exceptions import (
     DomainError,
@@ -626,9 +627,15 @@ class SubmissionService:
         *,
         practical_id: uuid.UUID,
         payload: GradingRulesUpdateRequest,
+        requester: User,
     ) -> PracticalTeacherRead:
         """Оновлює JSONB-правила автоперевірки практичної роботи з валідацією сумісності."""
         practical = await self._load_practical_or_404(practical_id)
+        ensure_course_owner_or_admin(
+            practical.module.course,
+            requester,
+            context={"practical_id": str(practical_id)},
+        )
         expected_prefix = f"{practical.format_type.value}_"
 
         seen_rule_ids: set[str] = set()
@@ -673,9 +680,16 @@ class SubmissionService:
         *,
         submission_id: uuid.UUID,
         payload: ManualGradeUpdateRequest,
+        requester: User,
     ) -> SubmissionRead:
         """Виконує ручне коригування оцінки та коментаря викладача для здачі студента."""
         submission = await self._load_submission_or_404(submission_id)
+        ensure_course_owner_or_admin(
+            submission.practical.module.course,
+            requester,
+            code="FORBIDDEN_SUBMISSION_GRADING",
+            context={"submission_id": str(submission_id)},
+        )
         max_score = submission.practical.max_score
 
         final_score_decimal = Decimal(str(payload.final_score)).quantize(
@@ -719,18 +733,12 @@ class SubmissionService:
 
         submission = await self._load_submission_or_404(submission_id)
         practical = submission.practical
-        course = practical.module.course
-
-        if requester.role == UserRole.TEACHER and course.teacher_id != requester.id:
-            raise DomainError(
-                "Доступ до завантаження робіт іншого курсу заборонено.",
-                code="FORBIDDEN_SUBMISSION_DOWNLOAD",
-                status_code=403,
-                context={
-                    "submission_id": str(submission_id),
-                    "course_id": str(course.id),
-                },
-            )
+        ensure_course_owner_or_admin(
+            practical.module.course,
+            requester,
+            code="FORBIDDEN_SUBMISSION_DOWNLOAD",
+            context={"submission_id": str(submission_id)},
+        )
 
         filename_ascii, filename_utf8, content_disposition = (
             _build_submission_download_names(submission)
@@ -779,16 +787,21 @@ class SubmissionService:
         submission_id: uuid.UUID,
         requester: User,
     ) -> SubmissionRead:
-        """Повертає деталі здачі з перевіркою прав доступу (студент бачить лише власні)."""
+        """Повертає деталі здачі з перевіркою власника здачі (студент) або курсу (викладач)."""
         submission = await self._load_submission_or_404(submission_id)
-        if (
-            requester.role == UserRole.STUDENT
-            and submission.student_id != requester.id
-        ):
-            raise DomainError(
-                "Доступ до чужої здачі практичної роботи заборонено.",
+        if requester.role == UserRole.STUDENT:
+            if submission.student_id != requester.id:
+                raise DomainError(
+                    "Доступ до чужої здачі практичної роботи заборонено.",
+                    code="FORBIDDEN_SUBMISSION_ACCESS",
+                    status_code=403,
+                    context={"submission_id": str(submission_id)},
+                )
+        else:
+            ensure_course_owner_or_admin(
+                submission.practical.module.course,
+                requester,
                 code="FORBIDDEN_SUBMISSION_ACCESS",
-                status_code=403,
                 context={"submission_id": str(submission_id)},
             )
         return serialize_submission(submission, uploads_dir=self._uploads_dir)

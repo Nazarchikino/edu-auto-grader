@@ -222,7 +222,7 @@ async def submit_practical_work(
 async def update_practical_grading_rules(
     practical_id: uuid.UUID,
     payload: GradingRulesUpdateRequest,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PracticalTeacherRead:
     """Оновлює JSONB-правила автоматизованої перевірки практичної роботи (для викладача)."""
@@ -230,4 +230,5 @@ async def update_practical_grading_rules(
     return await service.update_grading_rules(
         practical_id=practical_id,
         payload=payload,
+        requester=current_user,
     )

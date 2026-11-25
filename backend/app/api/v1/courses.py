@@ -8,7 +8,12 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_current_user, get_db, require_role
+from app.api.deps import (
+    ensure_course_owner_or_admin,
+    get_current_user,
+    get_db,
+    require_role,
+)
 from app.core.config import settings
 from app.core.exceptions import DomainError
 from app.models.course import (
@@ -195,10 +200,11 @@ async def _load_module_or_404(
     db: AsyncSession,
     module_id: uuid.UUID,
 ) -> Module:
-    """Завантажує модуль разом із питаннями тесту та практичною або кидає 404."""
+    """Завантажує модуль разом із курсом, питаннями тесту та практичною або кидає 404."""
     stmt = (
         select(Module)
         .options(
+            selectinload(Module.course),
             selectinload(Module.quiz_questions),
             selectinload(Module.practical),
         )
@@ -274,29 +280,6 @@ async def _build_module_detail_read(
         best_quiz_score=best_quiz_score,
         practical_unlocked=practical_unlocked,
         practical=practical_summary,
-    )
-
-
-def _ensure_course_owner_or_admin(
-    course: Course,
-    current_user: User,
-    *,
-    detail: str,
-    context: dict[str, object],
-) -> None:
-    """Перевіряє, що користувач є адміністратором або викладачем відповідного курсу."""
-    if current_user.role == UserRole.ADMIN:
-        return
-    if current_user.role == UserRole.TEACHER and course.teacher_id == current_user.id:
-        return
-    raise DomainError(
-        detail,
-        code="FORBIDDEN_COURSE_MODIFICATION",
-        status_code=403,
-        context={
-            "course_id": str(course.id),
-            **context,
-        },
     )
 
 
@@ -446,8 +429,44 @@ async def update_course(
     current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseRead:
-    """Оновлює назву або опис навчального курсу."""
+    """Оновлює назву, опис або (лише для адміністратора) викладача навчального курсу."""
     course = await _load_course_or_404(db, course_id)
+    ensure_course_owner_or_admin(course, current_user)
+
+    if payload.teacher_id is not None and payload.teacher_id != course.teacher_id:
+        if current_user.role != UserRole.ADMIN:
+            raise DomainError(
+                "Змінювати викладача курсу має право лише адміністратор.",
+                code="FORBIDDEN_COURSE_TEACHER_CHANGE",
+                status_code=403,
+                context={
+                    "course_id": str(course.id),
+                    "requested_teacher_id": str(payload.teacher_id),
+                },
+            )
+        teacher_result = await db.execute(
+            select(User).where(User.id == payload.teacher_id)
+        )
+        new_teacher = teacher_result.scalar_one_or_none()
+        if new_teacher is None:
+            raise DomainError(
+                "Обраного викладача не знайдено.",
+                code="USER_NOT_FOUND",
+                status_code=404,
+                context={"teacher_id": str(payload.teacher_id)},
+            )
+        if new_teacher.role not in (UserRole.TEACHER, UserRole.ADMIN):
+            raise DomainError(
+                "Закріпити курс можна лише за викладачем або адміністратором.",
+                code="INVALID_COURSE_TEACHER",
+                status_code=422,
+                context={
+                    "teacher_id": str(payload.teacher_id),
+                    "role": new_teacher.role.value,
+                },
+            )
+        course.teacher_id = new_teacher.id
+
     if payload.title is not None:
         course.title = payload.title
     if payload.description is not None:
@@ -489,7 +508,9 @@ async def create_module(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModuleDetailRead:
     """Створює новий навчальний модуль з лекцією в межах курсу."""
-    await _load_course_or_404(db, course_id)
+    course = await _load_course_or_404(db, course_id)
+    ensure_course_owner_or_admin(course, current_user)
+
     module = Module(
         course_id=course_id,
         order_index=payload.order_index,
@@ -512,6 +533,11 @@ async def update_module(
 ) -> ModuleDetailRead:
     """Оновлює порядковий номер, заголовок або текст лекції модуля."""
     module = await _load_module_or_404(db, module_id)
+    ensure_course_owner_or_admin(
+        module.course,
+        current_user,
+        context={"module_id": str(module_id)},
+    )
     if payload.order_index is not None:
         module.order_index = payload.order_index
     if payload.title is not None:
@@ -556,10 +582,10 @@ async def delete_module(
             context={"module_id": str(module_id)},
         )
 
-    _ensure_course_owner_or_admin(
+    ensure_course_owner_or_admin(
         module.course,
         current_user,
-        detail="Видаляти модулі дозволено лише викладачу цього курсу або адміністратору.",
+        code="FORBIDDEN_COURSE_MODIFICATION",
         context={"module_id": str(module_id)},
     )
 
@@ -606,11 +632,16 @@ async def delete_module(
 )
 async def list_module_quiz_questions_teacher(
     module_id: uuid.UUID,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[QuizQuestionTeacherRead]:
     """Повертає перелік питань тесту-допуску модуля разом із правильними відповідями."""
     module = await _load_module_or_404(db, module_id)
+    ensure_course_owner_or_admin(
+        module.course,
+        current_user,
+        context={"module_id": str(module_id)},
+    )
     return [
         QuizQuestionTeacherRead(
             id=question.id,
@@ -631,11 +662,16 @@ async def list_module_quiz_questions_teacher(
 async def create_quiz_question(
     module_id: uuid.UUID,
     payload: QuizQuestionCreate,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizQuestionTeacherRead:
     """Додає нове тестове питання до модуля."""
-    await _load_module_or_404(db, module_id)
+    module = await _load_module_or_404(db, module_id)
+    ensure_course_owner_or_admin(
+        module.course,
+        current_user,
+        context={"module_id": str(module_id)},
+    )
     if payload.correct_option_index >= len(payload.options):
         raise DomainError(
             "Індекс правильної відповіді виходить за межі списку варіантів.",
@@ -672,11 +708,17 @@ async def create_quiz_question(
 )
 async def delete_quiz_question(
     question_id: uuid.UUID,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     """Видаляє тестове питання за його ідентифікатором."""
-    stmt = select(QuizQuestion).where(QuizQuestion.id == question_id)
+    stmt = (
+        select(QuizQuestion)
+        .options(
+            selectinload(QuizQuestion.module).selectinload(Module.course),
+        )
+        .where(QuizQuestion.id == question_id)
+    )
     result = await db.execute(stmt)
     question = result.scalar_one_or_none()
     if question is None:
@@ -686,6 +728,12 @@ async def delete_quiz_question(
             status_code=404,
             context={"question_id": str(question_id)},
         )
+
+    ensure_course_owner_or_admin(
+        question.module.course,
+        current_user,
+        context={"question_id": str(question_id)},
+    )
 
     await db.delete(question)
     await db.commit()
@@ -750,11 +798,16 @@ async def get_practical_for_teacher(
 async def upsert_module_practical(
     module_id: uuid.UUID,
     payload: PracticalCreate,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PracticalTeacherRead:
     """Створює або повністю оновлює практичну роботу модуля."""
     module = await _load_module_or_404(db, module_id)
+    ensure_course_owner_or_admin(
+        module.course,
+        current_user,
+        context={"module_id": str(module_id)},
+    )
     serialized_variants: list[dict[str, object]] = [
         variant.model_dump(mode="json") for variant in payload.variants
     ]
@@ -792,11 +845,17 @@ async def upsert_module_practical(
 async def update_practical(
     practical_id: uuid.UUID,
     payload: PracticalUpdate,
-    _current_user: TeacherOrAdminUser,
+    current_user: TeacherOrAdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PracticalTeacherRead:
     """Частково оновлює параметри, варіанти або правила практичної роботи."""
-    stmt = select(Practical).where(Practical.id == practical_id)
+    stmt = (
+        select(Practical)
+        .options(
+            selectinload(Practical.module).selectinload(Module.course),
+        )
+        .where(Practical.id == practical_id)
+    )
     result = await db.execute(stmt)
     practical = result.scalar_one_or_none()
     if practical is None:
@@ -806,6 +865,12 @@ async def update_practical(
             status_code=404,
             context={"practical_id": str(practical_id)},
         )
+
+    ensure_course_owner_or_admin(
+        practical.module.course,
+        current_user,
+        context={"practical_id": str(practical_id)},
+    )
 
     if payload.title is not None:
         practical.title = payload.title
@@ -859,10 +924,10 @@ async def delete_practical(
             context={"practical_id": str(practical_id)},
         )
 
-    _ensure_course_owner_or_admin(
+    ensure_course_owner_or_admin(
         practical.module.course,
         current_user,
-        detail="Видаляти практичні роботи дозволено лише викладачу цього курсу або адміністратору.",
+        code="FORBIDDEN_COURSE_MODIFICATION",
         context={"practical_id": str(practical_id)},
     )
 
