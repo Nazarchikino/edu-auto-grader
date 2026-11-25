@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.security import hash_password
-from app.graders.docx_grader import DocxGrader
+from app.graders.accdb_grader import AccdbGrader, build_accdb_bytes
 from app.graders.factory import GraderFactory
 from app.graders.html_grader import HtmlGrader
 from app.graders.xlsx_grader import XlsxGrader, _canonicalize_formula
@@ -183,7 +183,6 @@ def test_excel_course_formula_rules_have_valid_supported_expressions() -> None:
 def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> None:
     """Інваріант: усі 37 практичних і кожен варіант розкривають {placeholder} без залишків."""
     bundle = build_seed_bundle()
-    docx_grader = DocxGrader()
     practicals_checked = 0
     variants_checked = 0
     placeholders_resolved = 0
@@ -204,6 +203,9 @@ def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> No
                 f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
             )
             assert len(practical.variants) >= 1
+
+            for rule in parsed_rules:
+                grader.validate_rule_definition(rule)
 
             for variant in practical.variants:
                 variants_checked += 1
@@ -233,36 +235,11 @@ def test_all_course_variants_resolve_rule_placeholders_without_leftovers() -> No
                     assert resolved_target.strip() != ""
                     assert resolved_expected.strip() != ""
 
-                    # Додаткова перевірка синтаксису розкритих правил Word у DocxGrader
-                    if isinstance(grader, DocxGrader):
-                        if rule.type == GradingRuleType.DOCX_PAGE_MARGINS:
-                            parsed_margins = docx_grader._parse_expected_margins(resolved_expected)
-                            assert len(parsed_margins) >= 1
-                        elif rule.type == GradingRuleType.DOCX_FONT:
-                            font_name, font_size = docx_grader._parse_expected_font(
-                                resolved_expected
-                            )
-                            assert font_name is not None or font_size is not None
-                        elif rule.type == GradingRuleType.DOCX_LINE_SPACING:
-                            docx_grader.compare_numeric_condition(1.5, resolved_expected)
-                        elif rule.type == GradingRuleType.DOCX_ALIGNMENT:
-                            assert resolved_expected.strip().upper() in {
-                                "LEFT",
-                                "CENTER",
-                                "RIGHT",
-                                "JUSTIFY",
-                                "BOTH",
-                                "DISTRIBUTE",
-                            }
-                        elif rule.type in {
-                            GradingRuleType.DOCX_TABLE_EXISTS,
-                            GradingRuleType.DOCX_LIST_EXISTS,
-                        }:
-                            lowered = resolved_expected.strip().lower()
-                            if lowered in {"true", "false", "yes", "no"}:
-                                docx_grader.parse_bool_expected(resolved_expected)
-                            else:
-                                docx_grader.compare_numeric_condition(1, resolved_expected)
+                    # Повна перевірка синтаксису кожного розкритого правила відповідним парсером
+                    resolved_rule = rule.model_copy(
+                        update={"target": resolved_target, "expected": resolved_expected}
+                    )
+                    grader.validate_rule_definition(resolved_rule)
 
                 # Перевірка цілісності схеми Access M9 (tables збережено, а ключі відповідають їй)
                 if course.slug == CourseSlug.ACCESS and module.order_index == 9:
@@ -1442,3 +1419,178 @@ async def test_seed_sync_courses_protects_extra_modules_and_practicals_with_stud
     assert not extra_mod_file.exists()
     assert not mod2_file.exists()
     assert outside_secret_file.is_file()
+
+
+def test_all_course_rules_pass_validate_rule_definition_and_access_modules_separated(
+    tmp_path: Path,
+) -> None:
+    """Інваріант T6.13: усі 37 практичних валідні, а Модулі 5/6/7 Access реально розведені."""
+    bundle = build_seed_bundle()
+    practicals_validated = 0
+    rules_validated = 0
+
+    for course in bundle.courses:
+        for module in course.modules:
+            practical = module.practical
+            if practical is None:
+                continue
+            practicals_validated += 1
+            grader = GraderFactory.get_grader(practical.format_type)
+            parsed_rules = [
+                GradingRule.model_validate(raw_rule)
+                for raw_rule in practical.grading_rules
+            ]
+            assert sum(rule.points for rule in parsed_rules) == pytest.approx(10.0), (
+                f"{course.slug.value} M{module.order_index:02d}: сума балів != 10.0"
+            )
+            for rule in parsed_rules:
+                grader.validate_rule_definition(rule)
+                rules_validated += 1
+
+    assert practicals_validated == 37
+    assert rules_validated >= 190
+
+    access_course = next(
+        course for course in bundle.courses if course.slug == CourseSlug.ACCESS
+    )
+    access_by_order = {
+        module.order_index: module.practical
+        for module in access_course.modules
+        if module.practical is not None
+    }
+    m04 = access_by_order[4]
+    m05 = access_by_order[5]
+    m06 = access_by_order[6]
+    m07 = access_by_order[7]
+
+    m04_rules = [GradingRule.model_validate(r) for r in m04.grading_rules]
+    m05_rules = [GradingRule.model_validate(r) for r in m05.grading_rules]
+    m06_rules = [GradingRule.model_validate(r) for r in m06.grading_rules]
+    m07_rules = [GradingRule.model_validate(r) for r in m07.grading_rules]
+
+    assert any(r.type == GradingRuleType.ACCDB_RELATIONSHIP_EXISTS for r in m04_rules)
+    assert any(r.type == GradingRuleType.ACCDB_QUERY_EXISTS for r in m05_rules)
+    assert any(r.type == GradingRuleType.ACCDB_FORM_EXISTS for r in m06_rules)
+    assert any(r.type == GradingRuleType.ACCDB_REPORT_EXISTS for r in m07_rules)
+
+    assert m04.needs_rules_review is False
+    assert m05.needs_rules_review is False
+    assert m06.needs_rules_review is False
+    assert m07.needs_rules_review is False
+
+    # Файл із Модуля 4 (лише таблиці та зв'язки, без запитів/форм/звітів) не може дати 10/10 у M5–M7
+    m04_only_accdb = tmp_path / "firma_m04_only.accdb"
+    m04_only_accdb.write_bytes(
+        build_accdb_bytes(
+            tables={
+                "Співробітники": [
+                    ("Код співробітника", "AUTONUMBER"),
+                    ("Прізвище", "TEXT(100)"),
+                    ("Заробітна плата", "CURRENCY"),
+                ],
+                "Клієнти": [
+                    ("Код клієнта", "AUTONUMBER"),
+                    ("Назва компанії", "TEXT(150)"),
+                ],
+                "Замовлення": [
+                    ("Код замовлення", "AUTONUMBER"),
+                    ("Код клієнта", "LONG"),
+                    ("Код співробітника", "LONG"),
+                    ("Дата розміщення", "DATETIME"),
+                    ("Відмітка про виконання", "YES/NO"),
+                ],
+            },
+            relationships=[
+                (
+                    "Замовлення",
+                    "Співробітники",
+                    "Код співробітника",
+                    "Код співробітника",
+                    "FK_Ord_Emp",
+                ),
+                (
+                    "Замовлення",
+                    "Клієнти",
+                    "Код клієнта",
+                    "Код клієнта",
+                    "FK_Ord_Cli",
+                ),
+            ],
+        )
+    )
+    accdb_grader = AccdbGrader()
+    report_m04 = accdb_grader.evaluate(
+        file_path=m04_only_accdb, rules=m04_rules, variant_data={}
+    )
+    report_m05 = accdb_grader.evaluate(
+        file_path=m04_only_accdb, rules=m05_rules, variant_data={}
+    )
+    report_m06 = accdb_grader.evaluate(
+        file_path=m04_only_accdb, rules=m06_rules, variant_data={}
+    )
+    report_m07 = accdb_grader.evaluate(
+        file_path=m04_only_accdb, rules=m07_rules, variant_data={}
+    )
+
+    assert report_m04.total_points == 10.0
+    assert report_m05.total_points <= 2.0
+    assert report_m06.total_points == 0.0
+    assert report_m07.total_points == 0.0
+
+
+@pytest.mark.asyncio
+async def test_seed_and_sync_courses_persist_needs_rules_review(
+    db_session: SqliteAsyncSessionAdapter,
+    tmp_path: Path,
+) -> None:
+    """Перевіряє перенесення meta.needs_manual_rules_review у Practical.needs_rules_review."""
+    word_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    assert isinstance(word_course, Course)
+
+    m01_prac = (
+        await db_session.execute(
+            select(Practical)
+            .join(Module, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 1)
+        )
+    ).scalar_one()
+    m02_prac = (
+        await db_session.execute(
+            select(Practical)
+            .join(Module, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 2)
+        )
+    ).scalar_one()
+    assert isinstance(m01_prac, Practical)
+    assert isinstance(m02_prac, Practical)
+    assert m01_prac.needs_rules_review is False
+    assert m02_prac.needs_rules_review is True
+
+    # Перемикаємо прапорці у тимчасовому JSON та запускаємо --sync-courses
+    custom_dir = _copy_course_content_dir(tmp_path)
+    word_json_path = custom_dir / "word.json"
+    word_data: dict[str, Any] = json.loads(word_json_path.read_text(encoding="utf-8"))
+    for mod in word_data["modules"]:
+        if mod["order_index"] == 1:
+            mod["practical"]["meta"]["needs_manual_rules_review"] = True
+        elif mod["order_index"] == 2:
+            mod["practical"]["meta"]["needs_manual_rules_review"] = False
+    word_json_path.write_text(
+        json.dumps(word_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # justified Any: SqliteAsyncSessionAdapter structural duck-typing for AsyncSession
+    typed_db: Any = db_session
+    await seed_database(typed_db, sync_courses=True, content_dir=custom_dir)
+
+    m01_after = (
+        await db_session.execute(select(Practical).where(Practical.id == m01_prac.id))
+    ).scalar_one()
+    m02_after = (
+        await db_session.execute(select(Practical).where(Practical.id == m02_prac.id))
+    ).scalar_one()
+    assert m01_after.needs_rules_review is True
+    assert m02_after.needs_rules_review is False

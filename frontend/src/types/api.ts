@@ -1,7 +1,17 @@
 import type { CourseSlug } from "./course";
 import type { ExtractedMetadata, GradingReport } from "./grading";
 
-export { GRADING_RULE_TYPES, type GradingRuleType } from "./grading";
+export {
+  type PracticalStudentRead,
+  type PracticalSummaryRead,
+  type PracticalTeacherRead,
+  type PracticalUpdate,
+} from "./course";
+export {
+  GRADING_RULE_TYPES,
+  type GradingRulesUpdateRequest,
+  type GradingRuleType,
+} from "./grading";
 
 export const USER_ROLES = ["student", "teacher", "admin"] as const;
 
@@ -201,10 +211,20 @@ export interface GroupJournalRow {
   total_score: number;
 }
 
+export interface GroupJournalPracticalRead {
+  practical_id: string;
+  title: string;
+  course_slug: CourseSlug;
+  module_order_index: number;
+  max_score: number;
+  needs_rules_review: boolean;
+}
+
 export interface GroupJournalRead {
   group_id: string;
   group_code: string;
   specialty: string;
+  practicals: GroupJournalPracticalRead[];
   rows: GroupJournalRow[];
   error_stats: CriterionErrorStat[];
 }

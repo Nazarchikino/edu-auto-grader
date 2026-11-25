@@ -310,6 +310,7 @@ def serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
         instructions=practical.instructions,
         format_type=practical.format_type,
         max_score=float(practical.max_score),
+        needs_rules_review=practical.needs_rules_review,
         variants=variants,
         grading_rules=grading_rules,
     )
@@ -760,6 +761,7 @@ class SubmissionService:
             context={"practical_id": str(practical_id)},
         )
         expected_prefix = f"{practical.format_type.value}_"
+        grader = GraderFactory.get_grader(practical.format_type)
 
         seen_rule_ids: set[str] = set()
         for rule in payload.grading_rules:
@@ -785,13 +787,37 @@ class SubmissionService:
                     },
                 )
 
+            try:
+                grader.validate_rule_definition(rule)
+            except GradingError as exc:
+                context = dict(exc.context)
+                context.setdefault("rule_id", rule.id)
+                context["practical_id"] = str(practical.id)
+                detail = (
+                    exc.detail
+                    if rule.id in exc.detail
+                    else f"Некоректне правило '{rule.id}': {exc.detail}"
+                )
+                raise GradingError(
+                    detail,
+                    code=exc.code if exc.code != "GRADING_ERROR" else "INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context=context,
+                ) from exc
+
         total_points = sum(rule.points for rule in payload.grading_rules)
         practical.grading_rules = [
             rule.model_dump(mode="json") for rule in payload.grading_rules
         ]
-        practical.max_score = Decimal(str(round(total_points, 2))).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_HALF_UP,
+        if payload.sync_max_score:
+            practical.max_score = Decimal(str(round(total_points, 2))).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+        practical.needs_rules_review = (
+            payload.needs_rules_review
+            if payload.needs_rules_review is not None
+            else False
         )
 
         await self._db.commit()

@@ -336,7 +336,7 @@
           }
         ],
         "meta": {
-          "needs_manual_rules_review": true,
+          "needs_manual_rules_review": false,
           "control_questions": [],
           "source_files": [
             "word/labs/lab1/index.html",
@@ -1693,7 +1693,7 @@
           }
         ],
         "meta": {
-          "needs_manual_rules_review": true,
+          "needs_manual_rules_review": false,
           "control_questions": [],
           "source_files": [
             "word/labs/lab5/index.html",
@@ -2587,9 +2587,9 @@
             "id": "w_m08_table",
             "type": "docx_table_exists",
             "target": "document",
-            "expected": "true",
+            "expected": "rows>=4",
             "points": 4.0,
-            "description": "Перевірка наявності створеної та відформатованої таблиці"
+            "description": "Перевірка наявності створеної таблиці з щонайменше 4 рядками"
           },
           {
             "id": "w_m08_margins",
@@ -2617,7 +2617,7 @@
           }
         ],
         "meta": {
-          "needs_manual_rules_review": true,
+          "needs_manual_rules_review": false,
           "control_questions": [],
           "source_files": [
             "word/labs/lab8/index.html",

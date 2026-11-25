@@ -1657,3 +1657,259 @@ async def test_check_files_exist_batch_handles_existing_missing_and_path_travers
     assert (traversal_rel_key in result) is False
     assert (subdir_key in result) is False
     assert result == {existing_abs_key, existing_rel_key}
+
+
+async def test_update_rules_validation_sync_max_score_and_needs_rules_review(
+    async_client: AsyncClient,
+    db_session: SqliteAsyncSessionAdapter,
+) -> None:
+    """Перевіряє серверну валідацію правил (422), sync_max_score та прапорець needs_rules_review."""
+    teacher = await _get_user_by_email(db_session, "teacher@kpefk.lcloud.in.ua")
+    student1 = await _get_user_by_email(db_session, "student1@kpefk.lcloud.in.ua")
+    teacher_headers = make_auth_headers(teacher.id, teacher.role)
+    student_headers = make_auth_headers(student1.id, student1.role)
+
+    # Завантажуємо курси та конкретні практичні (Word M01 false, Word M02 true, Excel/Access/HTML)
+    word_course = (
+        await db_session.execute(select(Course).where(Course.slug == CourseSlug.WORD))
+    ).scalar_one()
+    assert isinstance(word_course, Course)
+
+    word_m01, word_m01_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 1)
+        )
+    ).one()
+    word_m02, word_m02_prac = (
+        await db_session.execute(
+            select(Module, Practical)
+            .join(Practical, Practical.module_id == Module.id)
+            .where(Module.course_id == word_course.id, Module.order_index == 2)
+        )
+    ).one()
+    assert isinstance(word_m01, Module) and isinstance(word_m01_prac, Practical)
+    assert isinstance(word_m02, Module) and isinstance(word_m02_prac, Practical)
+    assert word_m01_prac.needs_rules_review is False
+    assert word_m02_prac.needs_rules_review is True
+
+    _, _, excel_prac = await _get_course_module_and_practical(db_session, CourseSlug.EXCEL)
+    _, _, access_prac = await _get_course_module_and_practical(db_session, CourseSlug.ACCESS)
+    _, _, html_prac = await _get_course_module_and_practical(db_session, CourseSlug.HTML)
+
+    # 1. Перевіряємо прокидання needs_rules_review у всіх відповідних API-контрактах
+    await _grant_quiz_pass(db_session, student_id=student1.id, module_id=word_m02.id)
+
+    teacher_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{word_m02_prac.id}/teacher",
+        headers=teacher_headers,
+    )
+    assert teacher_prac_resp.status_code == 200
+    assert teacher_prac_resp.json()["needs_rules_review"] is True
+
+    student_prac_resp = await async_client.get(
+        f"/api/v1/practicals/{word_m02_prac.id}",
+        headers=student_headers,
+    )
+    assert student_prac_resp.status_code == 200
+    assert student_prac_resp.json()["needs_rules_review"] is True
+
+    courses_resp = await async_client.get("/api/v1/courses", headers=teacher_headers)
+    assert courses_resp.status_code == 200
+    word_course_json = next(
+        c for c in courses_resp.json() if c["slug"] == CourseSlug.WORD.value
+    )
+    m01_summary = next(m for m in word_course_json["modules"] if m["order_index"] == 1)
+    m02_summary = next(m for m in word_course_json["modules"] if m["order_index"] == 2)
+    assert m01_summary["practical_needs_rules_review"] is False
+    assert m02_summary["practical_needs_rules_review"] is True
+
+    group = (
+        await db_session.execute(select(AcademicGroup).where(AcademicGroup.code == "КН-31"))
+    ).scalar_one()
+    assert isinstance(group, AcademicGroup)
+    journal_resp = await async_client.get(
+        f"/api/v1/analytics/groups/{group.id}/journal?course_id={word_course.id}",
+        headers=teacher_headers,
+    )
+    assert journal_resp.status_code == 200
+    journal_practicals = journal_resp.json()["practicals"]
+    m01_j = next(p for p in journal_practicals if p["practical_id"] == str(word_m01_prac.id))
+    m02_j = next(p for p in journal_practicals if p["practical_id"] == str(word_m02_prac.id))
+    assert m01_j["needs_rules_review"] is False
+    assert m02_j["needs_rules_review"] is True
+
+    # 2. Невалідне правило docx_table_exists із expected="min_rows=4" -> 422 Unprocessable Entity
+    bad_docx_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_table_rule",
+                    "type": "docx_table_exists",
+                    "target": "document",
+                    "expected": "min_rows=4",
+                    "points": 10.0,
+                    "description": "Некоректний синтаксис таблиці",
+                }
+            ]
+        },
+    )
+    assert bad_docx_resp.status_code == 422
+    bad_docx_body = bad_docx_resp.json()
+    assert bad_docx_body["code"] == "INVALID_RULE_DEFINITION"
+    assert "bad_table_rule" in bad_docx_body["detail"]
+    assert "3x4" in bad_docx_body["detail"]
+    assert "rows>=4" in bad_docx_body["detail"]
+    assert bad_docx_body["context"]["rule_id"] == "bad_table_rule"
+
+    # Невалідні правила інших форматів (Excel, Access, HTML) та крос-форматне правило -> 422
+    bad_xlsx_resp = await async_client.put(
+        f"/api/v1/practicals/{excel_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_xlsx_cell",
+                    "type": "xlsx_formula",
+                    "target": "NOT_A_CELL_COORD",
+                    "expected": "SUM",
+                    "points": 10.0,
+                    "description": "Некоректна координата клітинки",
+                }
+            ]
+        },
+    )
+    assert bad_xlsx_resp.status_code == 422
+    assert bad_xlsx_resp.json()["code"] == "INVALID_RULE_DEFINITION"
+    assert bad_xlsx_resp.json()["context"]["rule_id"] == "bad_xlsx_cell"
+
+    bad_accdb_resp = await async_client.put(
+        f"/api/v1/practicals/{access_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_accdb_rel",
+                    "type": "accdb_relationship_exists",
+                    "target": "OnlyOneTable",
+                    "expected": "true",
+                    "points": 10.0,
+                    "description": "Зв'язок без другої таблиці",
+                }
+            ]
+        },
+    )
+    assert bad_accdb_resp.status_code == 422
+    assert bad_accdb_resp.json()["code"] == "INVALID_RULE_DEFINITION"
+    assert bad_accdb_resp.json()["context"]["rule_id"] == "bad_accdb_rel"
+
+    bad_html_resp = await async_client.put(
+        f"/api/v1/practicals/{html_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "bad_html_count",
+                    "type": "html_tag_count",
+                    "target": "table > tr",
+                    "expected": "not_a_number",
+                    "points": 10.0,
+                    "description": "Некоректна числова умова",
+                }
+            ]
+        },
+    )
+    assert bad_html_resp.status_code == 422
+    assert bad_html_resp.json()["code"] == "INVALID_RULE_DEFINITION"
+    assert bad_html_resp.json()["context"]["rule_id"] == "bad_html_count"
+
+    cross_format_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "wrong_format_rule",
+                    "type": "xlsx_formula",
+                    "target": "A1",
+                    "expected": "SUM",
+                    "points": 10.0,
+                    "description": "Правило Excel у роботі Word",
+                }
+            ]
+        },
+    )
+    assert cross_format_resp.status_code == 422
+    assert cross_format_resp.json()["code"] == "INVALID_RULE_TYPE_FOR_FORMAT"
+
+    # 3. Збереження з sync_max_score=False залишає max_score=10.0 і скидає needs_rules_review=False
+    partial_rules = [
+        {
+            "id": "m02_font_check",
+            "type": "docx_font",
+            "target": "all_paragraphs",
+            "expected": "Times New Roman:14",
+            "points": 4.0,
+            "description": "Основний шрифт Times New Roman 14 pt",
+        },
+        {
+            "id": "m02_table_check",
+            "type": "docx_table_exists",
+            "target": "document",
+            "expected": "rows>=4",
+            "points": 3.0,
+            "description": "Таблиця щонайменше з 4 рядками",
+        },
+    ]
+    keep_max_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": partial_rules,
+            "sync_max_score": False,
+        },
+    )
+    assert keep_max_resp.status_code == 200
+    keep_max_data = keep_max_resp.json()
+    assert keep_max_data["max_score"] == 10.0
+    assert keep_max_data["needs_rules_review"] is False
+    assert len(keep_max_data["grading_rules"]) == 2
+
+    # 4. sync_max_score=True оновлює max_score до суми балів (7.0) і зберігає явний прапорець
+    sync_max_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": partial_rules,
+            "sync_max_score": True,
+            "needs_rules_review": True,
+        },
+    )
+    assert sync_max_resp.status_code == 200
+    sync_max_data = sync_max_resp.json()
+    assert sync_max_data["max_score"] == 7.0
+    assert sync_max_data["needs_rules_review"] is True
+
+    # 5. Збереження без needs_rules_review скидає прапорець у False та приймає формат 3x4
+    reset_resp = await async_client.put(
+        f"/api/v1/practicals/{word_m02_prac.id}/rules",
+        headers=teacher_headers,
+        json={
+            "grading_rules": [
+                {
+                    "id": "m02_table_matrix",
+                    "type": "docx_table_exists",
+                    "target": "document",
+                    "expected": "3x4",
+                    "points": 10.0,
+                    "description": "Таблиця щонайменше 3x4",
+                }
+            ]
+        },
+    )
+    assert reset_resp.status_code == 200
+    assert reset_resp.json()["max_score"] == 10.0
+    assert reset_resp.json()["needs_rules_review"] is False

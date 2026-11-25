@@ -174,3 +174,17 @@ class GradingRulesUpdateRequest(BaseModel):
         min_length=1,
         description="Новий перелік декларативних правил оцінювання",
     )
+    sync_max_score: bool = Field(
+        default=True,
+        description=(
+            "Якщо True — автоматично оновлює max_score практичної рівним сумі балів правил; "
+            "якщо False — залишає поточний max_score (для частково ручного оцінювання)"
+        ),
+    )
+    needs_rules_review: bool | None = Field(
+        default=None,
+        description=(
+            "Опційне явне значення прапорця needs_rules_review; "
+            "якщо не передано — скидається у False після збереження правил викладачем"
+        ),
+    )

@@ -9,6 +9,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   BookOpenCheck,
@@ -112,7 +113,7 @@ const RULE_TYPE_SPECS: Record<GradingRuleType, RuleTypeSpec> = {
     label: "Наявність таблиці у документі (Word)",
     targetHint: "document або table_0",
     defaultTarget: "document",
-    expectedHint: "Умова кількості: >=1, true або min_rows=4",
+    expectedHint: "true, 3x4 або rows>=4",
     defaultExpected: ">=1",
     defaultPoints: 1.5,
     defaultDescription: "Документ містить щонайменше одну зведену таблицю",
@@ -306,6 +307,7 @@ const FORMAT_BADGE_CONFIG: Record<
 interface PracticalCatalogEntry {
   practicalId: string;
   practicalFormat: PracticalFormat;
+  needsRulesReview: boolean;
   moduleId: string;
   moduleOrderIndex: number;
   moduleTitle: string;
@@ -350,6 +352,7 @@ export function RuleBuilderPage(): ReactElement {
     queryPracticalId
   );
   const [rulesDraft, setRulesDraft] = useState<GradingRule[]>([]);
+  const [syncMaxScore, setSyncMaxScore] = useState<boolean>(true);
   const [showJsonInspector, setShowJsonInspector] = useState<boolean>(false);
   const [rawJsonInput, setRawJsonInput] = useState<string>("");
   const [feedbackBanner, setFeedbackBanner] = useState<{
@@ -377,6 +380,7 @@ export function RuleBuilderPage(): ReactElement {
           entries.push({
             practicalId: mod.practical_id,
             practicalFormat: mod.practical_format,
+            needsRulesReview: mod.practical_needs_rules_review,
             moduleId: mod.id,
             moduleOrderIndex: mod.order_index,
             moduleTitle: mod.title,
@@ -417,6 +421,7 @@ export function RuleBuilderPage(): ReactElement {
   const handleSelectPractical = (practicalId: string): void => {
     setSelectedPracticalId(practicalId);
     setSearchParams({ practicalId });
+    setSyncMaxScore(true);
     setFeedbackBanner(null);
   };
 
@@ -494,10 +499,12 @@ export function RuleBuilderPage(): ReactElement {
       void queryClient.invalidateQueries({
         queryKey: ["practical-teacher", updated.id],
       });
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
+      void queryClient.invalidateQueries({ queryKey: ["group-journal"] });
       setRulesDraft(updated.grading_rules);
       setFeedbackBanner({
         type: "success",
-        text: `Збережено ${updated.grading_rules.length} правил(о) автоперевірки для «${updated.title}».`,
+        text: `Збережено ${updated.grading_rules.length} правил(о) автоперевірки для «${updated.title}» (макс. бал: ${updated.max_score.toFixed(1)} б.).`,
       });
     },
     onError: (err) => {
@@ -767,6 +774,7 @@ export function RuleBuilderPage(): ReactElement {
         points: Number(rule.points),
         description: rule.description.trim(),
       })),
+      sync_max_score: syncMaxScore,
     });
   };
 
@@ -918,6 +926,15 @@ export function RuleBuilderPage(): ReactElement {
                   <h2 className="mt-2 line-clamp-2 text-sm font-bold text-slate-900">
                     {entry.moduleTitle}
                   </h2>
+                  {entry.needsRulesReview && (
+                    <span
+                      title="Стартові правила потребують перевірки викладачем або додаткової ручної оцінки"
+                      className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800"
+                    >
+                      <AlertTriangle className="h-3 w-3 shrink-0 text-amber-600" />
+                      <span>Потребує перевірки</span>
+                    </span>
+                  )}
                 </div>
                 <p className="mt-2 truncate text-[11px] text-slate-500">
                   {entry.courseTitle}
@@ -957,6 +974,29 @@ export function RuleBuilderPage(): ReactElement {
         </div>
       ) : (
         <form onSubmit={handleSaveRules} className="space-y-6">
+          {/* Інформаційний банер про необхідність перевірки стартових правил */}
+          {practicalDetail.needs_rules_review && (
+            <div
+              role="status"
+              className="flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-xs text-amber-950 shadow-xs"
+            >
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+              <div className="space-y-1">
+                <p className="text-sm font-bold text-amber-950">
+                  Стартові правила потребують перевірки викладачем або додаткової
+                  ручної оцінки
+                </p>
+                <p className="leading-relaxed text-amber-900">
+                  Ця практична робота містить візуальні, творчі або розширені
+                  елементи, які не повністю оцінюються парсером. Перевірте
+                  критерії нижче та збережіть правила, щоб підтвердити їх
+                  (вимкніть автосинхронізацію <code>max_score</code>, якщо
+                  частину балів ви плануєте виставляти вручну).
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Панель балансу балів та швидких шаблонів правил */}
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs sm:p-6">
             <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
@@ -1341,15 +1381,35 @@ export function RuleBuilderPage(): ReactElement {
 
           {/* Нижня панель збереження правил */}
           <div className="sticky bottom-4 z-10 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-lg backdrop-blur-xs">
-            <div className="text-xs text-slate-600">
-              Усього правил:{" "}
-              <span className="font-bold text-slate-900">
-                {rulesDraft.length}
-              </span>{" "}
-              • Сума балів:{" "}
-              <span className="font-mono font-bold text-blue-700">
-                {totalDraftPoints.toFixed(1)} б.
-              </span>
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+              <div>
+                Усього правил:{" "}
+                <span className="font-bold text-slate-900">
+                  {rulesDraft.length}
+                </span>{" "}
+                • Сума балів:{" "}
+                <span className="font-mono font-bold text-blue-700">
+                  {totalDraftPoints.toFixed(1)} б.
+                </span>
+                {!syncMaxScore && (
+                  <span className="ml-1.5 text-amber-700">
+                    (макс. бал залишиться {maxScore.toFixed(1)} б.)
+                  </span>
+                )}
+              </div>
+
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                <input
+                  type="checkbox"
+                  checked={syncMaxScore}
+                  onChange={(e) => setSyncMaxScore(e.target.checked)}
+                  className="h-4 w-4 rounded accent-blue-600"
+                />
+                <span>
+                  Автоматично синхронізувати <code>max_score</code> із сумою
+                  балів правил
+                </span>
+              </label>
             </div>
 
             <button

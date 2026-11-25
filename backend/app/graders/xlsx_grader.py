@@ -163,6 +163,136 @@ class XlsxGrader(BaseGrader):
     """Стратегія детермінованої автоперевірки електронних таблиць Microsoft Excel (.xlsx)."""
 
     format_type: PracticalFormat = PracticalFormat.XLSX
+    supported_rule_types: frozenset[GradingRuleType] = frozenset(
+        {
+            GradingRuleType.XLSX_FORMULA,
+            GradingRuleType.XLSX_VALUE,
+            GradingRuleType.XLSX_CHART_EXISTS,
+        }
+    )
+
+    def _prepare_cell_target_for_validation(self, target: str) -> str:
+        """Підставляє тестові координати замість плейсхолдерів у цілі комірки Excel."""
+        cleaned = target.strip()
+        if self.is_whole_placeholder(cleaned):
+            return "A1"
+        if "!" in cleaned:
+            raw_sheet, raw_coord = cleaned.rsplit("!", 1)
+            sheet_sample = self.substitute_placeholders_for_validation(raw_sheet, "Sheet1")
+            coord_sample = self.substitute_placeholders_for_validation(raw_coord, "A1")
+            return f"{sheet_sample}!{coord_sample}"
+        return self.substitute_placeholders_for_validation(cleaned, "A1")
+
+    def validate_rule_definition(self, rule: GradingRule) -> None:
+        """Перевіряє синтаксис правила Microsoft Excel (.xlsx) перед збереженням у БД."""
+        super().validate_rule_definition(rule)
+
+        if rule.type == GradingRuleType.XLSX_FORMULA:
+            target_sample = self._prepare_cell_target_for_validation(rule.target)
+            self._parse_cell_target(rule, target_sample)
+
+            expected_clean = rule.expected.strip()
+            if self.is_whole_placeholder(expected_clean):
+                return
+            expected_lower = expected_clean.lower()
+            if expected_lower in {"any", "true", "exists", "not_null", "=", "$"}:
+                return
+
+            for prefix in ("contains:", "func:", "function:"):
+                if expected_lower.startswith(prefix):
+                    raw_token = expected_clean[len(prefix) :].strip()
+                    sample_token = self.substitute_placeholders_for_validation(
+                        raw_token,
+                        "1",
+                    ).strip()
+                    if not sample_token or not _canonicalize_formula(
+                        sample_token,
+                        strip_dollar="$" not in sample_token,
+                    ):
+                        raise GradingError(
+                            f"Порожній або некоректний вираз після '{prefix}' у правилі "
+                            f"'{rule.id}' (expected='{rule.expected}').",
+                            code="INVALID_RULE_DEFINITION",
+                            status_code=422,
+                            context={"rule_id": rule.id, "expected": rule.expected},
+                        )
+                    return
+
+            expected_sample = self.substitute_placeholders_for_validation(
+                expected_clean,
+                "1",
+            )
+            if not _has_balanced_formula_delimiters(expected_sample):
+                raise GradingError(
+                    f"Незбалансовані дужки або лапки у формулі expected='{rule.expected}' "
+                    f"правила '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            canonical = _canonicalize_formula(
+                expected_sample,
+                strip_dollar="$" not in expected_sample,
+            )
+            if not canonical:
+                raise GradingError(
+                    f"Некоректний вираз формули expected='{rule.expected}' у правилі '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            return
+
+        if rule.type == GradingRuleType.XLSX_VALUE:
+            target_sample = self._prepare_cell_target_for_validation(rule.target)
+            self._parse_cell_target(rule, target_sample)
+            return
+
+        if rule.type == GradingRuleType.XLSX_CHART_EXISTS:
+            target_sample = self.substitute_placeholders_for_validation(
+                rule.target,
+                "Sheet1",
+            ).strip()
+            _, prop_mode = self._parse_chart_target(target_sample)
+
+            if self.is_whole_placeholder(rule.expected):
+                return
+            expected_sample = self.substitute_placeholders_for_validation(
+                rule.expected,
+                "1",
+            ).strip()
+            expected_lower = expected_sample.lower()
+
+            if expected_lower.startswith("type:"):
+                chart_type = expected_sample[5:].strip().lower()
+                if not chart_type or re.fullmatch(r"[a-z0-9_]+", chart_type) is None:
+                    raise GradingError(
+                        f"Некоректний тип діаграми '{rule.expected}' у правилі '{rule.id}'. "
+                        "Приклади: 'type:bar', 'type:line', 'type:pie'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "expected": rule.expected},
+                    )
+                return
+
+            if prop_mode == "type":
+                if re.fullmatch(r"[a-z0-9_]+", expected_lower) is None:
+                    raise GradingError(
+                        f"Некоректний тип діаграми '{rule.expected}' у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "expected": rule.expected},
+                    )
+                return
+
+            if expected_lower in _KNOWN_CHART_TYPE_ALIASES or expected_lower.endswith("chart"):
+                return
+
+            if prop_mode != "count" and expected_lower in {"true", "false", "yes", "no"}:
+                return
+
+            self.validate_numeric_condition(rule, expected_sample)
+            return
 
     def evaluate(
         self,
@@ -1420,6 +1550,30 @@ class XlsxGrader(BaseGrader):
             normalized_expected in candidates
             or f"{normalized_expected}chart" in candidates
         )
+
+
+def _has_balanced_formula_delimiters(expr: str) -> bool:
+    """Перевіряє баланс круглих дужок та подвійних лапок у виразі формули Excel."""
+    in_quotes = False
+    depth = 0
+    idx = 0
+    length = len(expr)
+    while idx < length:
+        ch = expr[idx]
+        if ch == '"':
+            if in_quotes and idx + 1 < length and expr[idx + 1] == '"':
+                idx += 2
+                continue
+            in_quotes = not in_quotes
+        elif not in_quotes:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return False
+        idx += 1
+    return (not in_quotes) and depth == 0
 
 
 class _FormulaEvalError(Exception):

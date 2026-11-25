@@ -134,6 +134,9 @@ def _serialize_course(
         practical_score = (
             best_practical_by_id.get(practical.id) if practical is not None else None
         )
+        practical_needs_rules_review = (
+            practical.needs_rules_review if practical is not None else False
+        )
 
         if quiz_passed and (practical_id is None or practical_score is not None):
             completed_modules += 1
@@ -149,6 +152,7 @@ def _serialize_course(
                 practical_id=practical_id,
                 practical_format=practical_format,
                 practical_score=practical_score,
+                practical_needs_rules_review=practical_needs_rules_review,
             )
         )
 
@@ -304,6 +308,7 @@ async def _build_module_detail_read(
             best_score=(
                 round(float(max_sub_score), 2) if max_sub_score is not None else None
             ),
+            needs_rules_review=module.practical.needs_rules_review,
         )
 
     quiz_questions_read = [
@@ -364,6 +369,7 @@ def _serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
         instructions=practical.instructions,
         format_type=practical.format_type,
         max_score=float(practical.max_score),
+        needs_rules_review=practical.needs_rules_review,
         variants=variants,
         grading_rules=grading_rules,
     )
@@ -984,6 +990,8 @@ async def update_practical(
         practical.grading_rules = [
             rule.model_dump(mode="json") for rule in payload.grading_rules
         ]
+    if payload.needs_rules_review is not None:
+        practical.needs_rules_review = payload.needs_rules_review
 
     await db.commit()
     await db.refresh(practical)

@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import hash_password
+from app.graders.factory import GraderFactory
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
     MAX_COURSES_COUNT,
@@ -132,6 +133,13 @@ class SeedBundle:
     courses: list[Course]
 
 
+def _extract_needs_rules_review(meta: dict[str, object] | None) -> bool:
+    """Витягує прапорець needs_manual_rules_review із JSON-блоку practical.meta."""
+    if not isinstance(meta, dict):
+        return False
+    return meta.get("needs_manual_rules_review") is True
+
+
 def _load_course_from_json(
     course_path: Path,
     *,
@@ -179,10 +187,12 @@ def _load_course_from_json(
         ]
         if mod_payload.practical is not None:
             prac_payload = mod_payload.practical
-            validated_rules: list[dict[str, object]] = [
-                GradingRule.model_validate(rule).model_dump(mode="json")
-                for rule in prac_payload.grading_rules
-            ]
+            grader = GraderFactory.get_grader(prac_payload.format_type)
+            validated_rules: list[dict[str, object]] = []
+            for rule in prac_payload.grading_rules:
+                parsed_rule = GradingRule.model_validate(rule)
+                grader.validate_rule_definition(parsed_rule)
+                validated_rules.append(parsed_rule.model_dump(mode="json"))
             module.practical = Practical(
                 title=prac_payload.title,
                 instructions=prac_payload.instructions,
@@ -190,6 +200,7 @@ def _load_course_from_json(
                 max_score=prac_payload.max_score.quantize(Decimal("0.01")),
                 variants=list(prac_payload.variants),
                 grading_rules=validated_rules,
+                needs_rules_review=_extract_needs_rules_review(prac_payload.meta),
             )
 
     return course
@@ -400,6 +411,7 @@ async def _sync_practical_in_place(
                 max_score=incoming_practical.max_score,
                 variants=list(incoming_practical.variants),
                 grading_rules=list(incoming_practical.grading_rules),
+                needs_rules_review=incoming_practical.needs_rules_review,
             )
         else:
             existing_practical.title = incoming_practical.title
@@ -408,6 +420,7 @@ async def _sync_practical_in_place(
             existing_practical.max_score = incoming_practical.max_score
             existing_practical.variants = list(incoming_practical.variants)
             existing_practical.grading_rules = list(incoming_practical.grading_rules)
+            existing_practical.needs_rules_review = incoming_practical.needs_rules_review
         return
 
     if existing_practical is None:
@@ -489,6 +502,7 @@ async def _sync_course_in_place(
                     max_score=incoming_mod.practical.max_score,
                     variants=list(incoming_mod.practical.variants),
                     grading_rules=list(incoming_mod.practical.grading_rules),
+                    needs_rules_review=incoming_mod.practical.needs_rules_review,
                 )
             existing_course.modules.append(new_module)
             continue

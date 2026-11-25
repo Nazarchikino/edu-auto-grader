@@ -6,18 +6,121 @@ from pathlib import Path
 
 from app.core.exceptions import GradingError, InvalidFileFormatError
 from app.models.course import PracticalFormat
-from app.schemas.grading import CriterionResult, GradingReport, GradingRule
+from app.schemas.grading import (
+    CriterionResult,
+    GradingReport,
+    GradingRule,
+    GradingRuleType,
+)
 
 _NUMERIC_CONDITION_PATTERN = re.compile(
     r"^\s*(>=|<=|!=|==|>|<|=)?\s*([+-]?\d+(?:[.,]\d+)?)\s*$"
 )
 _PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+_WHOLE_PLACEHOLDER_PATTERN = re.compile(r"^\{[a-zA-Z_][a-zA-Z0-9_]*\}$")
 
 
 class BaseGrader(ABC):
     """Абстрактний базовий клас стратегії детермінованої автоперевірки практичних робіт."""
 
     format_type: PracticalFormat
+    supported_rule_types: frozenset[GradingRuleType] = frozenset()
+
+    def validate_rule_definition(self, rule: GradingRule) -> None:
+        """Валідує тип правила та базовий синтаксис target/expected перед збереженням."""
+        if self.supported_rule_types and rule.type not in self.supported_rule_types:
+            raise GradingError(
+                f"Правило '{rule.id}' типу '{rule.type.value}' не підтримується парсером "
+                f"формату '{self.format_type.value}'.",
+                code="INVALID_RULE_TYPE_FOR_FORMAT",
+                status_code=422,
+                context={
+                    "rule_id": rule.id,
+                    "rule_type": rule.type.value,
+                    "format_type": self.format_type.value,
+                },
+            )
+        if not rule.target.strip():
+            raise GradingError(
+                f"Порожнє поле target у правилі '{rule.id}'.",
+                code="INVALID_RULE_DEFINITION",
+                status_code=422,
+                context={"rule_id": rule.id, "field": "target"},
+            )
+        if not rule.expected.strip():
+            raise GradingError(
+                f"Порожнє поле expected у правилі '{rule.id}'.",
+                code="INVALID_RULE_DEFINITION",
+                status_code=422,
+                context={"rule_id": rule.id, "field": "expected"},
+            )
+
+    def is_whole_placeholder(self, value: str) -> bool:
+        """Перевіряє, чи складається рядок виключно з одного плейсхолдера `{param}`."""
+        return _WHOLE_PLACEHOLDER_PATTERN.fullmatch(value.strip()) is not None
+
+    def substitute_placeholders_for_validation(
+        self,
+        value: str,
+        sample: str = "1",
+    ) -> str:
+        """Підміняє плейсхолдери `{param}` тестовим значенням для синтаксичної валідації."""
+        return _PLACEHOLDER_PATTERN.sub(sample, value)
+
+    def is_valid_numeric_condition(self, expr: str) -> bool:
+        """Повертає True, якщо рядок є коректною числовою умовою вигляду '>=4' або '1.5'."""
+        return _NUMERIC_CONDITION_PATTERN.match(expr) is not None
+
+    def validate_numeric_condition(
+        self,
+        rule: GradingRule,
+        expr: str,
+        *,
+        sample_number: str = "1",
+    ) -> None:
+        """Перевіряє синтаксис числової умови з урахуванням плейсхолдерів `{param}`."""
+        if self.is_whole_placeholder(expr):
+            return
+        substituted = self.substitute_placeholders_for_validation(expr, sample_number)
+        if not self.is_valid_numeric_condition(substituted):
+            raise GradingError(
+                f"Некоректна числова умова expected='{rule.expected}' у правилі '{rule.id}'. "
+                "Очікується число або оператор порівняння (напр. '1.5', '>=4', '==2').",
+                code="INVALID_RULE_DEFINITION",
+                status_code=422,
+                context={
+                    "rule_id": rule.id,
+                    "rule_type": rule.type.value,
+                    "expected": rule.expected,
+                },
+            )
+
+    def validate_bool_or_numeric_condition(
+        self,
+        rule: GradingRule,
+        expr: str,
+        *,
+        sample_number: str = "1",
+    ) -> None:
+        """Перевіряє, що умова є булевою ('true'/'false') або числовою ('>=1', '2')."""
+        if self.is_whole_placeholder(expr):
+            return
+        substituted = self.substitute_placeholders_for_validation(expr, sample_number).strip()
+        if substituted.lower() in {"true", "false", "yes", "no"}:
+            return
+        if self.is_valid_numeric_condition(substituted):
+            return
+        raise GradingError(
+            f"Некоректний вираз expected='{rule.expected}' у правилі '{rule.id}'. "
+            "Дозволені булеві значення ('true', 'false') або числові умови (напр. '>=1', '2').",
+            code="INVALID_RULE_DEFINITION",
+            status_code=422,
+            context={
+                "rule_id": rule.id,
+                "rule_type": rule.type.value,
+                "expected": rule.expected,
+            },
+        )
 
     @abstractmethod
     def evaluate(

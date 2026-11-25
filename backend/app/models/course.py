@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     Enum,
     ForeignKey,
     Index,
@@ -251,6 +252,12 @@ class Practical(Base):
         JSONB,
         default=list,
         nullable=False,
+    )
+    needs_rules_review: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
 
     module: Mapped[Module] = relationship(

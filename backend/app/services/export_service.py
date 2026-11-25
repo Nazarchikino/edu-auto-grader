@@ -33,6 +33,7 @@ from app.schemas.grading import GradingReport
 from app.schemas.submission import (
     CriterionErrorStat,
     ExportFormat,
+    GroupJournalPracticalRead,
     GroupJournalRead,
     GroupJournalRow,
     GroupJournalStudentCell,
@@ -172,6 +173,7 @@ class PracticalColumnInfo:
     course_title: str
     module_order_index: int
     max_score: float
+    needs_rules_review: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,10 +378,22 @@ def build_group_journal(
         )
 
     error_stats = calculate_criterion_error_stats(list(best_submission_map.values()))
+    practical_headers = [
+        GroupJournalPracticalRead(
+            practical_id=info.practical_id,
+            title=info.practical_title,
+            course_slug=info.course_slug,
+            module_order_index=info.module_order_index,
+            max_score=info.max_score,
+            needs_rules_review=info.needs_rules_review,
+        )
+        for info in practicals
+    ]
     return GroupJournalRead(
         group_id=group.id,
         group_code=group.code,
         specialty=group.specialty,
+        practicals=practical_headers,
         rows=rows,
         error_stats=error_stats,
     )
@@ -1003,6 +1017,7 @@ class ExportService:
                 course_title=practical.module.course.title,
                 module_order_index=practical.module.order_index,
                 max_score=float(practical.max_score),
+                needs_rules_review=practical.needs_rules_review,
             )
             for practical in practicals
         ]

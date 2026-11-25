@@ -79,4 +79,6 @@ export interface PlagiarismCheckResult {
 
 export interface GradingRulesUpdateRequest {
   grading_rules: GradingRule[];
+  sync_max_score?: boolean;
+  needs_rules_review?: boolean | null;
 }

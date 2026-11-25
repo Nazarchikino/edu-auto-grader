@@ -49,6 +49,7 @@ from app.schemas.grading import (
 from app.schemas.submission import (
     CriterionErrorStat,
     ExportFormat,
+    GroupJournalPracticalRead,
     GroupJournalRead,
     GroupJournalRow,
     GroupJournalStudentCell,
@@ -74,6 +75,7 @@ __all__ = [
     "GradingRule",
     "GradingRuleType",
     "GradingRulesUpdateRequest",
+    "GroupJournalPracticalRead",
     "GroupJournalRead",
     "GroupJournalRow",
     "GroupJournalStudentCell",

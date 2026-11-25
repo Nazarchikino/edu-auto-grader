@@ -407,6 +407,7 @@ class QuizService:
             instructions=practical.instructions,
             format_type=practical.format_type,
             max_score=float(practical.max_score),
+            needs_rules_review=practical.needs_rules_review,
             variant_index=variant_index,
             variant_number=variant_number,
             variant=variant,

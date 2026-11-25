@@ -102,6 +102,7 @@ class PracticalUpdate(BaseModel):
     max_score: float | None = Field(default=None, gt=0.0)
     variants: list[PracticalVariant] | None = None
     grading_rules: list[GradingRule] | None = None
+    needs_rules_review: bool | None = None
 
 
 class PracticalSummaryRead(BaseModel):
@@ -116,6 +117,7 @@ class PracticalSummaryRead(BaseModel):
     max_score: float = Field(..., gt=0.0)
     is_unlocked: bool = False
     best_score: float | None = None
+    needs_rules_review: bool = False
 
 
 class PracticalStudentRead(BaseModel):
@@ -129,6 +131,7 @@ class PracticalStudentRead(BaseModel):
     instructions: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    needs_rules_review: bool = False
     variant_index: int = Field(..., ge=0)
     variant_number: int = Field(..., ge=1)
     variant: PracticalVariant
@@ -145,6 +148,7 @@ class PracticalTeacherRead(BaseModel):
     instructions: str
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
+    needs_rules_review: bool = False
     variants: list[PracticalVariant] = Field(default_factory=list)
     grading_rules: list[GradingRule] = Field(default_factory=list)
 
@@ -183,6 +187,7 @@ class ModuleSummaryRead(BaseModel):
     practical_id: uuid.UUID | None = None
     practical_format: PracticalFormat | None = None
     practical_score: float | None = None
+    practical_needs_rules_review: bool = False
 
 
 class ModuleDetailRead(BaseModel):

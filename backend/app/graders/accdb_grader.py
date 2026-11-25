@@ -270,6 +270,16 @@ _CANONICAL_TYPE_ALIASES: dict[str, frozenset[str]] = {
     "COMPLEX": frozenset({"complex", "multivalued", "attachment", "long", "int32"}),
 }
 
+_ALL_VALID_ACCDB_TYPE_TOKENS: frozenset[str] = frozenset(
+    {
+        *(key.lower() for key in _CANONICAL_TYPE_ALIASES),
+        *(alias for aliases in _CANONICAL_TYPE_ALIASES.values() for alias in aliases),
+        "pk",
+        "primary key",
+        "primary",
+    }
+)
+
 _NAME_TO_TYPE_CODE: dict[str, tuple[int, bool, bool, int]] = {
     # (type_code, is_fixed, is_autonumber, default_length)
     "AUTONUMBER": (int(TYPE_INT32), True, True, 4),
@@ -429,6 +439,190 @@ class AccdbGrader(BaseGrader):
     """Стратегія детермінованої автоперевірки баз даних Microsoft Access (.accdb)."""
 
     format_type: PracticalFormat = PracticalFormat.ACCDB
+    supported_rule_types: frozenset[GradingRuleType] = frozenset(
+        {
+            GradingRuleType.ACCDB_TABLE_EXISTS,
+            GradingRuleType.ACCDB_COLUMN_EXISTS,
+            GradingRuleType.ACCDB_COLUMN_TYPE,
+            GradingRuleType.ACCDB_QUERY_EXISTS,
+            GradingRuleType.ACCDB_FORM_EXISTS,
+            GradingRuleType.ACCDB_REPORT_EXISTS,
+            GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+        }
+    )
+
+    def validate_rule_definition(self, rule: GradingRule) -> None:
+        """Перевіряє синтаксис правила Microsoft Access (.accdb) перед збереженням у БД."""
+        super().validate_rule_definition(rule)
+
+        if rule.type == GradingRuleType.ACCDB_TABLE_EXISTS:
+            target_sample = self.substitute_placeholders_for_validation(
+                rule.target,
+                "Table1",
+            ).strip()
+            if _TABLE_COLUMN_COUNT_SUFFIX_PATTERN.match(target_sample) is not None:
+                self.validate_numeric_condition(rule, rule.expected)
+                return
+            if target_sample.lower() not in _DB_WIDE_TARGETS:
+                requested = [
+                    _strip_identifiers(part)
+                    for part in target_sample.split(",")
+                    if _strip_identifiers(part)
+                ]
+                if not requested:
+                    raise GradingError(
+                        f"Не вказано цільову назву таблиці Access у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "target": rule.target},
+                    )
+            self.validate_bool_or_numeric_condition(rule, rule.expected)
+            return
+
+        if rule.type == GradingRuleType.ACCDB_COLUMN_EXISTS:
+            target_sample = (
+                "Table1.Col1"
+                if self.is_whole_placeholder(rule.target)
+                else self.substitute_placeholders_for_validation(rule.target, "Ident").strip()
+            )
+            expected_sample = (
+                "true"
+                if self.is_whole_placeholder(rule.expected)
+                else self.substitute_placeholders_for_validation(rule.expected, "1").strip()
+            )
+            try:
+                self._parse_table_column_target(
+                    rule,
+                    target_sample,
+                    expected_sample,
+                    require_explicit_column=False,
+                )
+            except GradingError as exc:
+                raise GradingError(
+                    exc.detail,
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            has_explicit_col = len(re.findall(r"\[([^\]]+)\]", target_sample)) == 2 or (
+                len(_COLUMN_TARGET_SPLIT_PATTERN.split(target_sample, maxsplit=1)) == 2
+            )
+            if has_explicit_col:
+                self.validate_bool_or_numeric_condition(rule, rule.expected)
+            return
+
+        if rule.type == GradingRuleType.ACCDB_COLUMN_TYPE:
+            target_sample = (
+                "Table1.Col1"
+                if self.is_whole_placeholder(rule.target)
+                else self.substitute_placeholders_for_validation(rule.target, "Ident").strip()
+            )
+            try:
+                self._parse_table_column_target(
+                    rule,
+                    target_sample,
+                    rule.expected,
+                    require_explicit_column=True,
+                )
+            except GradingError as exc:
+                raise GradingError(
+                    exc.detail,
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, **exc.context},
+                ) from exc
+            if self.is_whole_placeholder(rule.expected):
+                return
+
+            expected_sample = self.substitute_placeholders_for_validation(
+                rule.expected,
+                "TEXT",
+            )
+            raw_candidates = [
+                token.strip()
+                for token in re.split(r"[|,;]", expected_sample)
+                if token.strip()
+            ]
+            if not raw_candidates:
+                raise GradingError(
+                    f"Порожній тип даних Access у правилі '{rule.id}'.",
+                    code="INVALID_RULE_DEFINITION",
+                    status_code=422,
+                    context={"rule_id": rule.id, "expected": rule.expected},
+                )
+            for candidate in raw_candidates:
+                match = _EXPECTED_TYPE_SIZE_PATTERN.match(candidate)
+                if match is None:
+                    raise GradingError(
+                        f"Некоректний запис типу даних Access '{candidate}' у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "expected": rule.expected},
+                    )
+                type_token = match.group(1).strip().lower()
+                normalized_token = " ".join(type_token.replace("_", " ").split())
+                if not (
+                    normalized_token.isdigit()
+                    or normalized_token in _ALL_VALID_ACCDB_TYPE_TOKENS
+                    or type_token in _ALL_VALID_ACCDB_TYPE_TOKENS
+                ):
+                    raise GradingError(
+                        f"Невідомий тип даних Access '{candidate}' у правилі '{rule.id}'. "
+                        "Дозволені типи: AutoNumber, Short Text, Long Text, Number, Long, "
+                        "Double, Currency, Date/Time, Yes/No, Hyperlink, OLE, GUID.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={
+                            "rule_id": rule.id,
+                            "expected": rule.expected,
+                            "token": candidate,
+                        },
+                    )
+            return
+
+        if rule.type in {
+            GradingRuleType.ACCDB_QUERY_EXISTS,
+            GradingRuleType.ACCDB_FORM_EXISTS,
+            GradingRuleType.ACCDB_REPORT_EXISTS,
+        }:
+            target_sample = self.substitute_placeholders_for_validation(
+                rule.target,
+                "Object1",
+            ).strip()
+            if target_sample.lower() not in _OBJECT_WILDCARD_TARGETS:
+                requested = [
+                    _strip_identifiers(part)
+                    for part in target_sample.split(",")
+                    if _strip_identifiers(part)
+                ]
+                if not requested:
+                    raise GradingError(
+                        f"Не вказано цільову назву об'єкта Access у правилі '{rule.id}'.",
+                        code="INVALID_RULE_DEFINITION",
+                        status_code=422,
+                        context={"rule_id": rule.id, "target": rule.target},
+                    )
+            if not self.is_whole_placeholder(rule.expected):
+                normalized_expr = _normalize_count_condition(
+                    self.substitute_placeholders_for_validation(rule.expected, "1")
+                )
+                self.validate_bool_or_numeric_condition(rule, normalized_expr)
+            return
+
+        if rule.type == GradingRuleType.ACCDB_RELATIONSHIP_EXISTS:
+            target_sample = (
+                "TableA->TableB"
+                if self.is_whole_placeholder(rule.target)
+                else self.substitute_placeholders_for_validation(rule.target, "TableA").strip()
+            )
+            if target_sample.lower() not in _OBJECT_WILDCARD_TARGETS:
+                _parse_relationship_pair_target(rule, target_sample)
+            if not self.is_whole_placeholder(rule.expected):
+                normalized_expr = _normalize_count_condition(
+                    self.substitute_placeholders_for_validation(rule.expected, "1")
+                )
+                self.validate_bool_or_numeric_condition(rule, normalized_expr)
+            return
 
     def evaluate(
         self,

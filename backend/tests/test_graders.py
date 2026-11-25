@@ -1149,8 +1149,20 @@ def test_accdb_grader_evaluates_access_module_9_multiple_variants(
                 for field in raw_fields
             ]
 
+        table_names = list(accdb_tables.keys())
         accdb_path = tmp_path / f"access_m09_v{target_variant_number}.accdb"
-        accdb_path.write_bytes(build_accdb_bytes(accdb_tables))
+        accdb_path.write_bytes(
+            build_accdb_bytes(
+                accdb_tables,
+                queries=["Запит_Вибірка_1", "Запит_Підсумок_2"],
+                forms=["Форма_Головна_1", "Форма_Деталі_2"],
+                reports=["Звіт_Підсумковий_1"],
+                relationships=[
+                    (table_names[0], table_names[1], "ID", "ID", "Rel_1_2"),
+                    (table_names[1], table_names[2], "ID", "ID", "Rel_2_3"),
+                ],
+            )
+        )
         built_paths[target_variant_number] = accdb_path
 
         report = grader.evaluate(
@@ -1162,19 +1174,21 @@ def test_accdb_grader_evaluates_access_module_9_multiple_variants(
             f"Варіант {target_variant_number} Модуля 9 Access набрав {report.total_points}/10.0"
         )
         assert report.max_points == 10.0
-        assert report.passed_count == 4
+        assert report.passed_count == 8
         assert report.failed_count == 0
 
-    # База даних Варіанта 1 не повинна проходити перевірку для Варіанта 2
+    # База даних Варіанта 1 не повинна проходити табличні/PK перевірки Варіанта 2
     variant_2 = next(v for v in m9_module.practical.variants if v["variant_number"] == 2)
     mismatch_report = grader.evaluate(
         file_path=built_paths[1],
         rules=rules,
         variant_data=variant_2,
     )
-    assert mismatch_report.total_points == 0.0
-    assert mismatch_report.passed_count == 0
+    mismatch_by_id = {item.rule_id: item for item in mismatch_report.results}
+    for variant_rule_id in ("a_m09_tbl_1", "a_m09_tbl_2", "a_m09_tbl_3", "a_m09_col_pk1"):
+        assert mismatch_by_id[variant_rule_id].passed is False
     assert mismatch_report.failed_count == 4
+    assert mismatch_report.total_points < 10.0
 
 
 def test_metadata_extraction_and_plagiarism_detection(tmp_path: Path) -> None:
@@ -1959,3 +1973,232 @@ def test_accdb_grader_inspects_queries_forms_reports_relationships_and_mdb_expor
     assert mdb_report.total_points == 10.0
     assert mdb_report.passed_count == 4
     assert mdb_report.failed_count == 0
+
+
+def test_docx_grader_table_exists_supports_rxc_and_rows_cols_conditions(
+    tmp_path: Path,
+) -> None:
+    """Перевіряє підтримку форматів '3x4', 'rows>=4' та 'cols>=3' у DocxGrader."""
+    docx_path = build_sample_docx(
+        tmp_path / "table_dimensions.docx",
+        include_table=True,
+        table_rows=4,
+        table_cols=3,
+    )
+    rules = [
+        GradingRule(
+            id="t_exact_matrix",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="4x3",
+            points=2.0,
+            description="Таблиця щонайменше 4x3",
+        ),
+        GradingRule(
+            id="t_smaller_matrix",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="3x3",
+            points=2.0,
+            description="Таблиця щонайменше 3x3",
+        ),
+        GradingRule(
+            id="t_too_big_matrix",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="5x3",
+            points=1.0,
+            description="Таблиця 5x3 (має провалитися для 4x3)",
+        ),
+        GradingRule(
+            id="t_rows_ge_4",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="rows>=4",
+            points=2.0,
+            description="Кількість рядків >= 4",
+        ),
+        GradingRule(
+            id="t_rows_ge_5",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="rows>=5",
+            points=1.0,
+            description="Кількість рядків >= 5 (провал)",
+        ),
+        GradingRule(
+            id="t_cols_ge_3",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="cols>=3",
+            points=1.0,
+            description="Кількість стовпців >= 3",
+        ),
+        GradingRule(
+            id="t_cols_ge_4",
+            type=GradingRuleType.DOCX_TABLE_EXISTS,
+            target="document",
+            expected="cols>=4",
+            points=1.0,
+            description="Кількість стовпців >= 4 (провал)",
+        ),
+    ]
+
+    grader = DocxGrader()
+    for rule in rules:
+        grader.validate_rule_definition(rule)
+
+    report = grader.evaluate(file_path=docx_path, rules=rules, variant_data={})
+    by_id = {item.rule_id: item for item in report.results}
+    assert by_id["t_exact_matrix"].passed is True
+    assert by_id["t_smaller_matrix"].passed is True
+    assert by_id["t_too_big_matrix"].passed is False
+    assert by_id["t_rows_ge_4"].passed is True
+    assert by_id["t_rows_ge_5"].passed is False
+    assert by_id["t_cols_ge_3"].passed is True
+    assert by_id["t_cols_ge_4"].passed is False
+    assert report.total_points == 7.0
+
+
+def test_graders_validate_rule_definition_accepts_placeholders_and_rejects_invalid() -> None:
+    """Перевіряє validate_rule_definition у всіх 4 парсерах (валідні плейсхолдери та відхилення)."""
+    docx_grader = DocxGrader()
+    xlsx_grader = XlsxGrader()
+    accdb_grader = AccdbGrader()
+    html_grader = HtmlGrader()
+
+    valid_cases: list[tuple[DocxGrader | XlsxGrader | AccdbGrader | HtmlGrader, GradingRule]] = [
+        (
+            docx_grader,
+            GradingRule(
+                id="ok_docx_margins",
+                type=GradingRuleType.DOCX_PAGE_MARGINS,
+                target="section[0]",
+                expected="left={m_left},right=15,top=20,bottom=20",
+                points=2.0,
+                description="Поля з плейсхолдером",
+            ),
+        ),
+        (
+            docx_grader,
+            GradingRule(
+                id="ok_docx_table",
+                type=GradingRuleType.DOCX_TABLE_EXISTS,
+                target="document",
+                expected="rows>={min_rows}",
+                points=2.0,
+                description="Розмірність таблиці з плейсхолдером",
+            ),
+        ),
+        (
+            xlsx_grader,
+            GradingRule(
+                id="ok_xlsx_formula",
+                type=GradingRuleType.XLSX_FORMULA,
+                target="{sheet}!D10",
+                expected="contains:SUM",
+                points=2.0,
+                description="Формула з плейсхолдером аркуша",
+            ),
+        ),
+        (
+            accdb_grader,
+            GradingRule(
+                id="ok_accdb_rel",
+                type=GradingRuleType.ACCDB_RELATIONSHIP_EXISTS,
+                target="{table_1}->{table_2}",
+                expected="true",
+                points=2.0,
+                description="Зв'язок Access з плейсхолдерами",
+            ),
+        ),
+        (
+            html_grader,
+            GradingRule(
+                id="ok_html_count",
+                type=GradingRuleType.HTML_TAG_COUNT,
+                target="table tr",
+                expected=">={min_rows}",
+                points=2.0,
+                description="Кількість тегів HTML із плейсхолдером",
+            ),
+        ),
+    ]
+    for grader, rule in valid_cases:
+        grader.validate_rule_definition(rule)
+
+    invalid_cases: list[
+        tuple[DocxGrader | XlsxGrader | AccdbGrader | HtmlGrader, GradingRule]
+    ] = [
+        (
+            docx_grader,
+            GradingRule(
+                id="inv_docx_table",
+                type=GradingRuleType.DOCX_TABLE_EXISTS,
+                target="document",
+                expected="min_rows=4",
+                points=2.0,
+                description="Застарілий невалідний формат min_rows=4",
+            ),
+        ),
+        (
+            docx_grader,
+            GradingRule(
+                id="inv_docx_align",
+                type=GradingRuleType.DOCX_ALIGNMENT,
+                target="body",
+                expected="MIDDLE",
+                points=2.0,
+                description="Невідоме вирівнювання",
+            ),
+        ),
+        (
+            xlsx_grader,
+            GradingRule(
+                id="inv_xlsx_unbalanced",
+                type=GradingRuleType.XLSX_FORMULA,
+                target="A1",
+                expected="=SUM(A1:A5",
+                points=2.0,
+                description="Незакрита дужка у формулі",
+            ),
+        ),
+        (
+            accdb_grader,
+            GradingRule(
+                id="inv_accdb_col_target",
+                type=GradingRuleType.ACCDB_COLUMN_TYPE,
+                target="TableWithoutColumn",
+                expected="TEXT",
+                points=2.0,
+                description="Відсутня крапка Table.Column",
+            ),
+        ),
+        (
+            accdb_grader,
+            GradingRule(
+                id="inv_accdb_col_type",
+                type=GradingRuleType.ACCDB_COLUMN_TYPE,
+                target="Students.Name",
+                expected="NONEXISTENT_SQL_TYPE",
+                points=2.0,
+                description="Невідомий тип колонки Access",
+            ),
+        ),
+        (
+            html_grader,
+            GradingRule(
+                id="inv_html_selector",
+                type=GradingRuleType.HTML_TAG_EXISTS,
+                target="div > [broken",
+                expected="true",
+                points=2.0,
+                description="Пошкоджений CSS-селектор",
+            ),
+        ),
+    ]
+    for grader, rule in invalid_cases:
+        with pytest.raises(GradingError) as exc_info:
+            grader.validate_rule_definition(rule)
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.code == "INVALID_RULE_DEFINITION"
