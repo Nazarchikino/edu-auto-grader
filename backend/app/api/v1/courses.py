@@ -235,6 +235,15 @@ async def _build_module_detail_read(
         module_id=module.id,
         has_questions=has_questions,
     )
+    quiz_cooldown_remaining_seconds = 0
+    if current_user.role == UserRole.STUDENT and has_questions and not quiz_passed:
+        quiz_cooldown_remaining_seconds = (
+            await quiz_service.get_quiz_cooldown_remaining_seconds(
+                student_id=current_user.id,
+                module_id=module.id,
+                quiz_passed=quiz_passed,
+            )
+        )
     practical_unlocked = quiz_passed or current_user.role in (
         UserRole.TEACHER,
         UserRole.ADMIN,
@@ -280,6 +289,7 @@ async def _build_module_detail_read(
         quiz_questions=quiz_questions_read,
         quiz_passed=quiz_passed,
         best_quiz_score=best_quiz_score,
+        quiz_cooldown_remaining_seconds=quiz_cooldown_remaining_seconds,
         practical_unlocked=practical_unlocked,
         practical=practical_summary,
     )

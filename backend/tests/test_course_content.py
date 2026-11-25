@@ -48,7 +48,7 @@ def test_full_course_json_bundle_validation() -> None:
     assert tuple(course.slug for course in bundle.courses) == ALLOWED_COURSE_SLUGS
     assert summary.modules_count == 40
     assert summary.practicals_count == 37
-    assert summary.questions_count == 240
+    assert summary.questions_count == 241
     assert summary.variants_count == 254
 
     media_references: set[str] = set()
@@ -61,6 +61,9 @@ def test_full_course_json_bundle_validation() -> None:
             for question in module.quiz_questions:
                 assert len(question.options) >= 2
                 assert 0 <= question.correct_option_index < len(question.options)
+                media_references.update(_MEDIA_URL_PATTERN.findall(question.question_text))
+                for option in question.options:
+                    media_references.update(_MEDIA_URL_PATTERN.findall(option))
 
             if module.practical is not None:
                 practical = module.practical
@@ -411,7 +414,7 @@ async def test_seed_database_sync_courses_preserves_users_and_groups(
     assert summary.courses_count == 4
     assert summary.modules_count == 40
     assert summary.practicals_count == 37
-    assert summary.questions_count == 240
+    assert summary.questions_count == 241
 
     word_synced_res = await db_session.execute(
         select(Course).where(Course.slug == CourseSlug.WORD)
@@ -425,7 +428,7 @@ async def test_seed_database_sync_courses_preserves_users_and_groups(
     questions_count_res = await db_session.execute(select(func.count(QuizQuestion.id)))
     assert int(modules_count_res.scalar_one()) == 40
     assert int(practicals_count_res.scalar_one()) == 37
-    assert int(questions_count_res.scalar_one()) == 240
+    assert int(questions_count_res.scalar_one()) == 241
 
     # Користувачі та академічні групи залишилися недоторканими
     extra_group_check = await db_session.execute(

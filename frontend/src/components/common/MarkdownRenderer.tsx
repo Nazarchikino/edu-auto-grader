@@ -313,6 +313,20 @@ function parseInlineNodes(
                   />
                 </button>
               );
+            } else if (options.disableLinks) {
+              nodes.push(
+                <span
+                  key={`${keyPrefix}-img-${tokenIndex}`}
+                  className="mx-1 inline-flex items-center rounded-lg border border-slate-200 bg-white p-1 align-middle shadow-2xs"
+                >
+                  <img
+                    src={safeUrl}
+                    alt={alt}
+                    loading="lazy"
+                    className="max-h-40 max-w-full rounded object-contain"
+                  />
+                </span>
+              );
             } else {
               nodes.push(
                 <a
@@ -486,11 +500,14 @@ function parseInlineNodes(
  * для заголовків, варіантів відповідей у тестах та компактних підписів.
  */
 // eslint-disable-next-line react-refresh/only-export-components
-export function renderInlineMarkdown(text: string): ReactNode[] {
+export function renderInlineMarkdown(
+  text: string,
+  options: InlineMarkdownOptions = {}
+): ReactNode[] {
   if (text.length === 0) {
     return [];
   }
-  return parseInlineNodes(text, {}, "inl");
+  return parseInlineNodes(text, options, "inl");
 }
 
 function getLineIndent(line: string): number {

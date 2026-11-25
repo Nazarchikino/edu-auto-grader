@@ -177,6 +177,7 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     assert fail_quiz_data["passed"] is False
     assert fail_quiz_data["score_percent"] == pytest.approx(16.67, abs=0.01)
     assert fail_quiz_data["practical_unlocked"] is False
+    assert fail_quiz_data["retry_after_seconds"] == settings.QUIZ_RETRY_COOLDOWN_SECONDS
 
     still_locked_resp = await async_client.post(
         f"/api/v1/practicals/{practical.id}/submit",
@@ -185,6 +186,17 @@ async def test_submission_blocked_without_passed_quiz_and_unlocked_after_70_perc
     )
     assert still_locked_resp.status_code == 403
     assert still_locked_resp.json()["code"] == "QUIZ_NOT_PASSED"
+
+    # Зсуваємо час невдалої спроби в минуле за межі cooldown перед повторною здачею
+    failed_attempt_res = await db_session.execute(
+        select(QuizAttempt).where(QuizAttempt.id == uuid.UUID(fail_quiz_data["id"]))
+    )
+    failed_attempt = failed_attempt_res.scalar_one()
+    assert isinstance(failed_attempt, QuizAttempt)
+    failed_attempt.attempted_at = datetime.now(UTC) - timedelta(
+        seconds=settings.QUIZ_RETRY_COOLDOWN_SECONDS + 5
+    )
+    await db_session.commit()
 
     # 3. Успішна спроба тесту (5 правильних з 6 = 83.33% >= 70%) розблоковує практичну роботу
     passed_answers = [

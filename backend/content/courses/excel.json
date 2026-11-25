@@ -977,6 +977,16 @@
           "correct_option_index": 1
         },
         {
+          "question_text": "Вкажіть секторну діаграму (оберіть правильне зображення):",
+          "options": [
+            "![Варіант відповіді](/media/courses/excel/test/42answera.png)",
+            "![Варіант відповіді](/media/courses/excel/test/42answerb.png)",
+            "![Варіант відповіді](/media/courses/excel/test/42answerv.png)",
+            "![Варіант відповіді](/media/courses/excel/test/42answerg.png)"
+          ],
+          "correct_option_index": 0
+        },
+        {
           "question_text": "Який об'єкт діаграми виділено?\n\n![Ілюстрація до запитання](/media/courses/excel/test/question43.png)",
           "options": [
             "Підписи даних",

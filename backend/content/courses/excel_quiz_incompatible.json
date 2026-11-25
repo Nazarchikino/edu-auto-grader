@@ -1,7 +1,7 @@
 {
   "course_slug": "excel",
-  "total_incompatible": 6,
-  "note": "Запитання з excel/assets/js/test.js, несумісні зі схемою QuizQuestion (множинний вибір checkbox або HTML <img> всередині options).",
+  "total_incompatible": 5,
+  "note": "Запитання з excel/assets/js/test.js, несумісні зі схемою QuizQuestion (множинний вибір checkbox).",
   "questions": [
     {
       "source_number": 25,
@@ -78,27 +78,6 @@
         2
       ],
       "media_references": []
-    },
-    {
-      "source_number": 42,
-      "reason": "html_image_in_options_unsupported",
-      "original_type": "radio",
-      "question_text": "Вкажи секторну діаграму (Виберіть літеру зображення):",
-      "options": [
-        "![Варіант відповіді](/media/courses/excel/test/42answera.png)",
-        "![Варіант відповіді](/media/courses/excel/test/42answerb.png)",
-        "![Варіант відповіді](/media/courses/excel/test/42answerv.png)",
-        "![Варіант відповіді](/media/courses/excel/test/42answerg.png)"
-      ],
-      "correct_option_indices": [
-        0
-      ],
-      "media_references": [
-        "/media/courses/excel/test/42answera.png",
-        "/media/courses/excel/test/42answerb.png",
-        "/media/courses/excel/test/42answerv.png",
-        "/media/courses/excel/test/42answerg.png"
-      ]
     },
     {
       "source_number": 44,

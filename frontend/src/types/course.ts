@@ -41,6 +41,7 @@ export interface QuizSubmitResponse {
   total_questions: number;
   practical_unlocked: boolean;
   attempted_at: string;
+  retry_after_seconds: number;
 }
 
 export interface PracticalVariant {
@@ -134,6 +135,7 @@ export interface ModuleDetailRead {
   quiz_questions: QuizQuestionRead[];
   quiz_passed: boolean;
   best_quiz_score: number | null;
+  quiz_cooldown_remaining_seconds?: number;
   practical_unlocked: boolean;
   practical: PracticalSummaryRead | null;
 }

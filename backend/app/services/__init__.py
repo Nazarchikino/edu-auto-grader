@@ -12,9 +12,10 @@ from app.services.export_service import (
     render_group_journal_xlsx,
 )
 from app.services.quiz_service import (
-    QUIZ_PASS_THRESHOLD_PERCENT,
     QuizService,
     calculate_variant_index,
+    format_cooldown_remaining,
+    get_quiz_pass_threshold_percent,
     resolve_student_variant,
 )
 from app.services.retention_service import (
@@ -60,7 +61,6 @@ __all__ = [
     "HTML_MEDIA_TYPE",
     "PDF_MEDIA_TYPE",
     "PracticalColumnInfo",
-    "QUIZ_PASS_THRESHOLD_PERCENT",
     "QuizService",
     "RETENTION_CLEANUP_INTERVAL_SECONDS",
     "RetentionCleanupSummary",
@@ -77,7 +77,9 @@ __all__ = [
     "cleanup_expired_submissions",
     "delete_submission_file_safely",
     "delete_submission_files_for_paths",
+    "format_cooldown_remaining",
     "generate_temp_password",
+    "get_quiz_pass_threshold_percent",
     "normalize_full_name",
     "parse_docx_students",
     "parse_txt_students",

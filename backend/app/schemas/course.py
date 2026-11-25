@@ -64,6 +64,7 @@ class QuizSubmitResponse(BaseModel):
     total_questions: int = Field(..., ge=0)
     practical_unlocked: bool
     attempted_at: datetime
+    retry_after_seconds: int = Field(default=0, ge=0)
 
 
 class PracticalVariant(BaseModel):
@@ -197,6 +198,7 @@ class ModuleDetailRead(BaseModel):
     quiz_questions: list[QuizQuestionRead] = Field(default_factory=list)
     quiz_passed: bool = False
     best_quiz_score: float | None = None
+    quiz_cooldown_remaining_seconds: int = Field(default=0, ge=0)
     practical_unlocked: bool = False
     practical: PracticalSummaryRead | None = None
 

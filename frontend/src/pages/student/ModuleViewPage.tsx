@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,6 +11,7 @@ import {
 } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import axios from "axios";
 import {
   AlertCircle,
   AlertTriangle,
@@ -20,6 +22,7 @@ import {
   Check,
   CheckCircle2,
   ClipboardCheck,
+  Clock,
   Copy,
   Database,
   FileCheck2,
@@ -50,7 +53,11 @@ import {
 } from "../../components/common/MarkdownRenderer";
 import { HtmlSandbox } from "../../components/sandbox/HtmlSandbox";
 import { extractApiErrorMessage, useAuth } from "../../context/AuthContext";
-import type { HtmlSubmissionRequest, SubmissionRead } from "../../types/api";
+import type {
+  ErrorResponse,
+  HtmlSubmissionRequest,
+  SubmissionRead,
+} from "../../types/api";
 import type {
   ModuleDetailRead,
   PracticalFormat,
@@ -116,6 +123,70 @@ function formatFileSize(bytes: number): string {
   }
   const megabytes = kilobytes / 1024;
   return `${megabytes.toFixed(2)} МБ`;
+}
+
+interface ShuffledQuizOption {
+  text: string;
+  originalIndex: number;
+}
+
+/**
+ * Перемішує варіанти відповідей алгоритмом Фішера–Єйтса зі збереженням
+ * оригінального індексу (`originalIndex`) для коректної перевірки на бекенді.
+ */
+function shuffleQuizOptions(options: readonly string[]): ShuffledQuizOption[] {
+  const items: ShuffledQuizOption[] = options.map((text, index) => ({
+    text,
+    originalIndex: index,
+  }));
+  for (let idx = items.length - 1; idx > 0; idx -= 1) {
+    const swapIdx = Math.floor(Math.random() * (idx + 1));
+    const currentItem = items[idx];
+    const targetItem = items[swapIdx];
+    if (currentItem !== undefined && targetItem !== undefined) {
+      items[idx] = targetItem;
+      items[swapIdx] = currentItem;
+    }
+  }
+  return items;
+}
+
+function formatCountdownMmSs(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = safeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function extractRetryAfterSeconds(error: unknown): number | null {
+  if (!axios.isAxiosError<ErrorResponse>(error) || error.response?.status !== 429) {
+    return null;
+  }
+
+  const rawHeaders: unknown = error.response.headers;
+  if (isPlainRecord(rawHeaders)) {
+    const retryHeader = rawHeaders["retry-after"] ?? rawHeaders["Retry-After"];
+    if (typeof retryHeader === "string" || typeof retryHeader === "number") {
+      const parsedHeader = Number.parseInt(String(retryHeader), 10);
+      if (Number.isFinite(parsedHeader) && parsedHeader > 0) {
+        return parsedHeader;
+      }
+    }
+  }
+
+  const responseContext = error.response.data?.context;
+  if (isPlainRecord(responseContext)) {
+    const rawContextSeconds = responseContext["retry_after_seconds"];
+    if (
+      typeof rawContextSeconds === "number" &&
+      Number.isFinite(rawContextSeconds) &&
+      rawContextSeconds > 0
+    ) {
+      return Math.ceil(rawContextSeconds);
+    }
+  }
+
+  return null;
 }
 
 async function fetchModuleDetail(moduleId: string): Promise<ModuleDetailRead> {
@@ -684,12 +755,33 @@ export function ModuleViewPage(): ReactElement {
     useState<QuizSubmitResponse | null>(null);
   const [quizError, setQuizError] = useState<string | null>(null);
 
+  const [shuffleSeed, setShuffleSeed] = useState<number>(0);
+  const [shuffledOptionsMap, setShuffledOptionsMap] = useState<
+    Record<string, ShuffledQuizOption[]>
+  >({});
+  const lastShuffledSignatureRef = useRef<string>("");
+
+  const [cooldownSeconds, setCooldownSeconds] = useState<number>(0);
+  const cooldownDeadlineRef = useRef<number | null>(null);
+  const prevCooldownActiveRef = useRef<boolean>(false);
+
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragActive, setIsDragActive] = useState<boolean>(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [lastSubmissionResult, setLastSubmissionResult] =
     useState<SubmissionRead | null>(null);
   const [copiedRawText, setCopiedRawText] = useState<boolean>(false);
+
+  const startQuizCooldown = useCallback((seconds: number): void => {
+    const normalized = Math.max(0, Math.ceil(seconds));
+    if (normalized <= 0) {
+      cooldownDeadlineRef.current = null;
+      setCooldownSeconds(0);
+      return;
+    }
+    cooldownDeadlineRef.current = Date.now() + normalized * 1000;
+    setCooldownSeconds(normalized);
+  }, []);
 
   const resolvedModuleId = moduleId ?? "";
 
@@ -732,7 +824,92 @@ export function ModuleViewPage(): ReactElement {
     setLastSubmissionResult(null);
     setCopiedRawText(false);
     setActiveTab("lecture");
+    prevCooldownActiveRef.current = false;
+    cooldownDeadlineRef.current = null;
+    setCooldownSeconds(0);
+    lastShuffledSignatureRef.current = "";
+    setShuffledOptionsMap({});
   }, [resolvedModuleId]);
+
+  useEffect(() => {
+    if (!module) {
+      return;
+    }
+    const signature = `${module.id}|${shuffleSeed}|${module.quiz_questions
+      .map((question) => `${question.id}:${question.options.join("\u001f")}`)
+      .join("\u001e")}`;
+    if (lastShuffledSignatureRef.current === signature) {
+      return;
+    }
+    lastShuffledSignatureRef.current = signature;
+
+    const nextShuffledMap: Record<string, ShuffledQuizOption[]> = {};
+    for (const question of module.quiz_questions) {
+      nextShuffledMap[question.id] = shuffleQuizOptions(question.options);
+    }
+    setShuffledOptionsMap(nextShuffledMap);
+  }, [module, shuffleSeed]);
+
+  useEffect(() => {
+    if (!module) {
+      return;
+    }
+    if (module.quiz_passed) {
+      prevCooldownActiveRef.current = false;
+      startQuizCooldown(0);
+      return;
+    }
+
+    const serverRemaining = Math.max(
+      0,
+      Math.ceil(module.quiz_cooldown_remaining_seconds ?? 0)
+    );
+    if (serverRemaining > 0) {
+      const currentDeadline = cooldownDeadlineRef.current;
+      const currentRemaining =
+        currentDeadline === null
+          ? 0
+          : Math.max(0, Math.ceil((currentDeadline - Date.now()) / 1000));
+      if (
+        currentRemaining <= 0 ||
+        Math.abs(currentRemaining - serverRemaining) > 2
+      ) {
+        startQuizCooldown(serverRemaining);
+      }
+    }
+  }, [module, startQuizCooldown]);
+
+  const isQuizOnCooldown = cooldownSeconds > 0;
+
+  useEffect(() => {
+    if (!isQuizOnCooldown) {
+      if (prevCooldownActiveRef.current) {
+        setSelectedAnswers({});
+        setQuizError(null);
+        setShuffleSeed((prev) => prev + 1);
+      }
+      prevCooldownActiveRef.current = false;
+      return;
+    }
+
+    prevCooldownActiveRef.current = true;
+    const intervalId = window.setInterval(() => {
+      const deadline = cooldownDeadlineRef.current;
+      if (deadline === null) {
+        setCooldownSeconds(0);
+        return;
+      }
+      const nextRemaining = Math.max(
+        0,
+        Math.ceil((deadline - Date.now()) / 1000)
+      );
+      setCooldownSeconds(nextRemaining);
+    }, 500);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isQuizOnCooldown]);
 
   useEffect(() => {
     return () => {
@@ -817,9 +994,22 @@ export function ModuleViewPage(): ReactElement {
     onSuccess: async (result) => {
       setLastQuizResult(result);
       setQuizError(null);
+      if (result.passed) {
+        prevCooldownActiveRef.current = false;
+        startQuizCooldown(0);
+      } else if (result.retry_after_seconds > 0) {
+        startQuizCooldown(result.retry_after_seconds);
+      } else {
+        setSelectedAnswers({});
+        setShuffleSeed((prev) => prev + 1);
+      }
       await invalidateSubmissionRelatedQueries();
     },
     onError: (err) => {
+      const retryAfter = extractRetryAfterSeconds(err);
+      if (retryAfter !== null) {
+        startQuizCooldown(retryAfter);
+      }
       setQuizError(
         extractApiErrorMessage(
           err,
@@ -900,6 +1090,7 @@ export function ModuleViewPage(): ReactElement {
     setSelectedAnswers({});
     setLastQuizResult(null);
     setQuizError(null);
+    setShuffleSeed((prev) => prev + 1);
   };
 
   const handleQuizSubmit = (event: FormEvent<HTMLFormElement>): void => {
@@ -908,9 +1099,16 @@ export function ModuleViewPage(): ReactElement {
       return;
     }
 
+    if (isQuizOnCooldown) {
+      setQuizError(
+        `Повторна спроба буде доступна через ${formatCountdownMmSs(cooldownSeconds)}. Перечитайте конспект лекції.`
+      );
+      return;
+    }
+
     if (!allQuestionsAnswered) {
       setQuizError(
-        `Будь ласка, дайте відповідь на всі питання тесту (${answeredCount} із ${totalQuestions}).`
+        `Будь ласка, дайте відповідь на всі питання тесту (${answeredCount} з ${totalQuestions}).`
       );
       return;
     }
@@ -1386,10 +1584,22 @@ export function ModuleViewPage(): ReactElement {
                   <button
                     type="button"
                     onClick={handleResetQuizSelection}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    disabled={isQuizOnCooldown}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    Пройти ще раз
+                    {isQuizOnCooldown ? (
+                      <>
+                        <Clock className="h-3.5 w-3.5 text-amber-600" />
+                        <span>
+                          Доступно через {formatCountdownMmSs(cooldownSeconds)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>Пройти ще раз</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -1428,11 +1638,11 @@ export function ModuleViewPage(): ReactElement {
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs">
-                  <span className="text-slate-500">Обрано відповідей: </span>
+                  <span className="text-slate-500">Відповіли: </span>
                   <span className="font-bold text-slate-900">
-                    {answeredCount} / {totalQuestions}
+                    {answeredCount} з {totalQuestions}
                   </span>
                 </div>
                 {module.best_quiz_score !== null && (
@@ -1453,6 +1663,38 @@ export function ModuleViewPage(): ReactElement {
               </div>
             ) : (
               <form onSubmit={handleQuizSubmit} className="mt-6 space-y-6">
+                {isQuizOnCooldown && (
+                  <div
+                    className="flex flex-col justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs text-amber-950 sm:flex-row sm:items-center"
+                    role="status"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <Clock className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                      <div>
+                        <p className="font-bold">
+                          Тимчасова пауза перед повторною спробою:{" "}
+                          <span className="font-mono text-sm text-amber-900">
+                            {formatCountdownMmSs(cooldownSeconds)}
+                          </span>
+                        </p>
+                        <p className="mt-0.5 text-amber-800">
+                          Повторна спроба буде доступна після завершення
+                          таймера. Перечитайте конспект лекції — після
+                          розблокування варіанти відповідей перемішаються.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("lecture")}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3.5 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+                    >
+                      <BookOpen className="h-3.5 w-3.5" />
+                      <span>Перечитати лекцію</span>
+                    </button>
+                  </div>
+                )}
+
                 {quizError !== null && (
                   <div className="flex items-center gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs font-medium text-rose-800">
                     <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
@@ -1463,6 +1705,12 @@ export function ModuleViewPage(): ReactElement {
                 <div className="space-y-5">
                   {module.quiz_questions.map((question, qIndex) => {
                     const selectedIdx = selectedAnswers[question.id];
+                    const displayedOptions: ShuffledQuizOption[] =
+                      shuffledOptionsMap[question.id] ??
+                      question.options.map((text, index) => ({
+                        text,
+                        originalIndex: index,
+                      }));
 
                     return (
                       <fieldset
@@ -1486,9 +1734,10 @@ export function ModuleViewPage(): ReactElement {
                         </div>
 
                         <div className="mt-3.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                          {question.options.map((optionText, optIndex) => {
-                            const isSelected = selectedIdx === optIndex;
-                            const inputId = `q-${question.id}-opt-${optIndex}`;
+                          {displayedOptions.map((option) => {
+                            const isSelected =
+                              selectedIdx === option.originalIndex;
+                            const inputId = `q-${question.id}-opt-${option.originalIndex}`;
 
                             return (
                               <label
@@ -1506,12 +1755,17 @@ export function ModuleViewPage(): ReactElement {
                                   name={`question-${question.id}`}
                                   checked={isSelected}
                                   onChange={() =>
-                                    handleSelectOption(question.id, optIndex)
+                                    handleSelectOption(
+                                      question.id,
+                                      option.originalIndex
+                                    )
                                   }
                                   className="h-4 w-4 shrink-0 border-slate-300 text-blue-600 focus:ring-blue-500"
                                 />
                                 <span className="min-w-0 leading-snug">
-                                  {renderInlineMarkdown(optionText)}
+                                  {renderInlineMarkdown(option.text, {
+                                    disableLinks: true,
+                                  })}
                                 </span>
                               </label>
                             );
@@ -1523,22 +1777,32 @@ export function ModuleViewPage(): ReactElement {
                 </div>
 
                 <div className="flex flex-col items-stretch justify-between gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:items-center">
-                  <button
-                    type="button"
-                    onClick={handleResetQuizSelection}
-                    disabled={
-                      answeredCount === 0 || submitQuizMutation.isPending
-                    }
-                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    Очистити вибір
-                  </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleResetQuizSelection}
+                      disabled={
+                        answeredCount === 0 || submitQuizMutation.isPending
+                      }
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      Очистити вибір
+                    </button>
+                    <span className="text-xs font-medium text-slate-600">
+                      Відповіли:{" "}
+                      <span className="font-bold text-slate-900">
+                        {answeredCount} з {totalQuestions}
+                      </span>
+                    </span>
+                  </div>
 
                   <button
                     type="submit"
                     disabled={
-                      !allQuestionsAnswered || submitQuizMutation.isPending
+                      !allQuestionsAnswered ||
+                      isQuizOnCooldown ||
+                      submitQuizMutation.isPending
                     }
                     className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                   >
@@ -1547,14 +1811,18 @@ export function ModuleViewPage(): ReactElement {
                         <Loader2 className="h-4 w-4 animate-spin" />
                         <span>Перевірка відповідей...</span>
                       </>
+                    ) : isQuizOnCooldown ? (
+                      <>
+                        <Clock className="h-4 w-4" />
+                        <span>
+                          Надіслати тест ({formatCountdownMmSs(cooldownSeconds)}
+                          )
+                        </span>
+                      </>
                     ) : (
                       <>
                         <Send className="h-4 w-4" />
-                        <span>
-                          {hasPractical
-                            ? "Завершити тест та перевірити допуск"
-                            : "Завершити тест самоперевірки"}
-                        </span>
+                        <span>Надіслати тест</span>
                       </>
                     )}
                   </button>

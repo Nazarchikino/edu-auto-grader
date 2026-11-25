@@ -70,7 +70,8 @@ class Settings(BaseSettings):
     ENABLE_RETENTION_CLEANUP_TASK: bool = True
     COURSE_CONTENT_DIR: Path = _BACKEND_ROOT / "content" / "courses"
     COURSE_MEDIA_DIR: Path = _BACKEND_ROOT / "content" / "media"
-    QUIZ_PASS_THRESHOLD_PERCENT: float = 70.0
+    QUIZ_PASS_THRESHOLD_PERCENT: float = Field(default=70.0, ge=0.0, le=100.0)
+    QUIZ_RETRY_COOLDOWN_SECONDS: int = Field(default=300, ge=0)
 
     MAX_OFFICE_UPLOAD_BYTES: int = Field(default=15 * 1024 * 1024, ge=1)
     MAX_ACCDB_UPLOAD_BYTES: int = Field(default=30 * 1024 * 1024, ge=1)
