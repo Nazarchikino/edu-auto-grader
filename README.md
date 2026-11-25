@@ -244,6 +244,8 @@ python -m app.services.retention_service
 
 ## Production-розгортання (Docker + Nginx + бекапи)
 
+> 📘 Детальний покроковий посібник із запуску, оновлення, бекапів і troubleshooting у режимах Dev та Prod — [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md).
+
 Готовий production-стек описано у [`docker-compose.prod.yml`](docker-compose.prod.yml) (ізольований Compose-проєкт `name: edu-auto-grader-prod`) та складається з трьох ізольованих контейнерів:
 - **`db` (`postgres:16-alpine`)** — працює лише у внутрішній мережі `internal` без пробросу порту `5432` назовні;
 - **`backend` (`backend/Dockerfile`)** — `python:3.12-slim` із `mdbtools`, шрифтами `fonts-dejavu-core` (для кириличного PDF-експорту через `fpdf2`), непривілейованим користувачем `appuser`, `APP_ENV=production`, `uvicorn --workers 2 --proxy-headers` і `HEALTHCHECK` на `/api/v1/health/ready`;
