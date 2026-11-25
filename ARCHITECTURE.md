@@ -28,9 +28,10 @@ edu-auto-grader/
 │   │   ├── main.py                  # Точка входу FastAPI, lifespan (автоочищення файлів), CORS, StaticFiles (/media/courses), exception handlers
 │   │   ├── seed.py                  # CLI-імпорт 4 курсів із JSON (--dry-run, --sync-courses)
 │   │   ├── core/
-│   │   │   ├── config.py            # Налаштування середовища (Pydantic BaseSettings)
+│   │   │   ├── config.py            # Налаштування середовища (Pydantic BaseSettings, production-валідація JWT_SECRET_KEY)
 │   │   │   ├── database.py          # AsyncEngine, AsyncSessionLocal
-│   │   │   ├── security.py          # Хешування паролів, генерація/валідація JWT
+│   │   │   ├── rate_limit.py        # Потокобезпечний in-memory sliding-window лімітер невдалих спроб входу
+│   │   │   ├── security.py          # Хешування паролів (sha256$+bcrypt), генерація/валідація JWT із token_version
 │   │   │   └── exceptions.py        # Доменні винятки системи
 │   │   ├── models/                  # SQLAlchemy 2.0 ORM моделі
 │   │   │   ├── user.py              # User, AcademicGroup
@@ -121,6 +122,8 @@ edu-auto-grader/
    * `role`: `ENUM('student', 'teacher', 'admin')` (NOT NULL)
    * `group_id`: `UUID` (FK -> `academic_groups.id`, NULLABLE, `ON DELETE SET NULL`)
    * `list_number`: `SMALLINT` (NULLABLE — номер студента у журналі групи для розрахунку варіанта)
+   * `token_version`: `INTEGER` (NOT NULL, DEFAULT `0` — версія JWT-токенів для відкликання сесій після зміни або скидання пароля)
+   * `must_change_password`: `BOOLEAN` (NOT NULL, DEFAULT `false` — прапорець примусової зміни тимчасового пароля)
    * `created_at`: `TIMESTAMPTZ` (DEFAULT `now()`)
 
 3. **`courses`**
@@ -234,7 +237,9 @@ class BaseGrader(ABC):
 ### 3.3. Основні REST API Ендпоінти (`/api/v1`)
 | Метод | Шлях | Роль | Призначення |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/auth/login` | Public | Отримання JWT access + refresh токенів |
+| `POST` | `/auth/login` | Public | Отримання JWT access + refresh токенів (із sliding-window rate limiting на невдалі спроби) |
+| `POST` | `/auth/refresh` | Public | Оновлення пари JWT-токенів із перевіркою актуальності `token_version` (`tv`) |
+| `POST` | `/auth/change-password` | All Auth | Самостійна зміна пароля, скидання `must_change_password`, інкремент `token_version` та видача нової пари токенів |
 | `GET` | `/courses` | All Auth | Перелік курсів та прогрес поточного студента |
 | `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції та статусу доступу до практичної |
 | `DELETE` | `/modules/{module_id}` | Teacher / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач із диска |
@@ -246,7 +251,8 @@ class BaseGrader(ABC):
 | `GET` | `/submissions/{submission_id}/download` | Teacher / Admin | Завантаження вихідного файлу (`.docx`/`.xlsx`/`.accdb`) або `.html` (з `raw_code`) здачі студента викладачем курсу або адміністратором |
 | `PATCH` | `/submissions/{submission_id}/grade` | Teacher | Ручне коригування оцінки та додавання коментаря викладача |
 | `GET` | `/analytics/groups/{group_id}/export` | Teacher | Генерація відомості успішності у форматі `.xlsx` або `.pdf` |
-| `POST` | `/admin/users/import` | Admin | Масовий імпорт студентів із `.docx` або `.txt` з українським алфавітним сортуванням та звітом |
+| `POST` | `/admin/users/import` | Admin | Масовий імпорт студентів із `.docx` або `.txt` з українським алфавітним сортуванням та звітом (`must_change_password=True`) |
+| `POST` | `/admin/users/{user_id}/reset-password` | Admin | Скидання пароля користувача з інкрементом `token_version` (відкликання сесій) та встановленням `must_change_password=True` |
 | `GET` | `/media/courses/{path}` | Public | Статична роздача медіафайлів навчальних курсів (`.png`, `.webp`, `.jpg`, `.pdf`) із `COURSE_MEDIA_DIR` через `StaticFiles` |
 
 ### 3.4. Контракт масового імпорту студентів (`POST /api/v1/admin/users/import`)

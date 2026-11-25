@@ -19,13 +19,15 @@ from app.schemas.auth import (
     AcademicGroupCreate,
     AcademicGroupRead,
     AcademicGroupUpdate,
+    AdminResetPasswordRequest,
+    AdminResetPasswordResponse,
     StudentImportResponse,
     UserCreate,
     UserRead,
     UserUpdate,
 )
 from app.services.retention_service import delete_submission_files_for_paths
-from app.services.student_import_service import StudentImportService
+from app.services.student_import_service import StudentImportService, generate_temp_password
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -433,10 +435,44 @@ async def update_admin_user(
 
     if "password" in fields_set and payload.password is not None:
         user.password_hash = hash_password(payload.password)
+        user.token_version += 1
+        if user.id != current_admin.id:
+            user.must_change_password = True
 
     await db.commit()
     updated_user = await _get_user_with_group_or_404(db, user.id)
     return serialize_user(updated_user)
+
+
+@router.post(
+    "/users/{user_id}/reset-password",
+    response_model=AdminResetPasswordResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def reset_admin_user_password(
+    user_id: uuid.UUID,
+    _current_admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    payload: AdminResetPasswordRequest | None = None,
+) -> AdminResetPasswordResponse:
+    """Скидає пароль користувача, інкрементує token_version і вимагає зміну пароля."""
+    user = await _get_user_with_group_or_404(db, user_id)
+    resolved_password = (
+        payload.new_password
+        if payload is not None and payload.new_password is not None
+        else generate_temp_password()
+    )
+
+    user.password_hash = hash_password(resolved_password)
+    user.token_version += 1
+    user.must_change_password = True
+
+    await db.commit()
+    updated_user = await _get_user_with_group_or_404(db, user.id)
+    return AdminResetPasswordResponse(
+        user=serialize_user(updated_user),
+        temp_password=resolved_password,
+    )
 
 
 @router.delete(

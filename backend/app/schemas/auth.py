@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.user import MAX_COURSE_YEAR, MIN_COURSE_YEAR, UserRole
 
@@ -52,7 +52,31 @@ class TokenPayload(BaseModel):
     sub: str
     role: UserRole
     token_type: Literal["access", "refresh"]
+    tv: int = Field(..., ge=0)
     exp: int
+
+
+class ChangePasswordRequest(BaseModel):
+    """Запит на самостійну зміну пароля автентифікованим користувачем."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_distinct_passwords(self) -> "ChangePasswordRequest":
+        if self.new_password == self.current_password:
+            raise ValueError("Новий пароль не може збігатися з поточним паролем.")
+        return self
+
+
+class AdminResetPasswordRequest(BaseModel):
+    """Опціональний запит адміністратора на скидання пароля користувача."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class AcademicGroupBase(BaseModel):
@@ -129,7 +153,25 @@ class UserRead(UserBase):
 
     id: uuid.UUID
     group_code: str | None = None
+    must_change_password: bool = False
     created_at: datetime
+
+
+class ChangePasswordResponse(TokenResponse):
+    """Відповідь після успішної зміни пароля: свіжа пара токенів та оновлений профіль."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user: UserRead
+
+
+class AdminResetPasswordResponse(BaseModel):
+    """Відповідь після скидання пароля користувача адміністратором."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user: UserRead
+    temp_password: str = Field(..., min_length=1, max_length=128)
 
 
 class ImportedStudentItem(BaseModel):

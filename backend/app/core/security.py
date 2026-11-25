@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -11,19 +12,42 @@ from app.core.exceptions import DomainError
 from app.models.user import UserRole
 from app.schemas.auth import TokenPayload, TokenResponse
 
+PASSWORD_HASH_PREFIX: str = "sha256$"
+BCRYPT_MAX_PASSWORD_BYTES: int = 72
+
+
+def _sha256_password_bytes(plain_password: str) -> bytes:
+    """Попередньо хешує пароль через SHA-256 у 64 ASCII-байти для безпечного bcrypt."""
+    return hashlib.sha256(plain_password.encode("utf-8")).hexdigest().encode("ascii")
+
 
 def hash_password(plain_password: str) -> str:
-    """Генерує безпечний bcrypt-хеш для відкритого пароля."""
+    """Генерує безпечний `sha256$<bcrypt>` хеш без обмеження 72 байтів UTF-8."""
     salt: bytes = bcrypt.gensalt(rounds=12)
-    hashed: bytes = bcrypt.hashpw(plain_password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
+    hashed: bytes = bcrypt.hashpw(_sha256_password_bytes(plain_password), salt)
+    return f"{PASSWORD_HASH_PREFIX}{hashed.decode('utf-8')}"
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
-    """Перевіряє відповідність відкритого пароля збереженому bcrypt-хешу."""
+    """Перевіряє пароль проти `sha256$<bcrypt>` або legacy-хешу bcrypt без ValueError."""
+    if not password_hash:
+        return False
+
     try:
+        if password_hash.startswith(PASSWORD_HASH_PREFIX):
+            raw_bcrypt_hash = password_hash[len(PASSWORD_HASH_PREFIX) :]
+            if not raw_bcrypt_hash:
+                return False
+            return bcrypt.checkpw(
+                _sha256_password_bytes(plain_password),
+                raw_bcrypt_hash.encode("utf-8"),
+            )
+
+        password_bytes = plain_password.encode("utf-8")
+        if len(password_bytes) > BCRYPT_MAX_PASSWORD_BYTES:
+            return False
         return bcrypt.checkpw(
-            plain_password.encode("utf-8"),
+            password_bytes,
             password_hash.encode("utf-8"),
         )
     except ValueError:
@@ -36,14 +60,16 @@ def _encode_jwt_token(
     role: UserRole,
     token_type: Literal["access", "refresh"],
     expires_delta: timedelta,
+    token_version: int = 0,
 ) -> str:
-    """Формує та підписує JWT-токен із базовими claims (sub, role, token_type, exp)."""
+    """Формує та підписує JWT-токен із claims (sub, role, token_type, tv, iat, exp)."""
     now = datetime.now(UTC)
     expire = now + expires_delta
     payload: dict[str, object] = {
         "sub": subject,
         "role": role.value,
         "token_type": token_type,
+        "tv": token_version,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -58,8 +84,10 @@ def create_access_token(
     subject: str | uuid.UUID,
     role: UserRole,
     expires_delta: timedelta | None = None,
+    *,
+    token_version: int = 0,
 ) -> str:
-    """Створює підписаний JWT access-токен із заданим терміном дії."""
+    """Створює підписаний JWT access-токен із заданим терміном дії та token_version."""
     delta = (
         expires_delta
         if expires_delta is not None
@@ -70,6 +98,7 @@ def create_access_token(
         role=role,
         token_type="access",
         expires_delta=delta,
+        token_version=token_version,
     )
 
 
@@ -77,8 +106,10 @@ def create_refresh_token(
     subject: str | uuid.UUID,
     role: UserRole,
     expires_delta: timedelta | None = None,
+    *,
+    token_version: int = 0,
 ) -> str:
-    """Створює підписаний JWT refresh-токен із заданим терміном дії."""
+    """Створює підписаний JWT refresh-токен із заданим терміном дії та token_version."""
     delta = (
         expires_delta
         if expires_delta is not None
@@ -89,17 +120,28 @@ def create_refresh_token(
         role=role,
         token_type="refresh",
         expires_delta=delta,
+        token_version=token_version,
     )
 
 
 def create_token_pair(
     subject: str | uuid.UUID,
     role: UserRole,
+    *,
+    token_version: int = 0,
 ) -> TokenResponse:
-    """Генерує пару JWT access та refresh токенів для користувача."""
+    """Генерує пару JWT access та refresh токенів для користувача з прив'язкою до tv."""
     return TokenResponse(
-        access_token=create_access_token(subject=subject, role=role),
-        refresh_token=create_refresh_token(subject=subject, role=role),
+        access_token=create_access_token(
+            subject=subject,
+            role=role,
+            token_version=token_version,
+        ),
+        refresh_token=create_refresh_token(
+            subject=subject,
+            role=role,
+            token_version=token_version,
+        ),
         token_type="bearer",
     )
 

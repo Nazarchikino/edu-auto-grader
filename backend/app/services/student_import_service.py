@@ -828,6 +828,7 @@ class StudentImportService:
                 role=UserRole.STUDENT,
                 group_id=group.id,
                 list_number=assigned_list_number,
+                must_change_password=True,
             )
             users_to_create.append(user)
             created_emails_in_batch.add(resolved_email)

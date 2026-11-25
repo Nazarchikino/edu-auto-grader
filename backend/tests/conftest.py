@@ -32,6 +32,7 @@ from app import seed as seed_module  # noqa: E402
 from app.api.deps import get_db  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.database import Base  # noqa: E402
+from app.core.rate_limit import login_rate_limiter  # noqa: E402
 from app.core.security import create_access_token, hash_password  # noqa: E402
 from app.graders.accdb_grader import build_accdb_bytes  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
@@ -158,6 +159,7 @@ async def db_session(
     monkeypatch.setattr(settings, "UPLOADS_DIR", uploads_dir)
     monkeypatch.setattr(settings, "ENABLE_RETENTION_CLEANUP_TASK", False)
     monkeypatch.setattr(seed_module, "hash_password", _fast_seed_hash_password)
+    login_rate_limiter.clear()
 
     engine = _create_sqlite_test_engine()
     session_factory = sessionmaker(
@@ -167,14 +169,16 @@ async def db_session(
         autoflush=False,
     )
 
-    with session_factory() as sync_session:
-        adapter = SqliteAsyncSessionAdapter(sync_session)
-        # justified Any: SqliteAsyncSessionAdapter structural duck-typing for AsyncSession
-        typed_db: Any = adapter
-        await seed_module.seed_database(typed_db)
-        yield adapter
-
-    engine.dispose()
+    try:
+        with session_factory() as sync_session:
+            adapter = SqliteAsyncSessionAdapter(sync_session)
+            # justified Any: SqliteAsyncSessionAdapter structural duck-typing for AsyncSession
+            typed_db: Any = adapter
+            await seed_module.seed_database(typed_db)
+            yield adapter
+    finally:
+        login_rate_limiter.clear()
+        engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -198,9 +202,18 @@ async def async_client(
         fastapi_app.dependency_overrides.clear()
 
 
-def make_auth_headers(user_id: object, role: UserRole) -> dict[str, str]:
+def make_auth_headers(
+    user_id: object,
+    role: UserRole,
+    *,
+    token_version: int = 0,
+) -> dict[str, str]:
     """Генерує HTTP-заголовок Authorization із валідним JWT access-токеном."""
-    token = create_access_token(subject=str(user_id), role=role)
+    token = create_access_token(
+        subject=str(user_id),
+        role=role,
+        token_version=token_version,
+    )
     return {"Authorization": f"Bearer {token}"}
 
 

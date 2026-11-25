@@ -1,11 +1,15 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_ROOT: Path = Path(__file__).resolve().parents[2]
 _PROJECT_ROOT: Path = _BACKEND_ROOT.parent
+
+DEFAULT_JWT_SECRET_KEY: str = "change-me-in-production-super-secret-jwt-key-32b"
+MIN_PRODUCTION_JWT_SECRET_LENGTH: int = 32
 
 
 def _resolve_backend_path(raw_path: Path) -> Path:
@@ -36,6 +40,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Edu Auto Grader"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
+    APP_ENV: Literal["development", "test", "production"] = "development"
 
     POSTGRES_USER: str = "postgres"
     POSTGRES_PASSWORD: str = "postgres"
@@ -44,10 +49,14 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "edu_auto_grader"
     DATABASE_URL: str | None = None
 
-    JWT_SECRET_KEY: str = "change-me-in-production-super-secret-jwt-key-32b"
+    JWT_SECRET_KEY: str = DEFAULT_JWT_SECRET_KEY
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    ENABLE_LOGIN_RATE_LIMIT: bool = True
+    LOGIN_RATE_LIMIT_MAX_ATTEMPTS: int = Field(default=10, ge=1)
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=60, ge=1)
 
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: [
@@ -76,6 +85,23 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_content_paths(cls, value: Path) -> Path:
         return _resolve_backend_path(value)
+
+    @model_validator(mode="after")
+    def _validate_production_security(self) -> "Settings":
+        """Блокує запуск у production із дефолтним або закоротким JWT_SECRET_KEY."""
+        if self.APP_ENV == "production":
+            stripped_secret = self.JWT_SECRET_KEY.strip()
+            if (
+                self.JWT_SECRET_KEY == DEFAULT_JWT_SECRET_KEY
+                or stripped_secret == DEFAULT_JWT_SECRET_KEY
+                or len(stripped_secret) < MIN_PRODUCTION_JWT_SECRET_LENGTH
+            ):
+                raise ValueError(
+                    "У режимі production необхідно задати надійний JWT_SECRET_KEY "
+                    f"довжиною щонайменше {MIN_PRODUCTION_JWT_SECRET_LENGTH} символів, "
+                    "відмінний від значення за замовчуванням."
+                )
+        return self
 
     @property
     def async_database_url(self) -> str:

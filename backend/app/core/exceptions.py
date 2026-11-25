@@ -8,12 +8,14 @@ class DomainError(Exception):
         code: str = "DOMAIN_ERROR",
         status_code: int = 400,
         context: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(detail)
         self.detail: str = detail
         self.code: str = code
         self.status_code: int = status_code
         self.context: dict[str, object] = context if context is not None else {}
+        self.headers: dict[str, str] | None = headers
 
 
 class GradingError(DomainError):

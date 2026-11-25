@@ -36,7 +36,26 @@ export interface TokenPayload {
   sub: string;
   role: UserRole;
   token_type: TokenType;
+  tv: number;
   exp: number;
+}
+
+export interface ChangePasswordRequest {
+  current_password: string;
+  new_password: string;
+}
+
+export interface ChangePasswordResponse extends TokenResponse {
+  user: UserRead;
+}
+
+export interface AdminResetPasswordRequest {
+  new_password?: string | null;
+}
+
+export interface AdminResetPasswordResponse {
+  user: UserRead;
+  temp_password: string;
 }
 
 export const ACADEMIC_COURSE_YEARS = [1, 2, 3, 4] as const;
@@ -90,6 +109,7 @@ export interface UserUpdate {
 export interface UserRead extends UserBase {
   id: string;
   group_code: string | null;
+  must_change_password: boolean;
   created_at: string;
 }
 

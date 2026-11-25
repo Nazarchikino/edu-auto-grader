@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-import bcrypt
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.security import hash_password
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
     MAX_COURSES_COUNT,
@@ -130,13 +130,6 @@ class SeedBundle:
     teacher: User
     students: list[User]
     courses: list[Course]
-
-
-def hash_password(plain_password: str) -> str:
-    """Генерує bcrypt-хеш пароля користувача."""
-    salt = bcrypt.gensalt(rounds=12)
-    hashed: bytes = bcrypt.hashpw(plain_password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
 
 
 def _load_course_from_json(
