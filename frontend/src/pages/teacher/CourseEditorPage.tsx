@@ -1941,7 +1941,7 @@ export function CourseEditorPage(): ReactElement {
           {/* Основна робоча область: Список модулів (ліворуч) + Редактор контенту (праворуч) */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             {/* Ліва панель: Модулі курсу */}
-            <aside className="space-y-3 lg:col-span-4">
+            <aside className="space-y-3 lg:sticky lg:top-20 lg:col-span-4 lg:max-h-[calc(100vh-6rem)] lg:self-start lg:overflow-y-auto lg:p-0.5 lg:pr-1.5">
               <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900">

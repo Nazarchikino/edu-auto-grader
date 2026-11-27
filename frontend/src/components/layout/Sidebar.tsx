@@ -158,11 +158,11 @@ export function Sidebar({ isOpen, onClose }: SidebarProps): ReactElement | null 
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col bg-slate-900 text-slate-100 transition-transform duration-200 ease-in-out lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col bg-slate-900 text-slate-100 transition-transform duration-200 ease-in-out lg:sticky lg:top-0 lg:bottom-auto lg:z-30 lg:h-screen lg:shrink-0 lg:self-start lg:translate-x-0 ${
           isOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="flex h-16 items-center justify-between border-b border-slate-800 px-5">
+        <div className="flex h-16 shrink-0 items-center justify-between border-b border-slate-800 px-5">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600 text-white shadow-xs">
               <ShieldCheck className="h-5 w-5" />
@@ -187,7 +187,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps): ReactElement | null 
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-6">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 space-y-6">
           <div>
             <p className="px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
               {sectionTitle}
@@ -289,7 +289,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps): ReactElement | null 
           </div>
         </div>
 
-        <div className="border-t border-slate-800 px-4 py-3.5 text-xs text-slate-400">
+        <div className="shrink-0 border-t border-slate-800 px-4 py-3.5 text-xs text-slate-400">
           <p className="font-medium text-slate-300">
             Ядро детермінованої перевірки
           </p>

@@ -766,10 +766,10 @@ export function GradebookPage(): ReactElement {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           {/* Ліва колонка: Історія здач студента */}
           <aside
-            className="space-y-3 lg:col-span-4"
+            className="flex flex-col gap-3 lg:sticky lg:top-20 lg:col-span-4 lg:max-h-[calc(100vh-6rem)] lg:self-start"
             aria-label="Історія здач практичних робіт"
           >
-            <div className="flex items-center justify-between px-1">
+            <div className="flex shrink-0 items-center justify-between px-1">
               <h2 className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500">
                 <History className="h-3.5 w-3.5" />
                 <span>Історія перевірок ({filteredSubmissions.length})</span>
@@ -779,7 +779,7 @@ export function GradebookPage(): ReactElement {
               </span>
             </div>
 
-            <div className="max-h-[78vh] space-y-2.5 overflow-y-auto pr-1">
+            <div className="max-h-[60vh] min-h-0 space-y-2.5 overflow-y-auto p-0.5 pr-1.5 lg:max-h-none">
               {filteredSubmissions.map((item) => {
                 const isSelected = activeSubmission?.id === item.id;
                 const context = practicalContextMap[item.practical_id];
