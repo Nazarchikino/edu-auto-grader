@@ -7,11 +7,14 @@ import type {
 } from "./grading";
 
 export {
+  type CourseMediaUploadRead,
   type GradingCriterionPreviewRead,
+  type ModuleReorderRequest,
   type PracticalStudentRead,
   type PracticalSummaryRead,
   type PracticalTeacherRead,
   type PracticalUpdate,
+  type QuizQuestionUpdate,
 } from "./course";
 export {
   GRADING_RULE_TYPES,

@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     MAX_OFFICE_UPLOAD_BYTES: int = Field(default=15 * 1024 * 1024, ge=1)
     MAX_ACCDB_UPLOAD_BYTES: int = Field(default=30 * 1024 * 1024, ge=1)
     MAX_IMPORT_UPLOAD_BYTES: int = Field(default=5 * 1024 * 1024, ge=1)
+    MAX_COURSE_MEDIA_UPLOAD_BYTES: int = Field(default=5 * 1024 * 1024, ge=1)
 
     MAX_ZIP_ENTRIES: int = Field(default=500, ge=1)
     MAX_ZIP_UNCOMPRESSED_BYTES: int = Field(default=50 * 1024 * 1024, ge=1)

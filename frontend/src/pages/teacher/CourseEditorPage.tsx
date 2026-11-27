@@ -1,53 +1,68 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type ChangeEvent,
   type ComponentType,
   type FormEvent,
   type ReactElement,
 } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import axios from "axios";
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   BookOpen,
   BookOpenCheck,
   CheckCircle2,
   Code2,
   Database,
+  Download,
   Eye,
   FileEdit,
   FileSpreadsheet,
   FileText,
   HelpCircle,
+  ImagePlus,
   Layers,
   Loader2,
+  Paperclip,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  Upload,
   Wrench,
   X,
 } from "lucide-react";
 import apiClient from "../../api/client";
+import { MarkdownRenderer } from "../../components/common/MarkdownRenderer";
 import { extractApiErrorMessage } from "../../context/AuthContext";
 import {
   COURSE_SLUGS,
   type CourseCreate,
+  type CourseMediaUploadRead,
   type CourseRead,
   type CourseSlug,
   type CourseUpdate,
   type ModuleCreate,
   type ModuleDetailRead,
+  type ModuleReorderRequest,
+  type ModuleSummaryRead,
   type ModuleUpdate,
   type PracticalCreate,
   type PracticalTeacherRead,
   type PracticalVariant,
   type QuizQuestionCreate,
   type QuizQuestionTeacherRead,
+  type QuizQuestionUpdate,
 } from "../../types/course";
 import {
   PRACTICAL_FORMATS,
@@ -166,77 +181,86 @@ async function deletePracticalById(practicalId: string): Promise<void> {
   await apiClient.delete(`/practicals/${practicalId}`);
 }
 
-function SimpleMarkdownPreview({ content }: { content: string }): ReactElement {
-  const blocks = useMemo(() => {
-    return content
-      .replace(/\r\n/g, "\n")
-      .split("\n\n")
-      .map((block) => block.trim())
-      .filter((block) => block.length > 0);
-  }, [content]);
+const ALLOWED_MEDIA_IMAGE_EXTENSIONS = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+] as const;
+const MAX_MEDIA_UPLOAD_BYTES = 5 * 1024 * 1024;
+const ALLOWED_TEMPLATE_FILE_ACCEPT = ".docx,.xlsx,.accdb,.zip,.txt,.csv";
 
-  if (blocks.length === 0) {
-    return (
-      <p className="text-xs italic text-slate-400">
-        Текст лекції порожній. Введіть Markdown-розмітку ліворуч.
-      </p>
-    );
+function sanitizeDownloadFilename(rawName: string): string {
+  const trimmed = rawName.trim().replace(/^["']|["']$/g, "");
+  const baseName = trimmed.split(/[/\\]/).pop() ?? "";
+  return baseName.trim();
+}
+
+function parseFilenameFromContentDisposition(
+  headerValue: unknown,
+  fallbackFilename: string
+): string {
+  if (typeof headerValue !== "string" || headerValue.trim().length === 0) {
+    return fallbackFilename;
   }
 
-  return (
-    <div className="space-y-3 text-sm leading-relaxed text-slate-700">
-      {blocks.map((block, index) => {
-        if (block.startsWith("# ")) {
-          return (
-            <h2
-              key={index}
-              className="border-b border-slate-200 pb-1.5 text-lg font-bold text-slate-900"
-            >
-              {block.slice(2)}
-            </h2>
-          );
-        }
-        if (block.startsWith("## ")) {
-          return (
-            <h3
-              key={index}
-              className="pt-1 text-base font-bold text-slate-900"
-            >
-              {block.slice(3)}
-            </h3>
-          );
-        }
-        if (block.startsWith("### ")) {
-          return (
-            <h4 key={index} className="text-sm font-bold text-slate-800">
-              {block.slice(4)}
-            </h4>
-          );
-        }
-        const lines = block.split("\n");
-        const isBulletList = lines.every(
-          (line) => line.trim().startsWith("- ") || line.trim().startsWith("* ")
-        );
-        if (isBulletList) {
-          return (
-            <ul
-              key={index}
-              className="list-disc space-y-1 pl-5 text-sm text-slate-700"
-            >
-              {lines.map((line, lineIdx) => (
-                <li key={lineIdx}>{line.trim().slice(2)}</li>
-              ))}
-            </ul>
-          );
-        }
-        return (
-          <p key={index} className="whitespace-pre-line text-sm text-slate-700">
-            {block}
-          </p>
-        );
-      })}
-    </div>
+  const utf8Match = /filename\*\s*=\s*UTF-8''([^;\r\n]+)/i.exec(headerValue);
+  if (utf8Match?.[1] !== undefined) {
+    try {
+      const decoded = sanitizeDownloadFilename(
+        decodeURIComponent(utf8Match[1].trim())
+      );
+      if (decoded.length > 0) {
+        return decoded;
+      }
+    } catch {
+      // Якщо UTF-8 послідовність пошкоджена — переходимо до ASCII filename
+    }
+  }
+
+  const asciiMatch = /filename\s*=\s*(?:"([^"]+)"|([^;\r\n]+))/i.exec(
+    headerValue
   );
+  const rawAscii = asciiMatch?.[1] ?? asciiMatch?.[2];
+  if (rawAscii !== undefined) {
+    const cleaned = sanitizeDownloadFilename(rawAscii);
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+  }
+
+  return fallbackFilename;
+}
+
+function hasStringDetail(value: unknown): value is { detail: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "detail" in value &&
+    typeof (value as Record<string, unknown>).detail === "string"
+  );
+}
+
+async function extractBlobApiErrorMessage(
+  error: unknown,
+  fallbackMessage: string
+): Promise<string> {
+  if (axios.isAxiosError(error)) {
+    const responseData: unknown = error.response?.data;
+    if (responseData instanceof Blob) {
+      try {
+        const rawText = await responseData.text();
+        const parsed: unknown = JSON.parse(rawText);
+        if (hasStringDetail(parsed) && parsed.detail.trim().length > 0) {
+          return parsed.detail.trim();
+        }
+      } catch {
+        // Тіло помилки не є валідним JSON
+      }
+    }
+  }
+  return extractApiErrorMessage(error, fallbackMessage);
 }
 
 export function CourseEditorPage(): ReactElement {
@@ -279,6 +303,9 @@ export function CourseEditorPage(): ReactElement {
   const [moduleOrderIndex, setModuleOrderIndex] = useState<number>(1);
   const [moduleTitle, setModuleTitle] = useState<string>("");
   const [moduleLectureContent, setModuleLectureContent] = useState<string>("");
+  const lectureTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const mediaFileInputRef = useRef<HTMLInputElement | null>(null);
+  const templateFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Стан додавання нового питання тесту-допуску
   const [questionText, setQuestionText] = useState<string>("");
@@ -290,7 +317,16 @@ export function CourseEditorPage(): ReactElement {
   ]);
   const [correctOptionIndex, setCorrectOptionIndex] = useState<number>(0);
 
-  // Стан редагування практичної роботи та варіантів
+  // Стан inline-редагування існуючого питання тесту-допуску
+  const [editingQuestionId, setEditingQuestionId] = useState<string | null>(
+    null
+  );
+  const [editQuestionText, setEditQuestionText] = useState<string>("");
+  const [editQuestionOptions, setEditQuestionOptions] = useState<string[]>([]);
+  const [editCorrectOptionIndex, setEditCorrectOptionIndex] =
+    useState<number>(0);
+
+  // Стан редагування практичної роботи, варіантів та файлу-заготовки
   const [practicalTitle, setPracticalTitle] = useState<string>("");
   const [practicalFormat, setPracticalFormat] =
     useState<PracticalFormat>("docx");
@@ -298,6 +334,8 @@ export function CourseEditorPage(): ReactElement {
   const [practicalInstructions, setPracticalInstructions] =
     useState<string>("");
   const [variantDrafts, setVariantDrafts] = useState<VariantDraft[]>([]);
+  const [isDownloadingTemplate, setIsDownloadingTemplate] =
+    useState<boolean>(false);
 
   const {
     data: courses,
@@ -397,6 +435,11 @@ export function CourseEditorPage(): ReactElement {
     setModuleTitle(moduleDetail.title);
     setModuleLectureContent(moduleDetail.lecture_content);
   }, [moduleDetail]);
+
+  // Скидання активного редагування питання при зміні модуля
+  useEffect(() => {
+    setEditingQuestionId(null);
+  }, [selectedModuleId]);
 
   // Синхронізація полів практичної роботи після завантаження
   useEffect(() => {
@@ -610,7 +653,10 @@ export function CourseEditorPage(): ReactElement {
     mutationFn: async (questionId: string) => {
       await apiClient.delete(`/quiz/questions/${questionId}`);
     },
-    onSuccess: () => {
+    onSuccess: (_data, deletedQuestionId) => {
+      if (editingQuestionId === deletedQuestionId) {
+        setEditingQuestionId(null);
+      }
       void queryClient.invalidateQueries({
         queryKey: ["module-quiz-teacher", selectedModuleId],
       });
@@ -628,6 +674,228 @@ export function CourseEditorPage(): ReactElement {
         text: extractApiErrorMessage(
           err,
           "Не вдалося видалити тестове питання."
+        ),
+      });
+    },
+  });
+
+  // Мутація редагування існуючого питання тесту-допуску (PATCH)
+  const updateQuizQuestionMutation = useMutation<
+    QuizQuestionTeacherRead,
+    unknown,
+    { questionId: string; payload: QuizQuestionUpdate }
+  >({
+    mutationFn: async ({ questionId, payload }) => {
+      const response = await apiClient.patch<QuizQuestionTeacherRead>(
+        `/quiz/questions/${questionId}`,
+        payload
+      );
+      return response.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["module-quiz-teacher", selectedModuleId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["module-detail", selectedModuleId],
+      });
+      setEditingQuestionId(null);
+      setFeedbackBanner({
+        type: "success",
+        text: "Зміни до тестового питання збережено.",
+      });
+    },
+    onError: (err) => {
+      setFeedbackBanner({
+        type: "error",
+        text: extractApiErrorMessage(
+          err,
+          "Не вдалося оновити тестове питання."
+        ),
+      });
+    },
+  });
+
+  // Мутація зміни порядку модулів курсу (PUT /courses/{id}/modules/reorder)
+  const reorderModulesMutation = useMutation<
+    ModuleSummaryRead[],
+    unknown,
+    { courseId: string; moduleIds: string[] }
+  >({
+    mutationFn: async ({ courseId, moduleIds }) => {
+      const payload: ModuleReorderRequest = { module_ids: moduleIds };
+      const response = await apiClient.put<ModuleSummaryRead[]>(
+        `/courses/${courseId}/modules/reorder`,
+        payload
+      );
+      return response.data;
+    },
+    onSuccess: (reorderedModules, variables) => {
+      queryClient.setQueryData<CourseRead[]>(["courses"], (previous) => {
+        if (previous === undefined) {
+          return previous;
+        }
+        return previous.map((course) =>
+          course.id === variables.courseId
+            ? {
+                ...course,
+                modules: reorderedModules,
+              }
+            : course
+        );
+      });
+      if (selectedModuleId !== null) {
+        const updatedSelected = reorderedModules.find(
+          (item) => item.id === selectedModuleId
+        );
+        if (updatedSelected !== undefined) {
+          setModuleOrderIndex(updatedSelected.order_index);
+        }
+        void queryClient.invalidateQueries({
+          queryKey: ["module-detail", selectedModuleId],
+        });
+      }
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
+      setFeedbackBanner({
+        type: "success",
+        text: "Порядок модулів курсу оновлено.",
+      });
+    },
+    onError: (err) => {
+      setFeedbackBanner({
+        type: "error",
+        text: extractApiErrorMessage(
+          err,
+          "Не вдалося змінити порядок модулів курсу."
+        ),
+      });
+    },
+  });
+
+  // Мутація завантаження растрової ілюстрації для лекції (POST /courses/{id}/media)
+  const uploadCourseMediaMutation = useMutation<
+    CourseMediaUploadRead,
+    unknown,
+    { courseId: string; file: File }
+  >({
+    mutationFn: async ({ courseId, file }) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await apiClient.post<CourseMediaUploadRead>(
+        `/courses/${courseId}/media`,
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
+      return response.data;
+    },
+    onSuccess: (uploaded) => {
+      insertTextAtLectureCursor(uploaded.markdown);
+      setFeedbackBanner({
+        type: "success",
+        text: `Ілюстрацію завантажено та вставлено у текст лекції (${uploaded.filename}).`,
+      });
+    },
+    onError: (err) => {
+      setFeedbackBanner({
+        type: "error",
+        text: extractApiErrorMessage(
+          err,
+          "Не вдалося завантажити ілюстрацію до лекції."
+        ),
+      });
+    },
+  });
+
+  // Мутація завантаження файлу-заготовки практичної (POST /practicals/{id}/template)
+  const uploadPracticalTemplateMutation = useMutation<
+    PracticalTeacherRead,
+    unknown,
+    { practicalId: string; file: File }
+  >({
+    mutationFn: async ({ practicalId, file }) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await apiClient.post<PracticalTeacherRead>(
+        `/practicals/${practicalId}/template`,
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
+      return response.data;
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData<PracticalTeacherRead>(
+        ["practical-teacher", updated.id],
+        updated
+      );
+      void queryClient.invalidateQueries({
+        queryKey: ["module-detail", selectedModuleId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-student", updated.id],
+      });
+      setFeedbackBanner({
+        type: "success",
+        text: `Файл-заготовку «${updated.template_file_name ?? "шаблон"}» прикріплено до практичної роботи.`,
+      });
+    },
+    onError: (err) => {
+      setFeedbackBanner({
+        type: "error",
+        text: extractApiErrorMessage(
+          err,
+          "Не вдалося завантажити файл-заготовку практичної роботи."
+        ),
+      });
+    },
+  });
+
+  // Мутація видалення файлу-заготовки практичної (DELETE /practicals/{id}/template)
+  const deletePracticalTemplateMutation = useMutation<void, unknown, string>({
+    mutationFn: async (practicalId: string) => {
+      await apiClient.delete(`/practicals/${practicalId}/template`);
+    },
+    onSuccess: (_data, practicalId) => {
+      queryClient.setQueryData<PracticalTeacherRead>(
+        ["practical-teacher", practicalId],
+        (previous) => {
+          if (previous === undefined) {
+            return previous;
+          }
+          return {
+            ...previous,
+            has_template_file: false,
+            template_file_name: null,
+          };
+        }
+      );
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-teacher", practicalId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["module-detail", selectedModuleId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["practical-student", practicalId],
+      });
+      setFeedbackBanner({
+        type: "success",
+        text: "Файл-заготовку видалено з практичної роботи.",
+      });
+    },
+    onError: (err) => {
+      setFeedbackBanner({
+        type: "error",
+        text: extractApiErrorMessage(
+          err,
+          "Не вдалося видалити файл-заготовку."
         ),
       });
     },
@@ -1120,12 +1388,258 @@ export function CourseEditorPage(): ReactElement {
     });
   };
 
+  const insertTextAtLectureCursor = (snippet: string): void => {
+    const textarea = lectureTextareaRef.current;
+    if (textarea === null) {
+      setModuleLectureContent((prev) =>
+        prev.endsWith("\n") || prev.length === 0
+          ? `${prev}${snippet}`
+          : `${prev}\n\n${snippet}`
+      );
+      return;
+    }
+
+    const start = textarea.selectionStart ?? moduleLectureContent.length;
+    const end = textarea.selectionEnd ?? start;
+    const before = moduleLectureContent.slice(0, start);
+    const after = moduleLectureContent.slice(end);
+    const leadingPrefix =
+      before.length === 0 || before.endsWith("\n\n")
+        ? ""
+        : before.endsWith("\n")
+          ? "\n"
+          : "\n\n";
+    const trailingSuffix =
+      after.length === 0 || after.startsWith("\n\n")
+        ? ""
+        : after.startsWith("\n")
+          ? "\n"
+          : "\n\n";
+
+    const nextValue = `${before}${leadingPrefix}${snippet}${trailingSuffix}${after}`;
+    const nextCaretPos =
+      before.length + leadingPrefix.length + snippet.length;
+    setModuleLectureContent(nextValue);
+
+    window.requestAnimationFrame(() => {
+      if (lectureTextareaRef.current !== null) {
+        lectureTextareaRef.current.focus();
+        lectureTextareaRef.current.setSelectionRange(
+          nextCaretPos,
+          nextCaretPos
+        );
+      }
+    });
+  };
+
   const insertMarkdownSnippet = (snippet: string): void => {
-    setModuleLectureContent((prev) =>
-      prev.endsWith("\n") || prev.length === 0
-        ? `${prev}${snippet}`
-        : `${prev}\n\n${snippet}`
+    insertTextAtLectureCursor(snippet);
+  };
+
+  const handleMediaFileSelected = (
+    event: ChangeEvent<HTMLInputElement>
+  ): void => {
+    const pickedFile = event.target.files?.[0];
+    event.target.value = "";
+    if (!pickedFile || activeCourse === null) {
+      return;
+    }
+
+    const lowerName = pickedFile.name.toLowerCase();
+    const isAllowedExt = ALLOWED_MEDIA_IMAGE_EXTENSIONS.some((ext) =>
+      lowerName.endsWith(ext)
     );
+    if (!isAllowedExt) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Дозволено завантажувати лише растрові зображення: .png, .jpg, .jpeg, .webp, .gif.",
+      });
+      return;
+    }
+
+    if (pickedFile.size === 0) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Обраний файл зображення порожній.",
+      });
+      return;
+    }
+
+    if (pickedFile.size > MAX_MEDIA_UPLOAD_BYTES) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Розмір зображення перевищує максимально допустимі 5 МБ.",
+      });
+      return;
+    }
+
+    uploadCourseMediaMutation.mutate({
+      courseId: activeCourse.id,
+      file: pickedFile,
+    });
+  };
+
+  const handleMoveModule = (index: number, direction: -1 | 1): void => {
+    if (activeCourse === null || reorderModulesMutation.isPending) {
+      return;
+    }
+    const targetIndex = index + direction;
+    const modules = activeCourse.modules;
+    if (targetIndex < 0 || targetIndex >= modules.length) {
+      return;
+    }
+
+    const nextIds = modules.map((item) => item.id);
+    const currentId = nextIds[index];
+    const swapId = nextIds[targetIndex];
+    if (currentId === undefined || swapId === undefined) {
+      return;
+    }
+    nextIds[index] = swapId;
+    nextIds[targetIndex] = currentId;
+
+    reorderModulesMutation.mutate({
+      courseId: activeCourse.id,
+      moduleIds: nextIds,
+    });
+  };
+
+  const startEditingQuizQuestion = (question: QuizQuestionTeacherRead): void => {
+    setEditingQuestionId(question.id);
+    setEditQuestionText(question.question_text);
+    setEditQuestionOptions([...question.options]);
+    setEditCorrectOptionIndex(question.correct_option_index);
+  };
+
+  const cancelEditingQuizQuestion = (): void => {
+    setEditingQuestionId(null);
+  };
+
+  const handleAddEditOption = (): void => {
+    setEditQuestionOptions((prev) => [...prev, ""]);
+  };
+
+  const handleRemoveEditOption = (optionIndex: number): void => {
+    setEditQuestionOptions((prev) => {
+      if (prev.length <= 2) {
+        return prev;
+      }
+      const next = prev.filter((_, idx) => idx !== optionIndex);
+      setEditCorrectOptionIndex((currentCorrect) => {
+        if (currentCorrect === optionIndex) {
+          return 0;
+        }
+        if (currentCorrect > optionIndex) {
+          return currentCorrect - 1;
+        }
+        return Math.min(currentCorrect, next.length - 1);
+      });
+      return next;
+    });
+  };
+
+  const handleSaveEditedQuizQuestion = (
+    event: FormEvent<HTMLFormElement>,
+    questionId: string
+  ): void => {
+    event.preventDefault();
+    const trimmedText = editQuestionText.trim();
+    const cleanedOptions = editQuestionOptions.map((opt) => opt.trim());
+    if (trimmedText.length < 3) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Введіть формулювання тестового питання (мінімум 3 символи).",
+      });
+      return;
+    }
+    if (cleanedOptions.length < 2 || cleanedOptions.some((opt) => opt.length === 0)) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Необхідно вказати щонайменше 2 непорожні варіанти відповіді.",
+      });
+      return;
+    }
+    if (
+      editCorrectOptionIndex < 0 ||
+      editCorrectOptionIndex >= cleanedOptions.length
+    ) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Оберіть коректну правильну відповідь зі списку варіантів.",
+      });
+      return;
+    }
+
+    updateQuizQuestionMutation.mutate({
+      questionId,
+      payload: {
+        question_text: trimmedText,
+        options: cleanedOptions,
+        correct_option_index: editCorrectOptionIndex,
+      },
+    });
+  };
+
+  const handleTemplateFileSelected = (
+    event: ChangeEvent<HTMLInputElement>
+  ): void => {
+    const pickedFile = event.target.files?.[0];
+    event.target.value = "";
+    if (!pickedFile || activePracticalId === null) {
+      return;
+    }
+    if (pickedFile.size === 0) {
+      setFeedbackBanner({
+        type: "error",
+        text: "Обраний файл-заготовка порожній.",
+      });
+      return;
+    }
+    uploadPracticalTemplateMutation.mutate({
+      practicalId: activePracticalId,
+      file: pickedFile,
+    });
+  };
+
+  const handleDownloadPracticalTemplate = async (): Promise<void> => {
+    if (activePracticalId === null) {
+      return;
+    }
+    setIsDownloadingTemplate(true);
+    try {
+      const response = await apiClient.get<Blob>(
+        `/practicals/${activePracticalId}/template`,
+        {
+          responseType: "blob",
+        }
+      );
+      const fallbackFilename =
+        practicalTeacher?.template_file_name ?? "template.bin";
+      const filename = parseFilenameFromContentDisposition(
+        response.headers["content-disposition"],
+        fallbackFilename
+      );
+
+      const blobUrl = window.URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err: unknown) {
+      const errorMessage = await extractBlobApiErrorMessage(
+        err,
+        "Не вдалося завантажити файл-заготовку."
+      );
+      setFeedbackBanner({
+        type: "error",
+        text: errorMessage,
+      });
+    } finally {
+      setIsDownloadingTemplate(false);
+    }
   };
 
   if (isLoadingCourses) {
@@ -1515,8 +2029,11 @@ export function CourseEditorPage(): ReactElement {
               )}
 
               <div className="space-y-2.5">
-                {activeCourse.modules.map((mod) => {
+                {activeCourse.modules.map((mod, modIndex) => {
                   const isSelected = selectedModuleId === mod.id;
+                  const isFirstModule = modIndex === 0;
+                  const isLastModule =
+                    modIndex === activeCourse.modules.length - 1;
                   return (
                     <div
                       key={mod.id}
@@ -1529,9 +2046,9 @@ export function CourseEditorPage(): ReactElement {
                       <button
                         type="button"
                         onClick={() => setSelectedModuleId(mod.id)}
-                        className="w-full p-4 pr-11 text-left"
+                        className="w-full p-4 pr-24 text-left"
                       >
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700">
                             Тема №{mod.order_index}
                           </span>
@@ -1562,25 +2079,52 @@ export function CourseEditorPage(): ReactElement {
                             </span>
                           )}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openDeleteModal({
-                            kind: "module",
-                            courseId: activeCourse.id,
-                            moduleId: mod.id,
-                            orderIndex: mod.order_index,
-                            title: mod.title,
-                            practicalId: mod.practical_id,
-                            hasPractical: mod.practical_id !== null,
-                          })
-                        }
-                        title="Видалити модуль"
-                        aria-label={`Видалити модуль «${mod.title}»`}
-                        className="absolute right-2.5 top-3.5 inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 focus:border-rose-300 focus:bg-rose-50 focus:text-rose-600 focus:outline-none"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+
+                      <div className="absolute right-2 top-3 flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          disabled={
+                            isFirstModule || reorderModulesMutation.isPending
+                          }
+                          onClick={() => handleMoveModule(modIndex, -1)}
+                          title="Перемістити вище"
+                          aria-label={`Перемістити модуль «${mod.title}» вище`}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          <ArrowUp className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            isLastModule || reorderModulesMutation.isPending
+                          }
+                          onClick={() => handleMoveModule(modIndex, 1)}
+                          title="Перемістити нижче"
+                          aria-label={`Перемістити модуль «${mod.title}» нижче`}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          <ArrowDown className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openDeleteModal({
+                              kind: "module",
+                              courseId: activeCourse.id,
+                              moduleId: mod.id,
+                              orderIndex: mod.order_index,
+                              title: mod.title,
+                              practicalId: mod.practical_id,
+                              hasPractical: mod.practical_id !== null,
+                            })
+                          }
+                          title="Видалити модуль"
+                          aria-label={`Видалити модуль «${mod.title}»`}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 focus:border-rose-300 focus:bg-rose-50 focus:text-rose-600 focus:outline-none"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -1777,6 +2321,31 @@ export function CourseEditorPage(): ReactElement {
                             >
                               + Визначення
                             </button>
+                            <input
+                              ref={mediaFileInputRef}
+                              type="file"
+                              accept=".png,.jpg,.jpeg,.webp,.gif,image/png,image/jpeg,image/webp,image/gif"
+                              onChange={handleMediaFileSelected}
+                              className="sr-only"
+                            />
+                            <button
+                              type="button"
+                              disabled={uploadCourseMediaMutation.isPending}
+                              onClick={() => mediaFileInputRef.current?.click()}
+                              title="Завантажити ілюстрацію (PNG, JPG, WebP, GIF до 5 МБ)"
+                              className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-60"
+                            >
+                              {uploadCourseMediaMutation.isPending ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <ImagePlus className="h-3.5 w-3.5" />
+                              )}
+                              <span>
+                                {uploadCourseMediaMutation.isPending
+                                  ? "Завантаження..."
+                                  : "Вставити зображення"}
+                              </span>
+                            </button>
                           </div>
 
                           <button
@@ -1806,6 +2375,7 @@ export function CourseEditorPage(): ReactElement {
                           }`}
                         >
                           <textarea
+                            ref={lectureTextareaRef}
                             rows={16}
                             value={moduleLectureContent}
                             onChange={(e) =>
@@ -1816,15 +2386,17 @@ export function CourseEditorPage(): ReactElement {
                           />
 
                           {showLecturePreview && (
-                            <div className="max-h-[420px] overflow-y-auto rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                            <div className="max-h-[460px] overflow-y-auto rounded-xl border border-slate-200 bg-white p-4">
                               <div className="mb-2.5 flex items-center justify-between border-b border-slate-200 pb-2">
                                 <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                  Живе прев&apos;ю для студента
+                                  Живе прев&apos;ю для студента (1-в-1)
                                 </span>
                                 <Eye className="h-3.5 w-3.5 text-slate-400" />
                               </div>
-                              <SimpleMarkdownPreview
+                              <MarkdownRenderer
                                 content={moduleLectureContent}
+                                compact
+                                emptyFallback="Текст лекції порожній. Введіть Markdown-розмітку ліворуч."
                               />
                             </div>
                           )}
@@ -1875,60 +2447,226 @@ export function CourseEditorPage(): ReactElement {
                         </div>
                       ) : (
                         <div className="space-y-3">
-                          {(quizQuestions ?? []).map((q, qIdx) => (
-                            <article
-                              key={q.id}
-                              className="rounded-xl border border-slate-200 bg-slate-50/50 p-4"
-                            >
-                              <div className="flex items-start justify-between gap-3">
-                                <h4 className="text-sm font-bold text-slate-900">
-                                  <span className="mr-1.5 text-blue-600">
-                                    Питання №{qIdx + 1}.
-                                  </span>
-                                  {q.question_text}
-                                </h4>
-                                <button
-                                  type="button"
-                                  disabled={deleteQuizQuestionMutation.isPending}
-                                  onClick={() =>
-                                    deleteQuizQuestionMutation.mutate(q.id)
-                                  }
-                                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                                  title="Видалити питання"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                  <span>Видалити</span>
-                                </button>
-                              </div>
-
-                              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                {q.options.map((opt, optIdx) => {
-                                  const isCorrect =
-                                    optIdx === q.correct_option_index;
-                                  return (
-                                    <div
-                                      key={optIdx}
-                                      className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${
-                                        isCorrect
-                                          ? "border-emerald-300 bg-emerald-50 font-bold text-emerald-950"
-                                          : "border-slate-200 bg-white text-slate-700"
-                                      }`}
-                                    >
-                                      <span>
-                                        {optIdx + 1}. {opt}
+                          {(quizQuestions ?? []).map((q, qIdx) => {
+                            const isEditingThisQuestion =
+                              editingQuestionId === q.id;
+                            return (
+                              <article
+                                key={q.id}
+                                className={`rounded-xl border p-4 ${
+                                  isEditingThisQuestion
+                                    ? "border-blue-300 bg-blue-50/40"
+                                    : "border-slate-200 bg-slate-50/50"
+                                }`}
+                              >
+                                {isEditingThisQuestion ? (
+                                  <form
+                                    onSubmit={(event) =>
+                                      handleSaveEditedQuizQuestion(event, q.id)
+                                    }
+                                    className="space-y-3.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-xs font-bold text-blue-800">
+                                        Редагування питання №{qIdx + 1}
                                       </span>
-                                      {isCorrect && (
-                                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
-                                          <CheckCircle2 className="h-3 w-3" />
-                                          Правильна
-                                        </span>
-                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={cancelEditingQuizQuestion}
+                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                      >
+                                        <X className="h-3.5 w-3.5" />
+                                        <span>Скасувати</span>
+                                      </button>
                                     </div>
-                                  );
-                                })}
-                              </div>
-                            </article>
-                          ))}
+
+                                    <div>
+                                      <label className="block text-xs font-semibold text-slate-700">
+                                        Текст питання
+                                      </label>
+                                      <input
+                                        type="text"
+                                        required
+                                        value={editQuestionText}
+                                        onChange={(e) =>
+                                          setEditQuestionText(e.target.value)
+                                        }
+                                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
+                                      />
+                                    </div>
+
+                                    <div className="space-y-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <label className="block text-xs font-semibold text-slate-700">
+                                          Варіанти відповідей (позначте правильний)
+                                        </label>
+                                        <button
+                                          type="button"
+                                          onClick={handleAddEditOption}
+                                          className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-2 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-50"
+                                        >
+                                          <Plus className="h-3 w-3" />
+                                          <span>Додати варіант</span>
+                                        </button>
+                                      </div>
+
+                                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                        {editQuestionOptions.map(
+                                          (optionValue, optIdx) => (
+                                            <div
+                                              key={optIdx}
+                                              className={`flex items-center gap-2 rounded-xl border p-2 ${
+                                                editCorrectOptionIndex ===
+                                                optIdx
+                                                  ? "border-emerald-400 bg-emerald-50/70"
+                                                  : "border-slate-200 bg-white"
+                                              }`}
+                                            >
+                                              <input
+                                                type="radio"
+                                                name={`edit-correct-${q.id}`}
+                                                checked={
+                                                  editCorrectOptionIndex ===
+                                                  optIdx
+                                                }
+                                                onChange={() =>
+                                                  setEditCorrectOptionIndex(
+                                                    optIdx
+                                                  )
+                                                }
+                                                className="h-4 w-4 accent-emerald-600"
+                                                title="Позначити як правильну відповідь"
+                                              />
+                                              <input
+                                                type="text"
+                                                required
+                                                value={optionValue}
+                                                onChange={(e) => {
+                                                  const next = [
+                                                    ...editQuestionOptions,
+                                                  ];
+                                                  next[optIdx] = e.target.value;
+                                                  setEditQuestionOptions(next);
+                                                }}
+                                                placeholder={`Варіант №${optIdx + 1}`}
+                                                className="w-full bg-transparent text-xs text-slate-900 focus:outline-none"
+                                              />
+                                              {editQuestionOptions.length >
+                                                2 && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleRemoveEditOption(
+                                                      optIdx
+                                                    )
+                                                  }
+                                                  title="Видалити варіант"
+                                                  className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                                                >
+                                                  <X className="h-3.5 w-3.5" />
+                                                </button>
+                                              )}
+                                            </div>
+                                          )
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={cancelEditingQuizQuestion}
+                                        className="rounded-xl border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                      >
+                                        Скасувати
+                                      </button>
+                                      <button
+                                        type="submit"
+                                        disabled={
+                                          updateQuizQuestionMutation.isPending
+                                        }
+                                        className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                                      >
+                                        <Save className="h-3.5 w-3.5" />
+                                        <span>
+                                          {updateQuizQuestionMutation.isPending
+                                            ? "Збереження..."
+                                            : "Зберегти зміни"}
+                                        </span>
+                                      </button>
+                                    </div>
+                                  </form>
+                                ) : (
+                                  <>
+                                    <div className="flex items-start justify-between gap-3">
+                                      <h4 className="text-sm font-bold text-slate-900">
+                                        <span className="mr-1.5 text-blue-600">
+                                          Питання №{qIdx + 1}.
+                                        </span>
+                                        {q.question_text}
+                                      </h4>
+                                      <div className="flex shrink-0 items-center gap-1.5">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            startEditingQuizQuestion(q)
+                                          }
+                                          className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                                          title="Редагувати питання"
+                                        >
+                                          <Pencil className="h-3.5 w-3.5" />
+                                          <span>Редагувати</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={
+                                            deleteQuizQuestionMutation.isPending
+                                          }
+                                          onClick={() =>
+                                            deleteQuizQuestionMutation.mutate(
+                                              q.id
+                                            )
+                                          }
+                                          className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                                          title="Видалити питання"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                          <span>Видалити</span>
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                      {q.options.map((opt, optIdx) => {
+                                        const isCorrect =
+                                          optIdx === q.correct_option_index;
+                                        return (
+                                          <div
+                                            key={optIdx}
+                                            className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${
+                                              isCorrect
+                                                ? "border-emerald-300 bg-emerald-50 font-bold text-emerald-950"
+                                                : "border-slate-200 bg-white text-slate-700"
+                                            }`}
+                                          >
+                                            <span>
+                                              {optIdx + 1}. {opt}
+                                            </span>
+                                            {isCorrect && (
+                                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                                                <CheckCircle2 className="h-3 w-3" />
+                                                Правильна
+                                              </span>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </>
+                                )}
+                              </article>
+                            );
+                          })}
                         </div>
                       )}
 
@@ -2094,6 +2832,132 @@ export function CourseEditorPage(): ReactElement {
                                 className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none"
                               />
                             </div>
+                          </div>
+
+                          {/* Файл-заготовка (шаблон) для студентів */}
+                          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="space-y-1">
+                                <h3 className="inline-flex items-center gap-1.5 text-sm font-bold text-slate-900">
+                                  <Paperclip className="h-4 w-4 text-blue-600" />
+                                  <span>
+                                    Файл-заготовка (шаблон) для студентів
+                                  </span>
+                                </h3>
+                                <p className="text-xs text-slate-500">
+                                  Підтримуються формати{" "}
+                                  <span className="font-mono font-semibold text-slate-700">
+                                    .docx, .xlsx, .accdb, .zip, .txt, .csv
+                                  </span>
+                                  . Система автоматично блокує спроби здати
+                                  незмінений шаблон.
+                                </p>
+                              </div>
+
+                              <input
+                                ref={templateFileInputRef}
+                                type="file"
+                                accept={ALLOWED_TEMPLATE_FILE_ACCEPT}
+                                onChange={handleTemplateFileSelected}
+                                className="sr-only"
+                              />
+
+                              {activePracticalId !== null &&
+                                !practicalTeacher?.has_template_file && (
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      uploadPracticalTemplateMutation.isPending
+                                    }
+                                    onClick={() =>
+                                      templateFileInputRef.current?.click()
+                                    }
+                                    className="inline-flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-60"
+                                  >
+                                    {uploadPracticalTemplateMutation.isPending ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Upload className="h-3.5 w-3.5" />
+                                    )}
+                                    <span>
+                                      {uploadPracticalTemplateMutation.isPending
+                                        ? "Завантаження..."
+                                        : "Прикріпити файл-заготовку"}
+                                    </span>
+                                  </button>
+                                )}
+                            </div>
+
+                            {activePracticalId === null ? (
+                              <p className="text-xs italic text-slate-500">
+                                Спочатку збережіть практичну роботу, щоб
+                                прикріпити файл-заготовку для студентів.
+                              </p>
+                            ) : practicalTeacher?.has_template_file ? (
+                              <div className="flex flex-col justify-between gap-3 rounded-xl border border-emerald-200 bg-white p-3.5 sm:flex-row sm:items-center">
+                                <div className="flex min-w-0 items-center gap-2.5">
+                                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+                                    <FileText className="h-4 w-4" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="truncate text-xs font-bold text-slate-900">
+                                      {practicalTeacher.template_file_name ??
+                                        "Прикріплений файл-заготовка"}
+                                    </p>
+                                    <p className="text-[11px] text-emerald-700">
+                                      Доступний студентам для завантаження у
+                                      картці практичної роботи
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap shrink-0 items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={isDownloadingTemplate}
+                                    onClick={() =>
+                                      void handleDownloadPracticalTemplate()
+                                    }
+                                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                                  >
+                                    {isDownloadingTemplate ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Download className="h-3.5 w-3.5 text-blue-600" />
+                                    )}
+                                    <span>Завантажити</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      uploadPracticalTemplateMutation.isPending
+                                    }
+                                    onClick={() =>
+                                      templateFileInputRef.current?.click()
+                                    }
+                                    className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-60"
+                                  >
+                                    <Upload className="h-3.5 w-3.5" />
+                                    <span>Замінити</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      deletePracticalTemplateMutation.isPending
+                                    }
+                                    onClick={() =>
+                                      deletePracticalTemplateMutation.mutate(
+                                        activePracticalId
+                                      )
+                                    }
+                                    className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    <span>Видалити шаблон</span>
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
 
                           {/* Індивідуальні варіанти завдань */}

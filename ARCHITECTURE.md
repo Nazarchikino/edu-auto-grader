@@ -161,9 +161,13 @@ edu-auto-grader/
    * `title`: `VARCHAR(255)` (NOT NULL)
    * `instructions`: `TEXT` (NOT NULL)
    * `format_type`: `ENUM('docx', 'xlsx', 'accdb', 'html')` (NOT NULL)
-   * `max_score`: `NUMERIC(5,2)` (NOT NULL, DEFAULT `10.00`)
+   * `max_score`: `NUMERIC(5,2)` (NOT NULL, DEFAULT `12.00`)
    * `variants`: `JSONB` (NOT NULL — масив об'єктів індивідуальних вхідних даних для варіантів)
    * `grading_rules`: `JSONB` (NOT NULL — масив декларативних правил перевірки)
+   * `needs_rules_review`: `BOOLEAN` (NOT NULL, DEFAULT `false`)
+   * `template_file_path`: `VARCHAR(500)` (NULLABLE — шлях до файлу-заготовки викладача у `UPLOADS_DIR/templates/`)
+   * `template_file_name`: `VARCHAR(255)` (NULLABLE — відображувана назва файлу-заготовки)
+   * `template_file_hash`: `VARCHAR(64)` (NULLABLE — SHA-256 хеш файлу-заготовки для блокування здачі незміненого шаблону)
 
 8. **`submissions`**
    * `id`: `UUID` (PK)
@@ -249,17 +253,23 @@ class BaseGrader(ABC):
 | `PATCH` | `/courses/{course_id}` | Teacher (owner) / Admin | Оновлення назви, опису або (лише для `admin`) викладача курсу |
 | `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції, питань тесту-допуску, cooldown і статусу доступу до практичної (опційно `?preview_variant=K` для перегляду модуля очима студента викладачем-власником або адміністратором) |
 | `POST` | `/courses/{course_id}/modules` | Teacher (owner) / Admin | Створення нового навчального модуля з лекцією |
+| `PUT` | `/courses/{course_id}/modules/reorder` | Teacher (owner) / Admin | Перестановка порядку модулів курсу (`1..N`) у два кроки в одній транзакції без конфлікту `uq_modules_course_order_index` |
+| `POST` | `/courses/{course_id}/media` | Teacher (owner) / Admin | Безпечне завантаження растрових ілюстрацій лекцій (`.png`/`.jpg`/`.jpeg`/`.webp`/`.gif`, перевірка magic bytes, до 5 МБ) у `COURSE_MEDIA_DIR/{slug}/uploads/` |
 | `PATCH` | `/modules/{module_id}` | Teacher (owner) / Admin | Оновлення заголовка, порядкового номера або лекції модуля |
-| `DELETE` | `/modules/{module_id}` | Teacher (owner) / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач із диска |
+| `DELETE` | `/modules/{module_id}` | Teacher (owner) / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач та шаблону практичної із диска |
 | `GET` | `/modules/{module_id}/quiz/questions` | Teacher (owner) / Admin | Перелік питань тесту-допуску модуля разом із правильними відповідями |
 | `POST` | `/modules/{module_id}/quiz/questions` | Teacher (owner) / Admin | Додавання тестового питання до модуля |
+| `PATCH` | `/quiz/questions/{question_id}` | Teacher (owner) / Admin | Редагування тексту, варіантів або правильної відповіді існуючого тестового питання зі збереженням `id` та `order_index` |
 | `DELETE` | `/quiz/questions/{question_id}` | Teacher (owner) / Admin | Видалення тестового питання |
 | `POST` | `/modules/{module_id}/quiz/submit` | Student | Відправка відповідей тесту-допуску (з cooldown при невдачі) та розблокування практичної |
 | `GET` | `/practicals/{practical_id}` | Student | Отримання умови та персонального варіанта студента |
 | `GET` | `/practicals/{practical_id}/teacher` | Teacher / Admin | Повна конфігурація практичної роботи з усіма варіантами й правилами перевірки |
 | `POST` | `/modules/{module_id}/practical` | Teacher (owner) / Admin | Створення або повне оновлення практичної роботи модуля |
 | `PATCH` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Часткове оновлення параметрів, варіантів, правил або `needs_rules_review` |
-| `DELETE` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Видалення практичної роботи та її здач (зі збереженням модуля, лекції й тесту) і безпечне видалення файлів здач із диска |
+| `DELETE` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Видалення практичної роботи та її здач (зі збереженням модуля, лекції й тесту) і безпечне видалення файлів здач та шаблону із диска |
+| `POST` | `/practicals/{practical_id}/template` | Teacher (owner) / Admin | Завантаження або заміна файлу-заготовки практичної (`.docx`/`.xlsx`/`.accdb`/`.zip`/`.txt`/`.csv`) у `UPLOADS_DIR/templates/` із перевіркою розміру й ZIP-безпеки та обчисленням SHA-256 |
+| `GET` | `/practicals/{practical_id}/template` | Student / Teacher / Admin | Завантаження прикріпленого файлу-заготовки практичної роботи з читабельним `Content-Disposition` |
+| `DELETE` | `/practicals/{practical_id}/template` | Teacher (owner) / Admin | Видалення файлу-заготовки практичної роботи з БД і безпечне видалення з диска |
 | `POST` | `/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML-коду (`JSON`) та миттєва автоперевірка з антиплагіатом |
 | `POST` | `/practicals/{practical_id}/dry-run` | Teacher (owner) / Admin | Тестова (dry-run) перевірка файлу або HTML-коду за збереженими чи чернетковими правилами (`rules_json`/`rules_override`) без запису в БД і збереження файлів на диск |
 | `PUT` | `/practicals/{practical_id}/rules` | Teacher (owner) / Admin | Валідація та оновлення JSONB правил автоперевірки (опційно `sync_max_score`) |

@@ -27,9 +27,11 @@ import {
   Clock,
   Copy,
   Database,
+  Download,
   Eye,
   FileCheck2,
   FileCode2,
+  FileDown,
   FileSpreadsheet,
   FileText,
   FlaskConical,
@@ -199,6 +201,78 @@ function extractRetryAfterSeconds(error: unknown): number | null {
   }
 
   return null;
+}
+
+function sanitizeDownloadFilename(rawName: string): string {
+  const trimmed = rawName.trim().replace(/^["']|["']$/g, "");
+  const baseName = trimmed.split(/[/\\]/).pop() ?? "";
+  return baseName.trim();
+}
+
+function parseFilenameFromContentDisposition(
+  headerValue: unknown,
+  fallbackFilename: string
+): string {
+  if (typeof headerValue !== "string" || headerValue.trim().length === 0) {
+    return fallbackFilename;
+  }
+
+  const utf8Match = /filename\*\s*=\s*UTF-8''([^;\r\n]+)/i.exec(headerValue);
+  if (utf8Match?.[1] !== undefined) {
+    try {
+      const decoded = sanitizeDownloadFilename(
+        decodeURIComponent(utf8Match[1].trim())
+      );
+      if (decoded.length > 0) {
+        return decoded;
+      }
+    } catch {
+      // Якщо UTF-8 послідовність пошкоджена — переходимо до ASCII filename
+    }
+  }
+
+  const asciiMatch = /filename\s*=\s*(?:"([^"]+)"|([^;\r\n]+))/i.exec(
+    headerValue
+  );
+  const rawAscii = asciiMatch?.[1] ?? asciiMatch?.[2];
+  if (rawAscii !== undefined) {
+    const cleaned = sanitizeDownloadFilename(rawAscii);
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+  }
+
+  return fallbackFilename;
+}
+
+function hasStringDetail(value: unknown): value is { detail: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "detail" in value &&
+    typeof (value as Record<string, unknown>).detail === "string"
+  );
+}
+
+async function extractBlobApiErrorMessage(
+  error: unknown,
+  fallbackMessage: string
+): Promise<string> {
+  if (axios.isAxiosError(error)) {
+    const responseData: unknown = error.response?.data;
+    if (responseData instanceof Blob) {
+      try {
+        const rawText = await responseData.text();
+        const parsed: unknown = JSON.parse(rawText);
+        if (hasStringDetail(parsed) && parsed.detail.trim().length > 0) {
+          return parsed.detail.trim();
+        }
+      } catch {
+        // Тіло помилки не є валідним JSON
+      }
+    }
+  }
+  return extractApiErrorMessage(error, fallbackMessage);
 }
 
 async function fetchModuleDetail(
@@ -922,6 +996,11 @@ export function ModuleViewPage({
   const [lastDryRunResult, setLastDryRunResult] =
     useState<DryRunGradingResponse | null>(null);
   const [copiedRawText, setCopiedRawText] = useState<boolean>(false);
+  const [isDownloadingTemplate, setIsDownloadingTemplate] =
+    useState<boolean>(false);
+  const [templateDownloadError, setTemplateDownloadError] = useState<
+    string | null
+  >(null);
 
   const startQuizCooldown = useCallback((seconds: number): void => {
     const normalized = Math.max(0, Math.ceil(seconds));
@@ -1003,6 +1082,8 @@ export function ModuleViewPage({
       auto_max_score: summary.auto_max_score,
       manual_bonus_max: summary.manual_bonus_max,
       needs_rules_review: summary.needs_rules_review,
+      has_template_file: summary.has_template_file,
+      template_file_name: summary.template_file_name,
       variant_index: Math.max(0, variantNum - 1),
       variant_number: variantNum,
       total_variants: totalVars,
@@ -1032,6 +1113,7 @@ export function ModuleViewPage({
     setPreviewVariant(1);
     setSimulateQuizPassed(true);
     setCopiedRawText(false);
+    setTemplateDownloadError(null);
     setActiveTab("lecture");
     prevCooldownActiveRef.current = false;
     cooldownDeadlineRef.current = null;
@@ -1448,6 +1530,43 @@ export function ModuleViewPage({
     setSubmissionError(null);
     if (fileInputRef.current !== null) {
       fileInputRef.current.value = "";
+    }
+  };
+
+  const handleDownloadPracticalTemplate = async (
+    targetPracticalId: string,
+    fallbackName: string | null
+  ): Promise<void> => {
+    setIsDownloadingTemplate(true);
+    setTemplateDownloadError(null);
+    try {
+      const response = await apiClient.get<Blob>(
+        `/practicals/${targetPracticalId}/template`,
+        {
+          responseType: "blob",
+        }
+      );
+      const filename = parseFilenameFromContentDisposition(
+        response.headers["content-disposition"],
+        fallbackName ?? "template.bin"
+      );
+
+      const blobUrl = window.URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err: unknown) {
+      const errorMessage = await extractBlobApiErrorMessage(
+        err,
+        "Не вдалося завантажити файл-заготовку практичної роботи."
+      );
+      setTemplateDownloadError(errorMessage);
+    } finally {
+      setIsDownloadingTemplate(false);
     }
   };
 
@@ -2490,6 +2609,60 @@ export function ModuleViewPage({
                       </div>
                     );
                   })()}
+
+                  {practicalDetail.has_template_file && (
+                    <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 sm:p-5">
+                      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                        <div className="flex items-start gap-3">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-700">
+                            <FileDown className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <h3 className="text-sm font-bold text-slate-900">
+                              Файл-заготовка для практичної роботи
+                            </h3>
+                            <p className="mt-0.5 text-xs text-slate-600">
+                              Завантажте вхідний шаблон викладача, виконайте
+                              завдання свого варіанта та здайте збережений
+                              результат нижче.
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={isDownloadingTemplate}
+                          onClick={() =>
+                            void handleDownloadPracticalTemplate(
+                              practicalDetail.id,
+                              practicalDetail.template_file_name
+                            )
+                          }
+                          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-semibold text-white shadow-2xs transition-colors hover:bg-blue-700 disabled:opacity-60"
+                        >
+                          {isDownloadingTemplate ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                          <span>
+                            Завантажити файл-заготовку (
+                            {practicalDetail.template_file_name ?? "шаблон"})
+                          </span>
+                        </button>
+                      </div>
+
+                      {templateDownloadError !== null && (
+                        <div
+                          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-800"
+                          role="alert"
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+                          <span>{templateDownloadError}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Повідомлення про помилку здачі роботи */}
                   {submissionError !== null && (

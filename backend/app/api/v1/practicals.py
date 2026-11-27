@@ -1,19 +1,25 @@
 import json
+import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, File, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from app.api.deps import get_db, require_role
+from app.api.deps import ensure_course_owner_or_admin, get_db, require_role
 from app.core.config import settings
 from app.core.exceptions import DomainError, InvalidFileFormatError
 from app.core.upload_utils import read_upload_file_limited
-from app.models.course import Practical, PracticalFormat
+from app.graders.metadata import compute_bytes_sha256, validate_zip_archive_safety
+from app.models.course import Module, Practical, PracticalFormat
 from app.models.user import User, UserRole
 from app.schemas.course import PracticalTeacherRead
 from app.schemas.grading import GradingRule, GradingRulesUpdateRequest
@@ -24,10 +30,24 @@ from app.schemas.submission import (
     HtmlSubmissionRequest,
     SubmissionRead,
 )
-from app.services.submission_service import SubmissionService
+from app.services.export_service import XLSX_MEDIA_TYPE, build_content_disposition
+from app.services.retention_service import (
+    delete_submission_file_safely_async,
+    resolve_submission_file_path,
+)
+from app.services.submission_service import (
+    ACCDB_MEDIA_TYPE,
+    DOCX_MEDIA_TYPE,
+    SubmissionService,
+    serialize_practical_teacher,
+)
 
 router = APIRouter(tags=["practicals"])
 
+AllAuthUser = Annotated[
+    User,
+    Depends(require_role(UserRole.STUDENT, UserRole.TEACHER, UserRole.ADMIN)),
+]
 StudentUser = Annotated[
     User,
     Depends(require_role(UserRole.STUDENT)),
@@ -36,6 +56,204 @@ TeacherOrAdminUser = Annotated[
     User,
     Depends(require_role(UserRole.TEACHER, UserRole.ADMIN)),
 ]
+
+ALLOWED_TEMPLATE_EXTENSIONS: frozenset[str] = frozenset(
+    {".docx", ".xlsx", ".accdb", ".zip", ".txt", ".csv"}
+)
+ZIP_TEMPLATE_EXTENSIONS: frozenset[str] = frozenset({".docx", ".xlsx", ".zip"})
+
+_TEMPLATE_MEDIA_TYPES: dict[str, str] = {
+    ".docx": DOCX_MEDIA_TYPE,
+    ".xlsx": XLSX_MEDIA_TYPE,
+    ".accdb": ACCDB_MEDIA_TYPE,
+    ".zip": "application/zip",
+    ".txt": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+}
+
+_TEMPLATE_ASCII_TRANSLIT: dict[str, str] = {
+    "А": "A",
+    "Б": "B",
+    "В": "V",
+    "Г": "H",
+    "Ґ": "G",
+    "Д": "D",
+    "Е": "E",
+    "Є": "Ye",
+    "Ж": "Zh",
+    "З": "Z",
+    "И": "Y",
+    "І": "I",
+    "Ї": "Yi",
+    "Й": "Y",
+    "К": "K",
+    "Л": "L",
+    "М": "M",
+    "Н": "N",
+    "О": "O",
+    "П": "P",
+    "Р": "R",
+    "С": "S",
+    "Т": "T",
+    "У": "U",
+    "Ф": "F",
+    "Х": "Kh",
+    "Ц": "Ts",
+    "Ч": "Ch",
+    "Ш": "Sh",
+    "Щ": "Shch",
+    "Ь": "",
+    "Ю": "Yu",
+    "Я": "Ya",
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "h",
+    "ґ": "g",
+    "д": "d",
+    "е": "e",
+    "є": "ie",
+    "ж": "zh",
+    "з": "z",
+    "и": "y",
+    "і": "i",
+    "ї": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ь": "",
+    "ю": "iu",
+    "я": "ia",
+}
+
+
+def _sanitize_template_display_name(raw_filename: str, expected_suffix: str) -> str:
+    """Очищує оригінальну назву файлу-заготовки від шляхів та керуючих символів."""
+    base_name = Path(raw_filename.replace("\\", "/")).name
+    cleaned = "".join(
+        ch for ch in base_name if ord(ch) >= 32 and ord(ch) != 127
+    ).strip()
+    if not cleaned or cleaned.lower() == expected_suffix:
+        return f"template{expected_suffix}"
+    if len(cleaned) > 255:
+        stem = Path(cleaned).stem
+        max_stem_len = max(1, 255 - len(expected_suffix))
+        cleaned = f"{stem[:max_stem_len]}{expected_suffix}"
+    return cleaned
+
+
+def _build_template_content_disposition(
+    template_file_name: str | None,
+    fallback_suffix: str,
+) -> str:
+    """Формує RFC 5987 Content-Disposition на основі назви файлу-заготовки."""
+    raw_name = (template_file_name or "").strip()
+    suffix = Path(raw_name).suffix.lower() or fallback_suffix
+    raw_stem = Path(raw_name).stem if raw_name else "template"
+
+    utf8_stem = re.sub(r"[^\w.\-]+", "_", raw_stem, flags=re.UNICODE).strip("._")
+    utf8_stem = utf8_stem or "template"
+    filename_utf8 = f"{utf8_stem}{suffix}"
+
+    transliterated = "".join(
+        _TEMPLATE_ASCII_TRANSLIT.get(ch, ch if ord(ch) < 128 else "_")
+        for ch in raw_stem
+    )
+    ascii_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", transliterated).strip("._")
+    ascii_stem = ascii_stem or "template"
+    filename_ascii = f"{ascii_stem}{suffix}"
+
+    return build_content_disposition(
+        filename_ascii=filename_ascii,
+        filename_utf8=filename_utf8,
+    )
+
+
+def _save_template_file(
+    *,
+    uploads_dir: Path,
+    ext_no_dot: str,
+    file_bytes: bytes,
+) -> tuple[Path, str]:
+    """Зберігає файл-заготовку у `UPLOADS_DIR/templates/` і обчислює SHA-256 (для threadpool)."""
+    uploads_root = uploads_dir.resolve()
+    templates_dir = (uploads_root / "templates").resolve()
+    if templates_dir == uploads_root or not templates_dir.is_relative_to(uploads_root):
+        raise DomainError(
+            "Небезпечний шлях каталогу файлів-заготовок.",
+            code="UNSAFE_TEMPLATE_PATH",
+            status_code=422,
+        )
+
+    stored_filename = f"{uuid.uuid4().hex}.{ext_no_dot}"
+    saved_path = (templates_dir / stored_filename).resolve()
+    if saved_path.parent != templates_dir or not saved_path.is_relative_to(uploads_root):
+        raise DomainError(
+            "Небезпечний шлях файлу-заготовки.",
+            code="UNSAFE_TEMPLATE_PATH",
+            status_code=422,
+        )
+
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    saved_path.write_bytes(file_bytes)
+    try:
+        file_hash = compute_bytes_sha256(file_bytes)
+    except Exception:
+        saved_path.unlink(missing_ok=True)
+        raise
+    return saved_path, file_hash
+
+
+def _resolve_existing_template_file(
+    raw_file_path: str | None,
+    uploads_dir: Path,
+) -> Path | None:
+    """Резолвить файл-заготовку в межах `UPLOADS_DIR` і перевіряє його наявність на диску."""
+    resolved = resolve_submission_file_path(raw_file_path, uploads_dir)
+    if resolved is None or not resolved.is_file():
+        return None
+    return resolved
+
+
+def _unlink_template_quietly(path: Path) -> None:
+    """Видаляє файл-заготовку з диска без помилки при відсутності файлу."""
+    path.unlink(missing_ok=True)
+
+
+async def _load_practical_with_course_or_404(
+    db: AsyncSession,
+    practical_id: uuid.UUID,
+) -> Practical:
+    """Завантажує практичну роботу разом із модулем та курсом або повертає 404."""
+    stmt = (
+        select(Practical)
+        .options(selectinload(Practical.module).selectinload(Module.course))
+        .where(Practical.id == practical_id)
+    )
+    result = await db.execute(stmt)
+    practical = result.scalar_one_or_none()
+    if practical is None:
+        raise DomainError(
+            "Практичну роботу не знайдено.",
+            code="PRACTICAL_NOT_FOUND",
+            status_code=404,
+            context={"practical_id": str(practical_id)},
+        )
+    return practical
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,4 +730,189 @@ async def update_practical_grading_rules(
         practical_id=practical_id,
         payload=payload,
         requester=current_user,
+    )
+
+
+@router.post(
+    "/practicals/{practical_id}/template",
+    response_model=PracticalTeacherRead,
+    status_code=status.HTTP_200_OK,
+)
+async def upload_practical_template(
+    practical_id: uuid.UUID,
+    file: Annotated[UploadFile, File(...)],
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PracticalTeacherRead:
+    """Прикріплює або замінює файл-заготовку (шаблон) практичної роботи викладачем."""
+    practical = await _load_practical_with_course_or_404(db, practical_id)
+    ensure_course_owner_or_admin(
+        practical.module.course,
+        current_user,
+        context={"practical_id": str(practical_id)},
+    )
+
+    safe_filename = (file.filename or "").strip()
+    actual_suffix = Path(safe_filename).suffix.lower()
+    if actual_suffix not in ALLOWED_TEMPLATE_EXTENSIONS:
+        raise DomainError(
+            f"Непідтримуваний формат файлу-заготовки '{actual_suffix or 'невідомий'}'. "
+            "Дозволені формати: .docx, .xlsx, .accdb, .zip, .txt, .csv.",
+            code="UNSUPPORTED_TEMPLATE_FORMAT",
+            status_code=422,
+            context={
+                "practical_id": str(practical_id),
+                "file_name": safe_filename,
+                "actual_suffix": actual_suffix,
+            },
+        )
+
+    max_bytes = (
+        settings.MAX_ACCDB_UPLOAD_BYTES
+        if actual_suffix == ".accdb"
+        else settings.MAX_OFFICE_UPLOAD_BYTES
+    )
+    file_bytes = await read_upload_file_limited(file, max_bytes=max_bytes)
+    if len(file_bytes) == 0:
+        raise DomainError(
+            f"Завантажений файл-заготовка '{safe_filename}' порожній.",
+            code="EMPTY_TEMPLATE_FILE",
+            status_code=422,
+            context={"practical_id": str(practical_id), "file_name": safe_filename},
+        )
+
+    if actual_suffix in ZIP_TEMPLATE_EXTENSIONS:
+        try:
+            await run_in_threadpool(validate_zip_archive_safety, file_bytes)
+        except InvalidFileFormatError as exc:
+            raise DomainError(
+                exc.detail,
+                code="INVALID_TEMPLATE_ARCHIVE",
+                status_code=422,
+                context={
+                    "practical_id": str(practical_id),
+                    "file_name": safe_filename,
+                },
+            ) from exc
+
+    ext_no_dot = actual_suffix.lstrip(".")
+    saved_path, file_hash = await run_in_threadpool(
+        _save_template_file,
+        uploads_dir=settings.UPLOADS_DIR,
+        ext_no_dot=ext_no_dot,
+        file_bytes=file_bytes,
+    )
+    display_name = _sanitize_template_display_name(safe_filename, actual_suffix)
+    old_template_path = practical.template_file_path
+
+    practical.template_file_path = saved_path.as_posix()
+    practical.template_file_name = display_name
+    practical.template_file_hash = file_hash
+
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await run_in_threadpool(_unlink_template_quietly, saved_path)
+        raise
+
+    await db.refresh(practical)
+
+    if (
+        old_template_path is not None
+        and old_template_path.strip()
+        and old_template_path != practical.template_file_path
+    ):
+        await delete_submission_file_safely_async(
+            old_template_path,
+            upload_dir=settings.UPLOADS_DIR,
+        )
+
+    return serialize_practical_teacher(practical)
+
+
+@router.delete(
+    "/practicals/{practical_id}/template",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_practical_template(
+    practical_id: uuid.UUID,
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Видаляє прикріплений файл-заготовку практичної роботи з БД і диска."""
+    practical = await _load_practical_with_course_or_404(db, practical_id)
+    ensure_course_owner_or_admin(
+        practical.module.course,
+        current_user,
+        context={"practical_id": str(practical_id)},
+    )
+
+    old_template_path = practical.template_file_path
+    practical.template_file_path = None
+    practical.template_file_name = None
+    practical.template_file_hash = None
+    await db.commit()
+
+    if old_template_path is not None and old_template_path.strip():
+        await delete_submission_file_safely_async(
+            old_template_path,
+            upload_dir=settings.UPLOADS_DIR,
+        )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/practicals/{practical_id}/template",
+    response_class=Response,
+)
+async def download_practical_template(
+    practical_id: uuid.UUID,
+    _current_user: AllAuthUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Віддає авторизованому користувачу файл-заготовку (шаблон) практичної роботи."""
+    result = await db.execute(select(Practical).where(Practical.id == practical_id))
+    practical = result.scalar_one_or_none()
+    if practical is None:
+        raise DomainError(
+            "Практичну роботу не знайдено.",
+            code="PRACTICAL_NOT_FOUND",
+            status_code=404,
+            context={"practical_id": str(practical_id)},
+        )
+
+    if practical.template_file_path is None or not practical.template_file_path.strip():
+        raise DomainError(
+            "Для цієї практичної роботи файл-заготовку не прикріплено.",
+            code="TEMPLATE_FILE_NOT_FOUND",
+            status_code=404,
+            context={"practical_id": str(practical_id)},
+        )
+
+    resolved_path = await run_in_threadpool(
+        _resolve_existing_template_file,
+        practical.template_file_path,
+        settings.UPLOADS_DIR,
+    )
+    if resolved_path is None:
+        raise DomainError(
+            "Файл-заготовка відсутній на сервері.",
+            code="TEMPLATE_FILE_NOT_FOUND",
+            status_code=404,
+            context={"practical_id": str(practical_id)},
+        )
+
+    suffix = resolved_path.suffix.lower()
+    media_type = _TEMPLATE_MEDIA_TYPES.get(suffix, "application/octet-stream")
+    content_disposition = _build_template_content_disposition(
+        practical.template_file_name,
+        fallback_suffix=suffix or ".bin",
+    )
+    return FileResponse(
+        path=resolved_path,
+        media_type=media_type,
+        headers={"Content-Disposition": content_disposition},
     )

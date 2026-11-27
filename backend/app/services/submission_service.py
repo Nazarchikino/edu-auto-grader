@@ -28,6 +28,7 @@ from app.graders.html_grader import (
 )
 from app.graders.metadata import (
     check_submission_plagiarism,
+    compute_bytes_sha256,
     compute_submission_hash,
     extract_document_metadata,
     validate_zip_archive_safety,
@@ -58,6 +59,9 @@ from app.services.quiz_service import QuizService, resolve_student_variant
 from app.services.retention_service import resolve_submission_file_path
 
 _HTML_EXTENSIONS: frozenset[str] = frozenset({".html", ".htm"})
+UNMODIFIED_TEMPLATE_ERROR_MESSAGE: str = (
+    "Ви завантажили незмінений файл-заготовку викладача. Виконайте завдання перед здачею."
+)
 
 DOCX_MEDIA_TYPE: str = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -347,6 +351,10 @@ def serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
         format_type=practical.format_type,
         max_score=float(practical.max_score),
         needs_rules_review=practical.needs_rules_review,
+        has_template_file=bool(practical.template_file_path),
+        template_file_name=(
+            practical.template_file_name if practical.template_file_path else None
+        ),
         variants=variants,
         grading_rules=grading_rules,
     )
@@ -606,6 +614,7 @@ class SubmissionService:
         variant_data: dict[str, object],
         file_bytes: bytes | None,
         filename: str | None,
+        template_file_hash: str | None = None,
     ) -> tuple[Path, str, ExtractedMetadata, GradingReport]:
         """Зберігає файл (.docx/.xlsx/.accdb), витягує метадані та запускає парсер у threadpool."""
         if file_bytes is None:
@@ -637,6 +646,19 @@ class SubmissionService:
                     "file_name": safe_filename,
                 },
             )
+
+        if template_file_hash is not None:
+            uploaded_file_hash = await run_in_threadpool(compute_bytes_sha256, file_bytes)
+            if uploaded_file_hash == template_file_hash:
+                raise DomainError(
+                    UNMODIFIED_TEMPLATE_ERROR_MESSAGE,
+                    code="UNMODIFIED_TEMPLATE_SUBMISSION",
+                    status_code=422,
+                    context={
+                        "practical_id": str(practical_id),
+                        "file_hash": uploaded_file_hash,
+                    },
+                )
 
         saved_path, file_hash = await run_in_threadpool(
             _save_uploaded_file,
@@ -723,6 +745,18 @@ class SubmissionService:
         stored_raw_code: str | None = None
 
         if practical.format_type == PracticalFormat.HTML:
+            if practical.template_file_hash is not None and file_bytes is not None:
+                raw_upload_hash = await run_in_threadpool(compute_bytes_sha256, file_bytes)
+                if raw_upload_hash == practical.template_file_hash:
+                    raise DomainError(
+                        UNMODIFIED_TEMPLATE_ERROR_MESSAGE,
+                        code="UNMODIFIED_TEMPLATE_SUBMISSION",
+                        status_code=422,
+                        context={
+                            "practical_id": str(practical.id),
+                            "file_hash": raw_upload_hash,
+                        },
+                    )
             (
                 stored_raw_code,
                 file_hash,
@@ -736,6 +770,19 @@ class SubmissionService:
                 file_bytes=file_bytes,
                 filename=filename,
             )
+            if (
+                practical.template_file_hash is not None
+                and file_hash == practical.template_file_hash
+            ):
+                raise DomainError(
+                    UNMODIFIED_TEMPLATE_ERROR_MESSAGE,
+                    code="UNMODIFIED_TEMPLATE_SUBMISSION",
+                    status_code=422,
+                    context={
+                        "practical_id": str(practical.id),
+                        "file_hash": file_hash,
+                    },
+                )
         else:
             (
                 saved_path,
@@ -751,6 +798,7 @@ class SubmissionService:
                 variant_data=variant_data,
                 file_bytes=file_bytes,
                 filename=filename,
+                template_file_hash=practical.template_file_hash,
             )
             stored_file_path = saved_path.as_posix()
 
@@ -1285,6 +1333,7 @@ __all__ = [
     "ACCDB_MEDIA_TYPE",
     "DOCX_MEDIA_TYPE",
     "HTML_MEDIA_TYPE",
+    "UNMODIFIED_TEMPLATE_ERROR_MESSAGE",
     "SubmissionDownloadPayload",
     "SubmissionService",
     "serialize_practical_teacher",

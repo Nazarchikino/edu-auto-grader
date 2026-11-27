@@ -259,6 +259,18 @@ class Practical(Base):
         default=False,
         server_default="false",
     )
+    template_file_path: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    template_file_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    template_file_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
 
     module: Mapped[Module] = relationship(
         "Module",

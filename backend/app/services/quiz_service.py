@@ -435,6 +435,12 @@ class QuizService:
             format_type=practical.format_type,
             max_score=float(practical.max_score),
             needs_rules_review=practical.needs_rules_review,
+            has_template_file=bool(practical.template_file_path),
+            template_file_name=(
+                practical.template_file_name
+                if practical.template_file_path
+                else None
+            ),
             variant_index=variant_index,
             variant_number=variant_number,
             total_variants=total_variants,

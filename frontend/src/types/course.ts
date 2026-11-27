@@ -12,6 +12,12 @@ export interface QuizQuestionCreate {
   correct_option_index: number;
 }
 
+export interface QuizQuestionUpdate {
+  question_text?: string | null;
+  options?: string[] | null;
+  correct_option_index?: number | null;
+}
+
 export interface QuizQuestionRead {
   id: string;
   module_id: string;
@@ -88,6 +94,8 @@ export interface PracticalSummaryRead {
   is_unlocked: boolean;
   best_score: number | null;
   needs_rules_review: boolean;
+  has_template_file: boolean;
+  template_file_name: string | null;
   assigned_variant_number: number;
   total_variants: number;
   variant?: PracticalVariant | null;
@@ -104,6 +112,8 @@ export interface PracticalStudentRead {
   auto_max_score: number;
   manual_bonus_max: number;
   needs_rules_review: boolean;
+  has_template_file: boolean;
+  template_file_name: string | null;
   variant_index: number;
   variant_number: number;
   total_variants: number;
@@ -121,6 +131,8 @@ export interface PracticalTeacherRead {
   auto_max_score: number;
   manual_bonus_max: number;
   needs_rules_review: boolean;
+  has_template_file: boolean;
+  template_file_name: string | null;
   variants: PracticalVariant[];
   grading_rules: GradingRule[];
 }
@@ -135,6 +147,17 @@ export interface ModuleUpdate {
   order_index?: number | null;
   title?: string | null;
   lecture_content?: string | null;
+}
+
+export interface ModuleReorderRequest {
+  module_ids: string[];
+}
+
+export interface CourseMediaUploadRead {
+  url: string;
+  markdown: string;
+  filename: string;
+  size_bytes: number;
 }
 
 export interface ModuleSummaryRead {
