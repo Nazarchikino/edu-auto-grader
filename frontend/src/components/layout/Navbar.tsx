@@ -32,6 +32,12 @@ function resolvePageTitle(pathname: string): string {
   if (pathname.startsWith("/student/gradebook")) {
     return "Електронна залікова книжка";
   }
+  if (
+    pathname.startsWith("/teacher/courses/") &&
+    pathname.endsWith("/preview")
+  ) {
+    return "Попередній перегляд модуля очима студента";
+  }
   if (pathname.startsWith("/teacher/courses")) {
     return "Конструктор навчальних курсів і лекцій";
   }

@@ -27,10 +27,12 @@ import {
   Clock,
   Copy,
   Database,
+  Eye,
   FileCheck2,
   FileCode2,
   FileSpreadsheet,
   FileText,
+  FlaskConical,
   HardDriveUpload,
   HelpCircle,
   Info,
@@ -55,9 +57,12 @@ import {
   MarkdownRenderer,
   renderInlineMarkdown,
 } from "../../components/common/MarkdownRenderer";
+import { DryRunResultPanel } from "../../components/grading/DryRunResultPanel";
 import { extractApiErrorMessage, useAuth } from "../../context/AuthContext";
 import type {
+  DryRunGradingResponse,
   ErrorResponse,
+  HtmlDryRunRequest,
   HtmlSubmissionRequest,
   SubmissionRead,
 } from "../../types/api";
@@ -196,9 +201,15 @@ function extractRetryAfterSeconds(error: unknown): number | null {
   return null;
 }
 
-async function fetchModuleDetail(moduleId: string): Promise<ModuleDetailRead> {
+async function fetchModuleDetail(
+  moduleId: string,
+  previewVariant?: number
+): Promise<ModuleDetailRead> {
   const response = await apiClient.get<ModuleDetailRead>(
-    `/modules/${moduleId}`
+    `/modules/${moduleId}`,
+    previewVariant !== undefined
+      ? { params: { preview_variant: previewVariant } }
+      : undefined
   );
   return response.data;
 }
@@ -242,6 +253,37 @@ async function submitFilePractical(
   formData.append("file", file);
   const response = await apiClient.post<SubmissionRead>(
     `/practicals/${practicalId}/submit`,
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+  return response.data;
+}
+
+async function dryRunHtmlPractical(
+  practicalId: string,
+  payload: HtmlDryRunRequest
+): Promise<DryRunGradingResponse> {
+  const response = await apiClient.post<DryRunGradingResponse>(
+    `/practicals/${practicalId}/dry-run`,
+    payload
+  );
+  return response.data;
+}
+
+async function dryRunFilePractical(
+  practicalId: string,
+  file: File,
+  variantNumber: number
+): Promise<DryRunGradingResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("variant_number", String(variantNumber));
+  const response = await apiClient.post<DryRunGradingResponse>(
+    `/practicals/${practicalId}/dry-run`,
     formData,
     {
       headers: {
@@ -836,14 +878,25 @@ function VariantParametersSection({
   );
 }
 
-export function ModuleViewPage(): ReactElement {
-  const { moduleId } = useParams<{ moduleId: string }>();
+export interface ModuleViewPageProps {
+  previewMode?: boolean;
+}
+
+export function ModuleViewPage({
+  previewMode = false,
+}: ModuleViewPageProps): ReactElement {
+  const { courseId, moduleId } = useParams<{
+    courseId?: string;
+    moduleId: string;
+  }>();
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const copyResetTimerRef = useRef<number | null>(null);
 
   const [activeTab, setActiveTab] = useState<ModuleSectionTab>("lecture");
+  const [previewVariant, setPreviewVariant] = useState<number>(1);
+  const [simulateQuizPassed, setSimulateQuizPassed] = useState<boolean>(true);
   const [selectedAnswers, setSelectedAnswers] = useState<
     Record<string, number>
   >({});
@@ -866,6 +919,8 @@ export function ModuleViewPage(): ReactElement {
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [lastSubmissionResult, setLastSubmissionResult] =
     useState<SubmissionRead | null>(null);
+  const [lastDryRunResult, setLastDryRunResult] =
+    useState<DryRunGradingResponse | null>(null);
   const [copiedRawText, setCopiedRawText] = useState<boolean>(false);
 
   const startQuizCooldown = useCallback((seconds: number): void => {
@@ -888,27 +943,82 @@ export function ModuleViewPage(): ReactElement {
     error,
     refetch,
   } = useQuery<ModuleDetailRead>({
-    queryKey: ["module", resolvedModuleId],
-    queryFn: () => fetchModuleDetail(resolvedModuleId),
+    queryKey: previewMode
+      ? ["module-preview", resolvedModuleId, previewVariant]
+      : ["module", resolvedModuleId],
+    queryFn: () =>
+      fetchModuleDetail(
+        resolvedModuleId,
+        previewMode ? previewVariant : undefined
+      ),
     enabled: resolvedModuleId.length > 0,
   });
 
   const practicalId = module?.practical?.id ?? null;
-  const isPracticalUnlocked = module?.practical_unlocked ?? false;
+  const effectiveQuizPassed = previewMode
+    ? simulateQuizPassed
+    : (module?.quiz_passed ?? false);
+  const effectivePracticalUnlocked = previewMode
+    ? simulateQuizPassed
+    : (module?.practical_unlocked ?? false);
 
   const {
-    data: practicalDetail,
-    isLoading: isLoadingPractical,
-    isError: isPracticalError,
-    error: practicalError,
+    data: fetchedStudentPractical,
+    isLoading: isLoadingStudentPractical,
+    isError: isStudentPracticalError,
+    error: studentPracticalError,
   } = useQuery<PracticalStudentRead>({
     queryKey: ["practical-student", practicalId],
     queryFn: () => fetchStudentPractical(practicalId ?? ""),
     enabled:
+      !previewMode &&
       practicalId !== null &&
-      isPracticalUnlocked &&
+      effectivePracticalUnlocked &&
       user?.role === "student",
   });
+
+  const practicalDetail = useMemo<PracticalStudentRead | undefined>(() => {
+    if (!previewMode) {
+      return fetchedStudentPractical;
+    }
+    const summary = module?.practical;
+    if (summary === null || summary === undefined) {
+      return undefined;
+    }
+    const variantNum = summary.assigned_variant_number;
+    const totalVars = Math.max(1, summary.total_variants);
+    const resolvedVariant = summary.variant ?? {
+      variant_number: variantNum,
+      title: summary.title,
+      task_description: summary.instructions ?? "",
+      parameters: {},
+    };
+    return {
+      id: summary.id,
+      module_id: summary.module_id,
+      title: summary.title,
+      instructions: summary.instructions ?? "",
+      format_type: summary.format_type,
+      max_score: summary.max_score,
+      auto_max_score: summary.auto_max_score,
+      manual_bonus_max: summary.manual_bonus_max,
+      needs_rules_review: summary.needs_rules_review,
+      variant_index: Math.max(0, variantNum - 1),
+      variant_number: variantNum,
+      total_variants: totalVars,
+      variant: resolvedVariant,
+      grading_criteria: summary.grading_criteria,
+    };
+  }, [previewMode, fetchedStudentPractical, module]);
+
+  const isLoadingPractical = previewMode ? false : isLoadingStudentPractical;
+  const isPracticalError = previewMode ? false : isStudentPracticalError;
+  const practicalError = previewMode ? null : studentPracticalError;
+
+  const totalVariants = Math.max(
+    1,
+    module?.practical?.total_variants ?? practicalDetail?.total_variants ?? 1
+  );
 
   useEffect(() => {
     setSelectedAnswers({});
@@ -918,6 +1028,9 @@ export function ModuleViewPage(): ReactElement {
     setIsDragActive(false);
     setSubmissionError(null);
     setLastSubmissionResult(null);
+    setLastDryRunResult(null);
+    setPreviewVariant(1);
+    setSimulateQuizPassed(true);
     setCopiedRawText(false);
     setActiveTab("lecture");
     prevCooldownActiveRef.current = false;
@@ -1153,8 +1266,54 @@ export function ModuleViewPage(): ReactElement {
     },
   });
 
+  const dryRunHtmlMutation = useMutation<
+    DryRunGradingResponse,
+    unknown,
+    HtmlDryRunRequest
+  >({
+    mutationFn: (payload) => dryRunHtmlPractical(practicalId ?? "", payload),
+    onSuccess: (result) => {
+      setLastDryRunResult(result);
+      setSubmissionError(null);
+    },
+    onError: (err) => {
+      setLastDryRunResult(null);
+      setSubmissionError(
+        extractApiErrorMessage(
+          err,
+          "Не вдалося виконати тестову перевірку HTML-коду (Dry-Run)."
+        )
+      );
+    },
+  });
+
+  const dryRunFileMutation = useMutation<
+    DryRunGradingResponse,
+    unknown,
+    { file: File; variantNumber: number }
+  >({
+    mutationFn: ({ file, variantNumber }) =>
+      dryRunFilePractical(practicalId ?? "", file, variantNumber),
+    onSuccess: (result) => {
+      setLastDryRunResult(result);
+      setSubmissionError(null);
+    },
+    onError: (err) => {
+      setLastDryRunResult(null);
+      setSubmissionError(
+        extractApiErrorMessage(
+          err,
+          "Помилка тестової перевірки файлу практичної роботи (Dry-Run)."
+        )
+      );
+    },
+  });
+
   const isSubmittingPractical =
-    submitHtmlMutation.isPending || submitFileMutation.isPending;
+    submitHtmlMutation.isPending ||
+    submitFileMutation.isPending ||
+    dryRunHtmlMutation.isPending ||
+    dryRunFileMutation.isPending;
 
   const totalQuestions = module?.quiz_questions.length ?? 0;
   const answeredCount = useMemo(() => {
@@ -1191,7 +1350,7 @@ export function ModuleViewPage(): ReactElement {
 
   const handleQuizSubmit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    if (!module) {
+    if (!module || previewMode) {
       return;
     }
 
@@ -1304,6 +1463,13 @@ export function ModuleViewPage(): ReactElement {
       return;
     }
     setSubmissionError(null);
+    if (previewMode) {
+      dryRunFileMutation.mutate({
+        file: selectedFile,
+        variantNumber: practicalDetail?.variant_number ?? previewVariant,
+      });
+      return;
+    }
     submitFileMutation.mutate(selectedFile);
   };
 
@@ -1316,6 +1482,13 @@ export function ModuleViewPage(): ReactElement {
       return;
     }
     setSubmissionError(null);
+    if (previewMode) {
+      dryRunHtmlMutation.mutate({
+        raw_code: rawCode,
+        variant_number: practicalDetail?.variant_number ?? previewVariant,
+      });
+      return;
+    }
     submitHtmlMutation.mutate({ raw_code: rawCode });
   };
 
@@ -1331,6 +1504,16 @@ export function ModuleViewPage(): ReactElement {
         return <HardDriveUpload className="h-6 w-6 text-rose-600" />;
     }
   };
+
+  const resolvedCourseId = courseId ?? module?.course_id;
+  const teacherEditorReturnTo =
+    resolvedCourseId !== undefined
+      ? `/teacher/courses?courseId=${resolvedCourseId}&moduleId=${resolvedModuleId}`
+      : "/teacher/courses";
+  const backLinkTo = previewMode ? teacherEditorReturnTo : "/student/courses";
+  const backLinkLabel = previewMode
+    ? "Повернутися до редактора курсу"
+    : "Назад до переліку навчальних курсів";
 
   if (isLoading) {
     return (
@@ -1359,11 +1542,11 @@ export function ModuleViewPage(): ReactElement {
         <p className="mt-1.5 text-sm text-slate-600">{errorMessage}</p>
         <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
           <Link
-            to="/student/courses"
+            to={backLinkTo}
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
           >
             <ArrowLeft className="h-4 w-4" />
-            Повернутися до курсів
+            {previewMode ? "Повернутися до редактора курсу" : "Повернутися до курсів"}
           </Link>
           <button
             type="button"
@@ -1382,25 +1565,137 @@ export function ModuleViewPage(): ReactElement {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
+      {/* Контрастна панель попереднього перегляду очима студента */}
+      {previewMode && (
+        <div
+          className="rounded-2xl border border-indigo-400/50 bg-slate-900 p-4 text-white shadow-md sm:p-5"
+          role="region"
+          aria-label="Панель керування режимом попереднього перегляду очима студента"
+        >
+          <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-500 text-white shadow-xs">
+                <Eye className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-sm font-bold text-white sm:text-base">
+                    Режим попереднього перегляду очима студента
+                  </h2>
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-200">
+                    <FlaskConical className="h-3 w-3" />
+                    Dry-Run / Без запису в журнал
+                  </span>
+                </div>
+                <p className="mt-0.5 text-xs text-slate-300">
+                  Перевіряйте відображення лекції, ілюстрацій, тесту-допуску,
+                  індивідуальних варіантів, україномовних критеріїв та 12-бальної
+                  шкали без створення студентського акаунта.
+                </p>
+              </div>
+            </div>
+
+            <Link
+              to={teacherEditorReturnTo}
+              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl border border-slate-600 bg-slate-800 px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:border-slate-500 hover:bg-slate-700"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              <span>Повернутися до редактора курсу</span>
+            </Link>
+          </div>
+
+          <div className="mt-4 flex flex-col flex-wrap gap-3 border-t border-slate-800 pt-3.5 sm:flex-row sm:items-center sm:justify-between">
+            {/* Перемикач варіанта 1..N */}
+            {hasPractical && (
+              <div className="flex flex-wrap items-center gap-2">
+                <label
+                  htmlFor="preview-variant-select"
+                  className="text-xs font-semibold text-slate-200"
+                >
+                  Варіант студента:
+                </label>
+                <select
+                  id="preview-variant-select"
+                  value={Math.min(previewVariant, totalVariants)}
+                  onChange={(event) => {
+                    const nextVariant = Number(event.target.value) || 1;
+                    setPreviewVariant(nextVariant);
+                    setLastDryRunResult(null);
+                    setSubmissionError(null);
+                  }}
+                  className="rounded-xl border border-slate-600 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white focus:border-indigo-400 focus:outline-none"
+                >
+                  {Array.from({ length: totalVariants }, (_, idx) => {
+                    const num = idx + 1;
+                    return (
+                      <option key={num} value={num}>
+                        Варіант {num} із {totalVariants}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            )}
+
+            {/* Перемикач симуляції статусу тесту-допуску */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-300">
+                Симуляція допуску:
+              </span>
+              <div
+                className="inline-flex rounded-xl border border-slate-700 bg-slate-800 p-0.5"
+                role="group"
+                aria-label="Симуляція статусу тесту-допуску"
+              >
+                <button
+                  type="button"
+                  onClick={() => setSimulateQuizPassed(false)}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                    !simulateQuizPassed
+                      ? "bg-amber-500 text-slate-950"
+                      : "text-slate-300 hover:text-white"
+                  }`}
+                >
+                  <Lock className="h-3 w-3" />
+                  <span>Тест ще не складено (заблоковано)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSimulateQuizPassed(true)}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                    simulateQuizPassed
+                      ? "bg-emerald-500 text-slate-950"
+                      : "text-slate-300 hover:text-white"
+                  }`}
+                >
+                  <Unlock className="h-3 w-3" />
+                  <span>Тест складено (доступ відкрито)</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Верхня навігація та статус модуля */}
       <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Link
-            to="/student/courses"
+            to={backLinkTo}
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-800"
           >
             <ArrowLeft className="h-4 w-4" />
-            Назад до переліку навчальних курсів
+            {backLinkLabel}
           </Link>
 
           <div className="flex flex-wrap items-center gap-2">
-            {module.quiz_passed ? (
+            {effectiveQuizPassed ? (
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 {hasPractical
                   ? "Тест-допуск складено"
                   : "Тест самоперевірки пройдено"}
-                {module.best_quiz_score !== null
+                {!previewMode && module.best_quiz_score !== null
                   ? ` (${module.best_quiz_score.toFixed(0)}%)`
                   : ""}
               </span>
@@ -1410,14 +1705,14 @@ export function ModuleViewPage(): ReactElement {
                 {hasPractical
                   ? "Тест-допуск: потрібен результат ≥ 70%"
                   : "Тест самоперевірки: рекомендовано ≥ 70%"}
-                {module.best_quiz_score !== null
+                {!previewMode && module.best_quiz_score !== null
                   ? ` (найкращий: ${module.best_quiz_score.toFixed(0)}%)`
                   : ""}
               </span>
             )}
 
             {hasPractical ? (
-              module.practical_unlocked ? (
+              effectivePracticalUnlocked ? (
                 <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
                   <Unlock className="h-3.5 w-3.5" />
                   Практична робота відкрита
@@ -1499,7 +1794,7 @@ export function ModuleViewPage(): ReactElement {
               className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
                 activeTab === "quiz"
                   ? "bg-blue-600 text-white"
-                  : module.quiz_passed
+                  : effectiveQuizPassed
                     ? "bg-emerald-100 text-emerald-700"
                     : "bg-white text-slate-600 border border-slate-200"
               }`}
@@ -1532,12 +1827,12 @@ export function ModuleViewPage(): ReactElement {
                 className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
                   activeTab === "practical"
                     ? "bg-blue-600 text-white"
-                    : module.practical_unlocked
+                    : effectivePracticalUnlocked
                       ? "bg-indigo-100 text-indigo-700"
                       : "bg-slate-200 text-slate-500"
                 }`}
               >
-                {module.practical_unlocked ? (
+                {effectivePracticalUnlocked ? (
                   <FileCode2 className="h-4 w-4" />
                 ) : (
                   <Lock className="h-4 w-4" />
@@ -1546,7 +1841,7 @@ export function ModuleViewPage(): ReactElement {
               <div className="min-w-0">
                 <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
                   Крок 3 •{" "}
-                  {module.practical_unlocked ? "Розблоковано" : "Заблоковано"}
+                  {effectivePracticalUnlocked ? "Розблоковано" : "Заблоковано"}
                 </p>
                 <p className="truncate text-sm font-semibold">
                   Практична робота
@@ -1759,7 +2054,28 @@ export function ModuleViewPage(): ReactElement {
               </div>
             ) : (
               <form onSubmit={handleQuizSubmit} className="mt-6 space-y-6">
-                {isQuizOnCooldown && (
+                {previewMode && (
+                  <div
+                    className="flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/80 p-3.5 text-xs text-indigo-950"
+                    role="status"
+                  >
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+                    <div>
+                      <p className="font-bold">
+                        У режимі перегляду спроби тесту не зберігаються в журнал
+                      </p>
+                      <p className="mt-0.5 text-indigo-900">
+                        Ви можете локально проклікати варіанти відповідей, щоб
+                        перевірити формулювання питань, зображення та
+                        перемішування варіантів. Для перегляду стану
+                        «заблоковано / відкрито» скористайтеся перемикачем
+                        симуляції допуску у верхній панелі.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {!previewMode && isQuizOnCooldown && (
                   <div
                     className="flex flex-col justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs text-amber-950 sm:flex-row sm:items-center"
                     role="status"
@@ -1896,13 +2212,19 @@ export function ModuleViewPage(): ReactElement {
                   <button
                     type="submit"
                     disabled={
+                      previewMode ||
                       !allQuestionsAnswered ||
                       isQuizOnCooldown ||
                       submitQuizMutation.isPending
                     }
                     className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {submitQuizMutation.isPending ? (
+                    {previewMode ? (
+                      <>
+                        <Eye className="h-4 w-4" />
+                        <span>Відправка тесту вимкнена в режимі перегляду</span>
+                      </>
+                    ) : submitQuizMutation.isPending ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
                         <span>Перевірка відповідей...</span>
@@ -1953,7 +2275,7 @@ export function ModuleViewPage(): ReactElement {
                 <span>Перейти до тесту самоперевірки</span>
               </button>
             </div>
-          ) : !module.practical_unlocked ? (
+          ) : !effectivePracticalUnlocked ? (
             <div className="mx-auto max-w-lg py-8 text-center">
               <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-amber-50 text-amber-600 border border-amber-200">
                 <Lock className="h-7 w-7" />
@@ -2051,7 +2373,9 @@ export function ModuleViewPage(): ReactElement {
                         Індивідуальний варіант №{practicalDetail.variant_number}
                       </span>
                       <span className="text-xs text-indigo-700">
-                        Призначено за списком групи (№{user?.list_number ?? 1})
+                        {previewMode
+                          ? `Перегляд варіанта №${practicalDetail.variant_number} із ${practicalDetail.total_variants}`
+                          : `Призначено за списком групи (№${user?.list_number ?? 1})`}
                       </span>
                     </div>
 
@@ -2196,6 +2520,16 @@ export function ModuleViewPage(): ReactElement {
                         userId={user?.id}
                         isSubmitting={isSubmittingPractical}
                         onSubmitCode={handleHtmlSandboxSubmit}
+                        submitButtonLabel={
+                          previewMode
+                            ? "Перевірити (Dry-Run без запису)"
+                            : undefined
+                        }
+                        submittingLabel={
+                          previewMode
+                            ? "Тестова перевірка HTML (Dry-Run)..."
+                            : undefined
+                        }
                       />
                     </Suspense>
                   ) : (
@@ -2329,11 +2663,24 @@ export function ModuleViewPage(): ReactElement {
 
                           <div className="mt-5 flex flex-col items-stretch justify-between gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center">
                             <p className="text-xs text-slate-500">
-                              Перевірка виконується автоматично за{" "}
-                              <span className="font-semibold text-slate-700">
-                                варіантом №{practicalDetail.variant_number}
-                              </span>{" "}
-                              протягом 1–3 секунд.
+                              {previewMode ? (
+                                <>
+                                  Режим Dry-Run: перевірка за{" "}
+                                  <span className="font-semibold text-slate-700">
+                                    варіантом №{practicalDetail.variant_number}
+                                  </span>{" "}
+                                  без запису в журнал і без збереження файлу на
+                                  диск.
+                                </>
+                              ) : (
+                                <>
+                                  Перевірка виконується автоматично за{" "}
+                                  <span className="font-semibold text-slate-700">
+                                    варіантом №{practicalDetail.variant_number}
+                                  </span>{" "}
+                                  протягом 1–3 секунд.
+                                </>
+                              )}
                             </p>
 
                             <button
@@ -2346,7 +2693,18 @@ export function ModuleViewPage(): ReactElement {
                               {isSubmittingPractical ? (
                                 <>
                                   <Loader2 className="h-4 w-4 animate-spin" />
-                                  <span>Автоперевірка файлу...</span>
+                                  <span>
+                                    {previewMode
+                                      ? "Тестова перевірка (Dry-Run)..."
+                                      : "Автоперевірка файлу..."}
+                                  </span>
+                                </>
+                              ) : previewMode ? (
+                                <>
+                                  <FlaskConical className="h-4 w-4" />
+                                  <span>
+                                    Запустити Dry-Run перевірку (без запису)
+                                  </span>
                                 </>
                               ) : (
                                 <>
@@ -2361,8 +2719,17 @@ export function ModuleViewPage(): ReactElement {
                     })()
                   )}
 
+                  {/* Результат Dry-Run перевірки у режимі попереднього перегляду */}
+                  {previewMode && lastDryRunResult !== null && (
+                    <DryRunResultPanel
+                      result={lastDryRunResult}
+                      rulesEditorLink={`/teacher/rules?practicalId=${practicalDetail.id}`}
+                      onClear={() => setLastDryRunResult(null)}
+                    />
+                  )}
+
                   {/* Миттєвий звіт результату автоперевірки та контролю авторства */}
-                  {lastSubmissionResult !== null && (
+                  {!previewMode && lastSubmissionResult !== null && (
                     <div
                       className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5 shadow-xs sm:p-6"
                       role="status"

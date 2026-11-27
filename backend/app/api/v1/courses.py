@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -266,6 +266,8 @@ async def _build_module_detail_read(
     db: AsyncSession,
     module: Module,
     current_user: User,
+    *,
+    preview_variant: int | None = None,
 ) -> ModuleDetailRead:
     """Формує детальне представлення модуля з лекцією, тестом та статусом практичної."""
     questions_stmt = (
@@ -276,44 +278,63 @@ async def _build_module_detail_read(
     questions_result = await db.execute(questions_stmt)
     ordered_questions = list(questions_result.scalars().all())
 
-    quiz_service = QuizService(db)
+    is_teacher_preview = current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
     has_questions = len(ordered_questions) > 0
-    quiz_passed, best_quiz_score = await quiz_service.get_module_quiz_status(
-        student_id=current_user.id,
-        module_id=module.id,
-        has_questions=has_questions,
-    )
-    quiz_cooldown_remaining_seconds = 0
-    if current_user.role == UserRole.STUDENT and has_questions and not quiz_passed:
-        quiz_cooldown_remaining_seconds = (
-            await quiz_service.get_quiz_cooldown_remaining_seconds(
-                student_id=current_user.id,
-                module_id=module.id,
-                quiz_passed=quiz_passed,
-            )
+
+    if is_teacher_preview:
+        quiz_passed = True
+        best_quiz_score: float | None = None
+        quiz_cooldown_remaining_seconds = 0
+        practical_unlocked = True
+    else:
+        quiz_service = QuizService(db)
+        quiz_passed, best_quiz_score = await quiz_service.get_module_quiz_status(
+            student_id=current_user.id,
+            module_id=module.id,
+            has_questions=has_questions,
         )
-    practical_unlocked = quiz_passed or current_user.role in (
-        UserRole.TEACHER,
-        UserRole.ADMIN,
-    )
+        quiz_cooldown_remaining_seconds = 0
+        if has_questions and not quiz_passed:
+            quiz_cooldown_remaining_seconds = (
+                await quiz_service.get_quiz_cooldown_remaining_seconds(
+                    student_id=current_user.id,
+                    module_id=module.id,
+                    quiz_passed=quiz_passed,
+                )
+            )
+        practical_unlocked = quiz_passed
 
     practical_summary: PracticalSummaryRead | None = None
     if module.practical is not None:
-        best_sub_stmt = select(func.max(Submission.final_score)).where(
-            Submission.student_id == current_user.id,
-            Submission.practical_id == module.practical.id,
-        )
-        best_sub_result = await db.execute(best_sub_stmt)
-        max_sub_score: Decimal | None = best_sub_result.scalar_one_or_none()
+        max_sub_score: Decimal | None = None
+        if not is_teacher_preview:
+            best_sub_stmt = select(func.max(Submission.final_score)).where(
+                Submission.student_id == current_user.id,
+                Submission.practical_id == module.practical.id,
+            )
+            best_sub_result = await db.execute(best_sub_stmt)
+            max_sub_score = best_sub_result.scalar_one_or_none()
 
-        _, _, resolved_variant = resolve_student_variant(
-            practical=module.practical,
-            list_number=current_user.list_number,
-        )
+        total_variants = max(1, len(module.practical.variants))
+        if is_teacher_preview:
+            clamped_variant = max(1, min(preview_variant or 1, total_variants))
+            _, assigned_variant_number, resolved_variant = resolve_student_variant(
+                practical=module.practical,
+                list_number=clamped_variant,
+            )
+        else:
+            _, assigned_variant_number, resolved_variant = resolve_student_variant(
+                practical=module.practical,
+                list_number=current_user.list_number,
+            )
+
         practical_summary = PracticalSummaryRead(
             id=module.practical.id,
             module_id=module.id,
             title=module.practical.title,
+            instructions=(
+                module.practical.instructions if practical_unlocked else None
+            ),
             format_type=module.practical.format_type,
             max_score=float(module.practical.max_score),
             is_unlocked=practical_unlocked,
@@ -321,6 +342,9 @@ async def _build_module_detail_read(
                 round(float(max_sub_score), 2) if max_sub_score is not None else None
             ),
             needs_rules_review=module.practical.needs_rules_review,
+            assigned_variant_number=assigned_variant_number,
+            total_variants=total_variants,
+            variant=resolved_variant if practical_unlocked else None,
             grading_criteria=build_student_grading_criteria(
                 module.practical,
                 resolved_variant,
@@ -560,10 +584,27 @@ async def get_module(
     module_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    preview_variant: Annotated[int | None, Query(ge=1)] = None,
 ) -> ModuleDetailRead:
     """Повертає текст лекції, питання тесту-допуску та статус доступу до практичної."""
     module = await _load_module_or_404(db, module_id)
-    return await _build_module_detail_read(db, module, current_user)
+    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        ensure_course_owner_or_admin(
+            module.course,
+            current_user,
+            context={"module_id": str(module_id)},
+        )
+    effective_preview_variant = (
+        preview_variant
+        if current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
+        else None
+    )
+    return await _build_module_detail_read(
+        db,
+        module,
+        current_user,
+        preview_variant=effective_preview_variant,
+    )
 
 
 @router.post(

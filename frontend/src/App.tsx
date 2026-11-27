@@ -144,6 +144,10 @@ export function App(): ReactElement {
                   path="/teacher/courses"
                   element={<CourseEditorPage />}
                 />
+                <Route
+                  path="/teacher/courses/:courseId/modules/:moduleId/preview"
+                  element={<ModuleViewPage previewMode />}
+                />
                 <Route path="/teacher/rules" element={<RuleBuilderPage />} />
                 <Route
                   path="/teacher/journal"

@@ -1,7 +1,10 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type ChangeEvent,
+  type DragEvent,
   type FormEvent,
   type ReactElement,
 } from "react";
@@ -17,11 +20,15 @@ import {
   Code2,
   Copy,
   Database,
+  Eye,
+  FileCheck2,
   FileCode2,
   FileSpreadsheet,
   FileText,
+  FlaskConical,
   Info,
   Loader2,
+  Play,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -31,9 +38,15 @@ import {
   Sparkles,
   Target,
   Trash2,
+  UploadCloud,
 } from "lucide-react";
 import apiClient from "../../api/client";
+import { DryRunResultPanel } from "../../components/grading/DryRunResultPanel";
 import { extractApiErrorMessage } from "../../context/AuthContext";
+import type {
+  DryRunGradingResponse,
+  HtmlDryRunRequest,
+} from "../../types/api";
 import type {
   CourseRead,
   CourseSlug,
@@ -350,10 +363,42 @@ function formatPointsCompact(value: number): string {
     : rounded.toFixed(2).replace(/0$/, "");
 }
 
+function formatFileSizeCompact(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} Б`;
+  }
+  const kb = bytes / 1024;
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} КБ`;
+  }
+  return `${(kb / 1024).toFixed(2)} МБ`;
+}
+
+type BinaryFormat = Exclude<PracticalFormat, "html">;
+
+const DRY_RUN_FILE_ACCEPT: Record<BinaryFormat, string> = {
+  docx: ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  accdb: ".accdb,application/msaccess,application/x-msaccess",
+};
+
+const DEFAULT_DRY_RUN_HTML = `<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <title>Тестова перевірка HTML</title>
+</head>
+<body>
+  <h1>Заголовок сторінки</h1>
+  <p>Тестовий абзац для перевірки правил автооцінювання.</p>
+</body>
+</html>`;
+
 export function RuleBuilderPage(): ReactElement {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryPracticalId = searchParams.get("practicalId");
+  const dryRunFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [selectedPracticalId, setSelectedPracticalId] = useState<string | null>(
     queryPracticalId
@@ -366,6 +411,15 @@ export function RuleBuilderPage(): ReactElement {
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  const [dryRunVariantNumber, setDryRunVariantNumber] = useState<number>(1);
+  const [dryRunFile, setDryRunFile] = useState<File | null>(null);
+  const [dryRunIsDragActive, setDryRunIsDragActive] = useState<boolean>(false);
+  const [dryRunHtmlCode, setDryRunHtmlCode] =
+    useState<string>(DEFAULT_DRY_RUN_HTML);
+  const [dryRunResult, setDryRunResult] =
+    useState<DryRunGradingResponse | null>(null);
+  const [dryRunError, setDryRunError] = useState<string | null>(null);
 
   const {
     data: courses,
@@ -430,6 +484,14 @@ export function RuleBuilderPage(): ReactElement {
     setSearchParams({ practicalId });
     setSyncMaxScore(false);
     setFeedbackBanner(null);
+    setDryRunVariantNumber(1);
+    setDryRunFile(null);
+    setDryRunIsDragActive(false);
+    setDryRunResult(null);
+    setDryRunError(null);
+    if (dryRunFileInputRef.current !== null) {
+      dryRunFileInputRef.current.value = "";
+    }
   };
 
   const {
@@ -573,6 +635,178 @@ export function RuleBuilderPage(): ReactElement {
       });
     },
   });
+
+  // Мутація тестової (Dry-Run) перевірки чернеткових правил без запису в БД
+  const dryRunMutation = useMutation<
+    DryRunGradingResponse,
+    unknown,
+    {
+      practicalId: string;
+      format: PracticalFormat;
+      variantNumber: number;
+      rulesOverride: GradingRule[];
+      file: File | null;
+      rawCode: string;
+    }
+  >({
+    mutationFn: async ({
+      practicalId,
+      format,
+      variantNumber,
+      rulesOverride,
+      file,
+      rawCode,
+    }) => {
+      if (format === "html") {
+        const payload: HtmlDryRunRequest = {
+          raw_code: rawCode,
+          variant_number: variantNumber,
+          rules_override: rulesOverride,
+        };
+        const response = await apiClient.post<DryRunGradingResponse>(
+          `/practicals/${practicalId}/dry-run`,
+          payload
+        );
+        return response.data;
+      }
+
+      if (file === null) {
+        throw new Error("Оберіть тестовий файл для запуску перевірки.");
+      }
+
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("variant_number", String(variantNumber));
+      formData.append("rules_json", JSON.stringify(rulesOverride));
+
+      const response = await apiClient.post<DryRunGradingResponse>(
+        `/practicals/${practicalId}/dry-run`,
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
+      return response.data;
+    },
+    onSuccess: (data) => {
+      setDryRunResult(data);
+      setDryRunError(null);
+    },
+    onError: (err) => {
+      setDryRunResult(null);
+      setDryRunError(
+        extractApiErrorMessage(
+          err,
+          "Не вдалося виконати тестову перевірку правил (Dry-Run)."
+        )
+      );
+    },
+  });
+
+  const handleSelectDryRunFile = (candidate: File): void => {
+    if (activeFormat === "html") {
+      return;
+    }
+    const expectedExt = `.${activeFormat}`;
+    if (!candidate.name.toLowerCase().endsWith(expectedExt)) {
+      setDryRunFile(null);
+      setDryRunError(
+        `Невірний формат файлу «${candidate.name}». Очікується файл із розширенням ${expectedExt}.`
+      );
+      return;
+    }
+    if (candidate.size === 0) {
+      setDryRunFile(null);
+      setDryRunError(`Обраний файл «${candidate.name}» порожній (0 байтів).`);
+      return;
+    }
+    setDryRunFile(candidate);
+    setDryRunError(null);
+  };
+
+  const handleDryRunFileInputChange = (
+    event: ChangeEvent<HTMLInputElement>
+  ): void => {
+    const picked = event.target.files?.[0];
+    if (picked !== undefined) {
+      handleSelectDryRunFile(picked);
+    }
+  };
+
+  const handleDryRunDragOver = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!dryRunIsDragActive) {
+      setDryRunIsDragActive(true);
+    }
+  };
+
+  const handleDryRunDragLeave = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDryRunIsDragActive(false);
+  };
+
+  const handleDryRunDrop = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDryRunIsDragActive(false);
+    const dropped = event.dataTransfer.files?.[0];
+    if (dropped !== undefined) {
+      handleSelectDryRunFile(dropped);
+    }
+  };
+
+  const handleClearDryRunFile = (): void => {
+    setDryRunFile(null);
+    setDryRunError(null);
+    if (dryRunFileInputRef.current !== null) {
+      dryRunFileInputRef.current.value = "";
+    }
+  };
+
+  const handleRunDryRun = (): void => {
+    if (selectedPracticalId === null) {
+      return;
+    }
+    if (rulesDraft.length === 0) {
+      setDryRunError(
+        "Додайте щонайменше одне правило автоперевірки перед запуском тестування."
+      );
+      return;
+    }
+    if (activeFormat === "html" && dryRunHtmlCode.trim().length === 0) {
+      setDryRunError("Введіть HTML-код для тестової перевірки.");
+      return;
+    }
+    if (activeFormat !== "html" && dryRunFile === null) {
+      setDryRunError(
+        `Оберіть або перетягніть тестовий файл формату .${activeFormat}.`
+      );
+      return;
+    }
+
+    const normalizedRules: GradingRule[] = rulesDraft.map((rule) => ({
+      id: rule.id.trim(),
+      type: rule.type,
+      target: rule.target.trim(),
+      expected: rule.expected.trim(),
+      points: Number(rule.points),
+      description: rule.description.trim(),
+    }));
+
+    setDryRunError(null);
+    dryRunMutation.mutate({
+      practicalId: selectedPracticalId,
+      format: activeFormat,
+      variantNumber: dryRunVariantNumber,
+      rulesOverride: normalizedRules,
+      file: dryRunFile,
+      rawCode: dryRunHtmlCode,
+    });
+  };
 
   const generateNextRuleId = (prefixFormat: PracticalFormat): string => {
     const existingIds = new Set(rulesDraft.map((r) => r.id));
@@ -862,6 +1096,16 @@ export function RuleBuilderPage(): ReactElement {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {activeCatalogEntry !== null && (
+              <Link
+                to={`/teacher/courses/${activeCatalogEntry.courseId}/modules/${activeCatalogEntry.moduleId}/preview`}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+              >
+                <Eye className="h-4 w-4 text-emerald-600" />
+                <span>Очима студента</span>
+              </Link>
+            )}
+
             <Link
               to="/teacher/courses"
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
@@ -992,7 +1236,8 @@ export function RuleBuilderPage(): ReactElement {
           </p>
         </div>
       ) : (
-        <form onSubmit={handleSaveRules} className="space-y-6">
+        <div className="space-y-6">
+          <form onSubmit={handleSaveRules} className="space-y-6">
           {/* Інформаційний банер про необхідність перевірки стартових правил */}
           {practicalDetail.needs_rules_review && (
             <div
@@ -1465,6 +1710,238 @@ export function RuleBuilderPage(): ReactElement {
             </button>
           </div>
         </form>
+
+          {/* Панель тестування чернеткових або збережених правил (Dry-Run) */}
+          <section
+            className="rounded-2xl border border-indigo-200 bg-white p-5 shadow-xs sm:p-6"
+            aria-label="Протестувати правила (Dry-Run)"
+          >
+            <div className="flex flex-col justify-between gap-3 border-b border-slate-100 pb-4 sm:flex-row sm:items-center">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-600">
+                  <FlaskConical className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-base font-bold text-slate-900">
+                      Протестувати правила (Dry-Run)
+                    </h3>
+                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-800">
+                      Без запису в БД і на диск
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-slate-600">
+                    Запустіть перевірку еталонного файлу або HTML-коду за{" "}
+                    <span className="font-semibold text-slate-800">
+                      поточними правилами з форми вище
+                    </span>{" "}
+                    (навіть до натискання «Зберегти»), щоб упевнитися у
+                    коректності кожного критерію.
+                  </p>
+                </div>
+              </div>
+
+              {activeCatalogEntry !== null && (
+                <Link
+                  to={`/teacher/courses/${activeCatalogEntry.courseId}/modules/${activeCatalogEntry.moduleId}/preview`}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  <Eye className="h-3.5 w-3.5 text-indigo-600" />
+                  <span>Відкрити інтерактивний preview</span>
+                </Link>
+              )}
+            </div>
+
+            <div className="mt-4 space-y-4">
+              {practicalDetail.variants.length > 1 && (
+                <div className="max-w-md">
+                  <label
+                    htmlFor="dry-run-variant-select"
+                    className="block text-xs font-semibold text-slate-700"
+                  >
+                    Номер індивідуального варіанта для підстановки плейсхолдерів
+                  </label>
+                  <select
+                    id="dry-run-variant-select"
+                    value={dryRunVariantNumber}
+                    onChange={(event) => {
+                      setDryRunVariantNumber(Number(event.target.value) || 1);
+                      setDryRunResult(null);
+                    }}
+                    className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-900 focus:border-indigo-500 focus:bg-white focus:outline-none"
+                  >
+                    {practicalDetail.variants.map((variant, idx) => {
+                      const num = idx + 1;
+                      return (
+                        <option key={num} value={num}>
+                          Варіант №{num} — {variant.title}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              )}
+
+              {activeFormat === "html" ? (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label
+                      htmlFor="dry-run-html-textarea"
+                      className="text-xs font-semibold text-slate-700"
+                    >
+                      Тестовий HTML5-код для перевірки (BeautifulSoup4)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setDryRunHtmlCode(DEFAULT_DRY_RUN_HTML)}
+                      className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800"
+                    >
+                      Відновити базовий шаблон
+                    </button>
+                  </div>
+                  <textarea
+                    id="dry-run-html-textarea"
+                    rows={8}
+                    value={dryRunHtmlCode}
+                    onChange={(event) => setDryRunHtmlCode(event.target.value)}
+                    placeholder="<!DOCTYPE html><html lang='uk'>...</html>"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-900 p-3.5 font-mono text-xs leading-relaxed text-emerald-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <input
+                    ref={dryRunFileInputRef}
+                    id={`dry-run-file-${practicalDetail.id}`}
+                    type="file"
+                    accept={DRY_RUN_FILE_ACCEPT[activeFormat]}
+                    onChange={handleDryRunFileInputChange}
+                    className="sr-only"
+                  />
+
+                  <div
+                    onDragOver={handleDryRunDragOver}
+                    onDragLeave={handleDryRunDragLeave}
+                    onDrop={handleDryRunDrop}
+                    className={`flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-5 text-center transition-colors ${
+                      dryRunIsDragActive
+                        ? "border-indigo-500 bg-indigo-50/70"
+                        : dryRunFile !== null
+                          ? "border-emerald-300 bg-emerald-50/40"
+                          : "border-slate-300 bg-slate-50/60 hover:border-indigo-400"
+                    }`}
+                  >
+                    {dryRunFile === null ? (
+                      <>
+                        <UploadCloud className="h-7 w-7 text-indigo-600" />
+                        <p className="mt-2 text-xs font-bold text-slate-900">
+                          Перетягніть тестовий файл{" "}
+                          <span className="font-mono text-indigo-700">
+                            .{activeFormat}
+                          </span>{" "}
+                          сюди або оберіть із комп&apos;ютера
+                        </p>
+                        <label
+                          htmlFor={`dry-run-file-${practicalDetail.id}`}
+                          className="mt-3 inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-800 hover:border-indigo-400 hover:bg-indigo-50"
+                        >
+                          <UploadCloud className="h-3.5 w-3.5 text-indigo-600" />
+                          <span>Обрати файл .{activeFormat}</span>
+                        </label>
+                      </>
+                    ) : (
+                      <div className="flex w-full max-w-xl flex-col items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-white p-3.5 text-left sm:flex-row">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                            <FileCheck2 className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-bold text-slate-900">
+                              {dryRunFile.name}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              Розмір: {formatFileSizeCompact(dryRunFile.size)} •
+                              Формат: .{activeFormat}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <label
+                            htmlFor={`dry-run-file-${practicalDetail.id}`}
+                            className="cursor-pointer rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          >
+                            Замінити
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleClearDryRunFile}
+                            disabled={dryRunMutation.isPending}
+                            className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>Очистити</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {dryRunError !== null && (
+                <div
+                  className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs font-medium text-rose-800"
+                  role="alert"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                  <span>{dryRunError}</span>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-[11px] text-slate-500">
+                  У тестову перевірку передаються поточні{" "}
+                  <span className="font-semibold text-slate-700">
+                    {rulesDraft.length} правил(о)
+                  </span>{" "}
+                  із форми редактора (варіант №{dryRunVariantNumber}).
+                </p>
+                <button
+                  type="button"
+                  onClick={handleRunDryRun}
+                  disabled={
+                    dryRunMutation.isPending ||
+                    rulesDraft.length === 0 ||
+                    (activeFormat !== "html" && dryRunFile === null) ||
+                    (activeFormat === "html" &&
+                      dryRunHtmlCode.trim().length === 0)
+                  }
+                  className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white shadow-2xs transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {dryRunMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span>Виконується перевірка...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="h-4 w-4" />
+                      <span>Запустити тестову перевірку</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {dryRunResult !== null && (
+                <DryRunResultPanel
+                  result={dryRunResult}
+                  isDraftRules
+                  onClear={() => setDryRunResult(null)}
+                />
+              )}
+            </div>
+          </section>
+        </div>
       )}
     </div>
   );

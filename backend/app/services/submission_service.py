@@ -1,4 +1,5 @@
 import re
+import tempfile
 import uuid
 from collections.abc import Iterable, Sequence
 from collections.abc import Set as AbstractSet
@@ -29,6 +30,7 @@ from app.graders.metadata import (
     check_submission_plagiarism,
     compute_submission_hash,
     extract_document_metadata,
+    validate_zip_archive_safety,
 )
 from app.models.course import CourseSlug, Module, Practical, PracticalFormat
 from app.models.progress import Submission
@@ -47,6 +49,7 @@ from app.schemas.grading import (
 )
 from app.schemas.submission import (
     MAX_HTML_CODE_LENGTH,
+    DryRunGradingResponse,
     ManualGradeUpdateRequest,
     SubmissionRead,
 )
@@ -277,6 +280,34 @@ def _save_uploaded_file(
 def _unlink_file_quietly(path: Path) -> None:
     """Видаляє файл із диска без помилки, якщо він уже відсутній."""
     path.unlink(missing_ok=True)
+
+
+def _evaluate_dry_run_binary_file(
+    *,
+    format_type: PracticalFormat,
+    file_bytes: bytes,
+    expected_suffix: str,
+    rules: list[GradingRule],
+    variant_data: dict[str, object],
+) -> tuple[ExtractedMetadata, GradingReport]:
+    """Виконує dry-run перевірку бінарного файлу в ізольованій тимчасовій теці без UPLOADS_DIR."""
+    if format_type in (PracticalFormat.DOCX, PracticalFormat.XLSX):
+        validate_zip_archive_safety(file_bytes)
+
+    tmp_dir = tempfile.TemporaryDirectory(prefix="edu_dry_run_")
+    try:
+        tmp_path = Path(tmp_dir.name) / f"dry_run{expected_suffix}"
+        tmp_path.write_bytes(file_bytes)
+        extracted_metadata = extract_document_metadata(tmp_path)
+        grader = GraderFactory.get_grader(format_type)
+        report = grader.evaluate(
+            file_path=tmp_path,
+            rules=rules,
+            variant_data=variant_data,
+        )
+        return extracted_metadata, report
+    finally:
+        tmp_dir.cleanup()
 
 
 def _is_submission_file_available(
@@ -790,25 +821,17 @@ class SubmissionService:
             existing_file_paths=existing_file_paths,
         )
 
-    async def update_grading_rules(
+    def _validate_grading_rules_for_practical(
         self,
-        *,
-        practical_id: uuid.UUID,
-        payload: GradingRulesUpdateRequest,
-        requester: User,
-    ) -> PracticalTeacherRead:
-        """Оновлює JSONB-правила автоперевірки практичної роботи з валідацією сумісності."""
-        practical = await self._load_practical_or_404(practical_id)
-        ensure_course_owner_or_admin(
-            practical.module.course,
-            requester,
-            context={"practical_id": str(practical_id)},
-        )
+        practical: Practical,
+        rules: Sequence[GradingRule],
+    ) -> None:
+        """Перевіряє унікальність ID, сумісність типів правил і синтаксис парсера."""
         expected_prefix = f"{practical.format_type.value}_"
         grader = GraderFactory.get_grader(practical.format_type)
 
         seen_rule_ids: set[str] = set()
-        for rule in payload.grading_rules:
+        for rule in rules:
             if rule.id in seen_rule_ids:
                 raise DomainError(
                     f"Дублікат ідентифікатора правила автоперевірки: '{rule.id}'.",
@@ -848,6 +871,175 @@ class SubmissionService:
                     status_code=422,
                     context=context,
                 ) from exc
+
+    async def get_practical_for_dry_run(
+        self,
+        *,
+        practical_id: uuid.UUID,
+        requester: User,
+    ) -> Practical:
+        """Завантажує практичну для dry-run і перевіряє права власника курсу або адміністратора."""
+        practical = await self._load_practical_or_404(practical_id)
+        ensure_course_owner_or_admin(
+            practical.module.course,
+            requester,
+            context={"practical_id": str(practical_id)},
+        )
+        return practical
+
+    async def dry_run_practical(
+        self,
+        *,
+        requester: User,
+        practical_id: uuid.UUID,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        raw_code: str | None = None,
+        variant_number: int = 1,
+        rules_override: Sequence[GradingRule] | None = None,
+        payload_error: DomainError | None = None,
+        loaded_practical: Practical | None = None,
+    ) -> DryRunGradingResponse:
+        """Виконує тестову (dry-run) перевірку правил без запису в БД і без збереження на диск."""
+        practical = (
+            loaded_practical
+            if loaded_practical is not None
+            else await self.get_practical_for_dry_run(
+                practical_id=practical_id,
+                requester=requester,
+            )
+        )
+
+        if payload_error is not None:
+            raise payload_error
+
+        total_variants = max(1, len(practical.variants))
+        if variant_number < 1 or variant_number > total_variants:
+            raise DomainError(
+                f"Номер варіанта ({variant_number}) має бути в межах від 1 до {total_variants}.",
+                code="INVALID_VARIANT_NUMBER",
+                status_code=422,
+                context={
+                    "practical_id": str(practical.id),
+                    "variant_number": variant_number,
+                    "total_variants": total_variants,
+                },
+            )
+
+        if rules_override is not None:
+            if len(rules_override) == 0:
+                raise DomainError(
+                    "Список чернеткових правил автоперевірки не може бути порожнім.",
+                    code="EMPTY_GRADING_RULES",
+                    status_code=422,
+                    context={"practical_id": str(practical.id)},
+                )
+            self._validate_grading_rules_for_practical(practical, rules_override)
+            effective_rules = list(rules_override)
+        else:
+            effective_rules = [
+                GradingRule.model_validate(item) for item in practical.grading_rules
+            ]
+
+        _, resolved_variant_number, variant = resolve_student_variant(
+            practical=practical,
+            list_number=variant_number,
+        )
+        variant_data: dict[str, object] = {
+            **variant.model_dump(mode="python"),
+            **variant.parameters,
+        }
+
+        if practical.format_type == PracticalFormat.HTML:
+            _, _, extracted_metadata, report = await self._evaluate_html_submission(
+                format_type=practical.format_type,
+                rules=effective_rules,
+                variant_data=variant_data,
+                raw_code=raw_code,
+                file_bytes=file_bytes,
+                filename=filename,
+            )
+        else:
+            if file_bytes is None:
+                raise InvalidFileFormatError(
+                    f"Для практичної роботи формату '.{practical.format_type.value}' "
+                    "необхідно завантажити файл.",
+                    context={"expected_format": practical.format_type.value},
+                )
+
+            safe_filename = (filename or "").strip()
+            expected_suffix = f".{practical.format_type.value}"
+            actual_suffix = Path(safe_filename).suffix.lower()
+            if actual_suffix != expected_suffix:
+                raise InvalidFileFormatError(
+                    f"Непідтримуване розширення файлу '{actual_suffix or 'невідоме'}'. "
+                    f"Очікується '{expected_suffix}'.",
+                    context={
+                        "expected_suffix": expected_suffix,
+                        "actual_suffix": actual_suffix,
+                        "file_name": safe_filename,
+                    },
+                )
+
+            if len(file_bytes) == 0:
+                raise InvalidFileFormatError(
+                    f"Завантажений файл '{safe_filename}' порожній.",
+                    context={
+                        "expected_suffix": expected_suffix,
+                        "file_name": safe_filename,
+                    },
+                )
+
+            extracted_metadata, report = await run_in_threadpool(
+                _evaluate_dry_run_binary_file,
+                format_type=practical.format_type,
+                file_bytes=file_bytes,
+                expected_suffix=expected_suffix,
+                rules=effective_rules,
+                variant_data=variant_data,
+            )
+
+        max_score_dec = Decimal(str(practical.max_score)).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        raw_auto_score = Decimal(str(report.total_points)).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        auto_score = min(raw_auto_score, max_score_dec)
+        auto_max_dec, manual_bonus_dec = calculate_practical_score_breakdown(
+            max_score_dec,
+            [rule.points for rule in effective_rules],
+        )
+
+        return DryRunGradingResponse(
+            practical_id=practical.id,
+            format_type=practical.format_type,
+            variant_number=resolved_variant_number,
+            auto_score=auto_score,
+            auto_max_score=auto_max_dec,
+            max_score=max_score_dec,
+            manual_bonus_max=manual_bonus_dec,
+            grading_report=report,
+            extracted_metadata=extracted_metadata,
+        )
+
+    async def update_grading_rules(
+        self,
+        *,
+        practical_id: uuid.UUID,
+        payload: GradingRulesUpdateRequest,
+        requester: User,
+    ) -> PracticalTeacherRead:
+        """Оновлює JSONB-правила автоперевірки практичної роботи з валідацією сумісності."""
+        practical = await self._load_practical_or_404(practical_id)
+        ensure_course_owner_or_admin(
+            practical.module.course,
+            requester,
+            context={"practical_id": str(practical_id)},
+        )
+        self._validate_grading_rules_for_practical(practical, payload.grading_rules)
 
         total_points = sum(rule.points for rule in payload.grading_rules)
         practical.grading_rules = [

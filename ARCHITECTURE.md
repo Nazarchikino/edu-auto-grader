@@ -247,7 +247,7 @@ class BaseGrader(ABC):
 | `GET` | `/courses/{course_id}` | All Auth | Детальна інформація про курс та список його модулів із прогресом |
 | `POST` | `/courses` | Teacher / Admin | Створення навчального курсу (у межах 4 фіксованих дисциплін `word`/`excel`/`access`/`html`) |
 | `PATCH` | `/courses/{course_id}` | Teacher (owner) / Admin | Оновлення назви, опису або (лише для `admin`) викладача курсу |
-| `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції, питань тесту-допуску, cooldown і статусу доступу до практичної |
+| `GET` | `/modules/{module_id}` | All Auth | Отримання тексту лекції, питань тесту-допуску, cooldown і статусу доступу до практичної (опційно `?preview_variant=K` для перегляду модуля очима студента викладачем-власником або адміністратором) |
 | `POST` | `/courses/{course_id}/modules` | Teacher (owner) / Admin | Створення нового навчального модуля з лекцією |
 | `PATCH` | `/modules/{module_id}` | Teacher (owner) / Admin | Оновлення заголовка, порядкового номера або лекції модуля |
 | `DELETE` | `/modules/{module_id}` | Teacher (owner) / Admin | Видалення модуля курсу (каскадно з тестами, практичною та здачами), перенумерація тем `1..N` і безпечне видалення файлів здач із диска |
@@ -261,6 +261,7 @@ class BaseGrader(ABC):
 | `PATCH` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Часткове оновлення параметрів, варіантів, правил або `needs_rules_review` |
 | `DELETE` | `/practicals/{practical_id}` | Teacher (owner) / Admin | Видалення практичної роботи та її здач (зі збереженням модуля, лекції й тесту) і безпечне видалення файлів здач із диска |
 | `POST` | `/practicals/{practical_id}/submit` | Student | Завантаження файлу (`multipart/form-data`) або HTML-коду (`JSON`) та миттєва автоперевірка з антиплагіатом |
+| `POST` | `/practicals/{practical_id}/dry-run` | Teacher (owner) / Admin | Тестова (dry-run) перевірка файлу або HTML-коду за збереженими чи чернетковими правилами (`rules_json`/`rules_override`) без запису в БД і збереження файлів на диск |
 | `PUT` | `/practicals/{practical_id}/rules` | Teacher (owner) / Admin | Валідація та оновлення JSONB правил автоперевірки (опційно `sync_max_score`) |
 | `GET` | `/submissions/me` | All Auth | Історія здач практичних робіт поточного користувача (електронна заліковка) |
 | `GET` | `/submissions` | All Auth | Перелік здач із фільтрацією за `practical_id`, `student_id`, `group_id`, `plagiarism_only` |

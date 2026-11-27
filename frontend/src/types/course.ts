@@ -80,6 +80,7 @@ export interface PracticalSummaryRead {
   id: string;
   module_id: string;
   title: string;
+  instructions?: string | null;
   format_type: PracticalFormat;
   max_score: number;
   auto_max_score: number;
@@ -87,6 +88,9 @@ export interface PracticalSummaryRead {
   is_unlocked: boolean;
   best_score: number | null;
   needs_rules_review: boolean;
+  assigned_variant_number: number;
+  total_variants: number;
+  variant?: PracticalVariant | null;
   grading_criteria: GradingCriterionPreviewRead[];
 }
 
@@ -102,6 +106,7 @@ export interface PracticalStudentRead {
   needs_rules_review: boolean;
   variant_index: number;
   variant_number: number;
+  total_variants: number;
   variant: PracticalVariant;
   grading_criteria: GradingCriterionPreviewRead[];
 }

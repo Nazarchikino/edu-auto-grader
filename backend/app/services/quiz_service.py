@@ -425,6 +425,7 @@ class QuizService:
             practical=practical,
             list_number=student.list_number,
         )
+        total_variants = max(1, len(practical.variants))
 
         return PracticalStudentRead(
             id=practical.id,
@@ -436,6 +437,7 @@ class QuizService:
             needs_rules_review=practical.needs_rules_review,
             variant_index=variant_index,
             variant_number=variant_number,
+            total_variants=total_variants,
             variant=variant,
             grading_criteria=build_student_grading_criteria(practical, variant),
         )

@@ -150,6 +150,7 @@ class PracticalSummaryRead(BaseModel):
     id: uuid.UUID
     module_id: uuid.UUID
     title: str
+    instructions: str | None = None
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
     auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
@@ -157,6 +158,9 @@ class PracticalSummaryRead(BaseModel):
     is_unlocked: bool = False
     best_score: float | None = None
     needs_rules_review: bool = False
+    assigned_variant_number: int = Field(default=1, ge=1)
+    total_variants: int = Field(default=1, ge=1)
+    variant: PracticalVariant | None = None
     grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -190,6 +194,7 @@ class PracticalStudentRead(BaseModel):
     needs_rules_review: bool = False
     variant_index: int = Field(..., ge=0)
     variant_number: int = Field(..., ge=1)
+    total_variants: int = Field(default=1, ge=1)
     variant: PracticalVariant
     grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
 

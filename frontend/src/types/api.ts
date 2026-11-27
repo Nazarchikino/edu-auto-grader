@@ -1,5 +1,10 @@
 import type { CourseSlug } from "./course";
-import type { ExtractedMetadata, GradingReport } from "./grading";
+import type {
+  ExtractedMetadata,
+  GradingReport,
+  GradingRule,
+  PracticalFormat,
+} from "./grading";
 
 export {
   type GradingCriterionPreviewRead,
@@ -154,6 +159,24 @@ export interface StudentImportResponse {
 
 export interface HtmlSubmissionRequest {
   raw_code: string;
+}
+
+export interface HtmlDryRunRequest {
+  raw_code: string;
+  variant_number?: number;
+  rules_override?: GradingRule[] | null;
+}
+
+export interface DryRunGradingResponse {
+  practical_id: string;
+  format_type: PracticalFormat;
+  variant_number: number;
+  auto_score: number;
+  auto_max_score: number;
+  max_score: number;
+  manual_bonus_max: number;
+  grading_report: GradingReport;
+  extracted_metadata: ExtractedMetadata;
 }
 
 export interface ManualGradeUpdateRequest {
