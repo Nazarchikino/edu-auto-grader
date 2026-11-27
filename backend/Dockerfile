@@ -23,8 +23,8 @@ COPY app ./app
 COPY content ./content
 
 RUN pip install --no-cache-dir -e . \
-    && mkdir -p /app/uploads \
-    && chown -R appuser:appuser /app/uploads
+    && mkdir -p /app/uploads /app/content/media \
+    && chown -R appuser:appuser /app/uploads /app/content/media
 
 USER appuser
 

@@ -1,11 +1,12 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
-from app.models.course import CourseSlug
-from app.schemas.grading import ExtractedMetadata, GradingReport
+from app.models.course import CourseSlug, PracticalFormat
+from app.schemas.grading import ExtractedMetadata, GradingReport, GradingRule
 
 MAX_HTML_CODE_LENGTH: int = 250_000
 
@@ -28,6 +29,59 @@ class HtmlSubmissionRequest(BaseModel):
         max_length=MAX_HTML_CODE_LENGTH,
         description="Вихідний HTML5-код, написаний студентом у редакторі",
     )
+
+
+class HtmlDryRunRequest(BaseModel):
+    """Запит викладача на тестову (dry-run) перевірку HTML-коду без запису в БД."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_HTML_CODE_LENGTH,
+        description="Вихідний HTML5-код для тестової перевірки правил",
+    )
+    variant_number: int = Field(
+        default=1,
+        ge=1,
+        description="Номер індивідуального варіанта (1..N) для підстановки параметрів",
+    )
+    rules_override: list[GradingRule] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Опційний список чернеткових правил перевірки, "
+            "які застосовуються замість збережених без зміни БД"
+        ),
+    )
+
+
+class DryRunGradingResponse(BaseModel):
+    """Результат безпечної тестової (dry-run) перевірки практичної роботи без побічних ефектів."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    practical_id: uuid.UUID
+    format_type: PracticalFormat
+    variant_number: int = Field(..., ge=1)
+    auto_score: Decimal = Field(..., ge=Decimal("0"))
+    auto_max_score: Decimal = Field(..., ge=Decimal("0"))
+    max_score: Decimal = Field(..., gt=Decimal("0"))
+    manual_bonus_max: Decimal = Field(..., ge=Decimal("0"))
+    grading_report: GradingReport
+    extracted_metadata: ExtractedMetadata = Field(default_factory=ExtractedMetadata)
+
+    @field_serializer(
+        "auto_score",
+        "auto_max_score",
+        "max_score",
+        "manual_bonus_max",
+        when_used="json",
+    )
+    def _serialize_scores(self, value: Decimal) -> float:
+        """Серіалізує бали як JSON-числа для узгодженості з іншими API-контрактами."""
+        return round(float(value), 2)
 
 
 class ManualGradeUpdateRequest(BaseModel):

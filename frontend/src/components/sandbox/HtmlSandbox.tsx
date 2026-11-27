@@ -34,6 +34,8 @@ export interface HtmlSandboxProps {
   userId?: string | null;
   isSubmitting: boolean;
   onSubmitCode: (rawCode: string) => void;
+  submitButtonLabel?: string;
+  submittingLabel?: string;
 }
 
 type SandboxViewMode = "split" | "editor" | "preview";
@@ -188,6 +190,8 @@ export function HtmlSandbox({
   userId,
   isSubmitting,
   onSubmitCode,
+  submitButtonLabel = "Надіслати на перевірку",
+  submittingLabel = "Автоперевірка HTML-коду...",
 }: HtmlSandboxProps): ReactElement {
   const { user } = useAuth();
   const starterTemplate = useMemo(() => buildStarterHtmlTemplate(), []);
@@ -656,12 +660,12 @@ export function HtmlSandbox({
           {isSubmitting ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Автоперевірка HTML-коду...</span>
+              <span>{submittingLabel}</span>
             </>
           ) : (
             <>
               <Send className="h-4 w-4" />
-              <span>Надіслати на перевірку</span>
+              <span>{submitButtonLabel}</span>
             </>
           )}
         </button>

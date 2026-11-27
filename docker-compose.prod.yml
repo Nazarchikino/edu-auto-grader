@@ -36,6 +36,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
       UPLOADS_DIR: /app/uploads
+      COURSE_MEDIA_DIR: /app/content/media
       SUBMISSION_FILE_RETENTION_DAYS: ${SUBMISSION_FILE_RETENTION_DAYS:-90}
       SUBMISSION_SUPERSEDED_GRACE_HOURS: ${SUBMISSION_SUPERSEDED_GRACE_HOURS:-24}
       ENABLE_RETENTION_CLEANUP_TASK: ${ENABLE_RETENTION_CLEANUP_TASK:-true}
@@ -44,6 +45,10 @@ services:
       FORWARDED_ALLOW_IPS: "*"
     volumes:
       - uploads_data_prod:/app/uploads
+      # Каталог /app/content/media належить appuser і доступний на запис для завантаження
+      # ілюстрацій лекцій (/media/courses/{slug}/uploads/). Для збереження завантажених
+      # викладачами зображень між перезбірками контейнера можна додатково змонтувати volume
+      # на /app/content/media або окремо на підкаталоги uploads.
     depends_on:
       db:
         condition: service_healthy

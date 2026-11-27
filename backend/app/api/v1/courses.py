@@ -1,13 +1,15 @@
 import uuid
 from collections.abc import Sequence
 from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
     ensure_course_owner_or_admin,
@@ -17,6 +19,7 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.core.exceptions import DomainError
+from app.core.upload_utils import read_upload_file_limited
 from app.models.course import (
     ALLOWED_COURSE_SLUGS,
     MAX_COURSES_COUNT,
@@ -29,10 +32,12 @@ from app.models.progress import QuizAttempt, Submission
 from app.models.user import User, UserRole
 from app.schemas.course import (
     CourseCreate,
+    CourseMediaUploadRead,
     CourseRead,
     CourseUpdate,
     ModuleCreate,
     ModuleDetailRead,
+    ModuleReorderRequest,
     ModuleSummaryRead,
     ModuleUpdate,
     PracticalCreate,
@@ -44,6 +49,7 @@ from app.schemas.course import (
     QuizQuestionCreate,
     QuizQuestionRead,
     QuizQuestionTeacherRead,
+    QuizQuestionUpdate,
     QuizSubmitRequest,
     QuizSubmitResponse,
 )
@@ -65,6 +71,58 @@ StudentUser = Annotated[
     User,
     Depends(require_role(UserRole.STUDENT)),
 ]
+
+ALLOWED_COURSE_MEDIA_EXTENSIONS: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+)
+
+
+def _matches_raster_image_magic_bytes(suffix: str, file_bytes: bytes) -> bool:
+    """Перевіряє реальну сигнатуру (magic bytes) растрового зображення."""
+    if suffix == ".png":
+        return file_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return file_bytes.startswith(b"\xff\xd8\xff")
+    if suffix == ".gif":
+        return file_bytes.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".webp":
+        return (
+            len(file_bytes) >= 12
+            and file_bytes[:4] == b"RIFF"
+            and file_bytes[8:12] == b"WEBP"
+        )
+    return False
+
+
+def _save_course_media_file(
+    *,
+    media_dir: Path,
+    course_slug: str,
+    ext_no_dot: str,
+    file_bytes: bytes,
+) -> tuple[str, Path]:
+    """Безпечно записує ілюстрацію у `COURSE_MEDIA_DIR/<slug>/uploads/` (для threadpool)."""
+    media_root = media_dir.resolve()
+    target_dir = (media_root / course_slug / "uploads").resolve()
+    if target_dir == media_root or not target_dir.is_relative_to(media_root):
+        raise DomainError(
+            "Небезпечний шлях каталогу медіафайлів курсу.",
+            code="UNSAFE_MEDIA_PATH",
+            status_code=422,
+        )
+
+    filename = f"{uuid.uuid4().hex}.{ext_no_dot}"
+    saved_path = (target_dir / filename).resolve()
+    if saved_path.parent != target_dir or not saved_path.is_relative_to(media_root):
+        raise DomainError(
+            "Небезпечний шлях файлу ілюстрації.",
+            code="UNSAFE_MEDIA_PATH",
+            status_code=422,
+        )
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved_path.write_bytes(file_bytes)
+    return filename, saved_path
 
 
 async def _fetch_user_progress_maps(
@@ -266,6 +324,8 @@ async def _build_module_detail_read(
     db: AsyncSession,
     module: Module,
     current_user: User,
+    *,
+    preview_variant: int | None = None,
 ) -> ModuleDetailRead:
     """Формує детальне представлення модуля з лекцією, тестом та статусом практичної."""
     questions_stmt = (
@@ -276,44 +336,63 @@ async def _build_module_detail_read(
     questions_result = await db.execute(questions_stmt)
     ordered_questions = list(questions_result.scalars().all())
 
-    quiz_service = QuizService(db)
+    is_teacher_preview = current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
     has_questions = len(ordered_questions) > 0
-    quiz_passed, best_quiz_score = await quiz_service.get_module_quiz_status(
-        student_id=current_user.id,
-        module_id=module.id,
-        has_questions=has_questions,
-    )
-    quiz_cooldown_remaining_seconds = 0
-    if current_user.role == UserRole.STUDENT and has_questions and not quiz_passed:
-        quiz_cooldown_remaining_seconds = (
-            await quiz_service.get_quiz_cooldown_remaining_seconds(
-                student_id=current_user.id,
-                module_id=module.id,
-                quiz_passed=quiz_passed,
-            )
+
+    if is_teacher_preview:
+        quiz_passed = True
+        best_quiz_score: float | None = None
+        quiz_cooldown_remaining_seconds = 0
+        practical_unlocked = True
+    else:
+        quiz_service = QuizService(db)
+        quiz_passed, best_quiz_score = await quiz_service.get_module_quiz_status(
+            student_id=current_user.id,
+            module_id=module.id,
+            has_questions=has_questions,
         )
-    practical_unlocked = quiz_passed or current_user.role in (
-        UserRole.TEACHER,
-        UserRole.ADMIN,
-    )
+        quiz_cooldown_remaining_seconds = 0
+        if has_questions and not quiz_passed:
+            quiz_cooldown_remaining_seconds = (
+                await quiz_service.get_quiz_cooldown_remaining_seconds(
+                    student_id=current_user.id,
+                    module_id=module.id,
+                    quiz_passed=quiz_passed,
+                )
+            )
+        practical_unlocked = quiz_passed
 
     practical_summary: PracticalSummaryRead | None = None
     if module.practical is not None:
-        best_sub_stmt = select(func.max(Submission.final_score)).where(
-            Submission.student_id == current_user.id,
-            Submission.practical_id == module.practical.id,
-        )
-        best_sub_result = await db.execute(best_sub_stmt)
-        max_sub_score: Decimal | None = best_sub_result.scalar_one_or_none()
+        max_sub_score: Decimal | None = None
+        if not is_teacher_preview:
+            best_sub_stmt = select(func.max(Submission.final_score)).where(
+                Submission.student_id == current_user.id,
+                Submission.practical_id == module.practical.id,
+            )
+            best_sub_result = await db.execute(best_sub_stmt)
+            max_sub_score = best_sub_result.scalar_one_or_none()
 
-        _, _, resolved_variant = resolve_student_variant(
-            practical=module.practical,
-            list_number=current_user.list_number,
-        )
+        total_variants = max(1, len(module.practical.variants))
+        if is_teacher_preview:
+            clamped_variant = max(1, min(preview_variant or 1, total_variants))
+            _, assigned_variant_number, resolved_variant = resolve_student_variant(
+                practical=module.practical,
+                list_number=clamped_variant,
+            )
+        else:
+            _, assigned_variant_number, resolved_variant = resolve_student_variant(
+                practical=module.practical,
+                list_number=current_user.list_number,
+            )
+
         practical_summary = PracticalSummaryRead(
             id=module.practical.id,
             module_id=module.id,
             title=module.practical.title,
+            instructions=(
+                module.practical.instructions if practical_unlocked else None
+            ),
             format_type=module.practical.format_type,
             max_score=float(module.practical.max_score),
             is_unlocked=practical_unlocked,
@@ -321,6 +400,15 @@ async def _build_module_detail_read(
                 round(float(max_sub_score), 2) if max_sub_score is not None else None
             ),
             needs_rules_review=module.practical.needs_rules_review,
+            has_template_file=bool(module.practical.template_file_path),
+            template_file_name=(
+                module.practical.template_file_name
+                if module.practical.template_file_path
+                else None
+            ),
+            assigned_variant_number=assigned_variant_number,
+            total_variants=total_variants,
+            variant=resolved_variant if practical_unlocked else None,
             grading_criteria=build_student_grading_criteria(
                 module.practical,
                 resolved_variant,
@@ -386,6 +474,10 @@ def _serialize_practical_teacher(practical: Practical) -> PracticalTeacherRead:
         format_type=practical.format_type,
         max_score=float(practical.max_score),
         needs_rules_review=practical.needs_rules_review,
+        has_template_file=bool(practical.template_file_path),
+        template_file_name=(
+            practical.template_file_name if practical.template_file_path else None
+        ),
         variants=variants,
         grading_rules=grading_rules,
     )
@@ -560,10 +652,27 @@ async def get_module(
     module_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    preview_variant: Annotated[int | None, Query(ge=1)] = None,
 ) -> ModuleDetailRead:
     """Повертає текст лекції, питання тесту-допуску та статус доступу до практичної."""
     module = await _load_module_or_404(db, module_id)
-    return await _build_module_detail_read(db, module, current_user)
+    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        ensure_course_owner_or_admin(
+            module.course,
+            current_user,
+            context={"module_id": str(module_id)},
+        )
+    effective_preview_variant = (
+        preview_variant
+        if current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
+        else None
+    )
+    return await _build_module_detail_read(
+        db,
+        module,
+        current_user,
+        preview_variant=effective_preview_variant,
+    )
 
 
 @router.post(
@@ -605,6 +714,141 @@ async def create_module(
 
     loaded_module = await _load_module_or_404(db, module.id)
     return await _build_module_detail_read(db, loaded_module, current_user)
+
+
+@router.put(
+    "/courses/{course_id}/modules/reorder",
+    response_model=list[ModuleSummaryRead],
+)
+async def reorder_course_modules(
+    course_id: uuid.UUID,
+    payload: ModuleReorderRequest,
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ModuleSummaryRead]:
+    """Змінює порядок модулів курсу у 2 кроки в одній транзакції без конфлікту унікальності."""
+    course = await _load_course_or_404(db, course_id)
+    ensure_course_owner_or_admin(course, current_user)
+
+    modules_by_id: dict[uuid.UUID, Module] = {
+        module.id: module for module in course.modules
+    }
+    if len(payload.module_ids) != len(set(payload.module_ids)):
+        raise DomainError(
+            "Список module_ids містить дублікати ідентифікаторів модулів.",
+            code="DUPLICATE_MODULE_IDS",
+            status_code=422,
+            context={"course_id": str(course_id)},
+        )
+
+    if set(payload.module_ids) != set(modules_by_id.keys()):
+        raise DomainError(
+            "Список module_ids має містити рівно всі модулі цього курсу "
+            "без пропусків і сторонніх ідентифікаторів.",
+            code="INVALID_MODULE_REORDER_SET",
+            status_code=422,
+            context={
+                "course_id": str(course_id),
+                "expected_count": len(modules_by_id),
+                "received_count": len(payload.module_ids),
+            },
+        )
+
+    if payload.module_ids:
+        for idx, mod_id in enumerate(payload.module_ids):
+            modules_by_id[mod_id].order_index = -(idx + 1)
+        await db.flush()
+
+        for idx, mod_id in enumerate(payload.module_ids, start=1):
+            modules_by_id[mod_id].order_index = idx
+        await db.flush()
+
+        await db.commit()
+
+    refreshed_course = await _load_course_or_404(db, course_id)
+    passed_by_module, best_quiz_by_module, best_practical_by_id = (
+        await _fetch_user_progress_maps(db, current_user.id)
+    )
+    serialized = _serialize_course(
+        refreshed_course,
+        passed_by_module=passed_by_module,
+        best_quiz_by_module=best_quiz_by_module,
+        best_practical_by_id=best_practical_by_id,
+    )
+    return serialized.modules
+
+
+@router.post(
+    "/courses/{course_id}/media",
+    response_model=CourseMediaUploadRead,
+    status_code=status.HTTP_200_OK,
+)
+async def upload_course_media(
+    course_id: uuid.UUID,
+    file: Annotated[UploadFile, File(...)],
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseMediaUploadRead:
+    """Безпечно завантажує растрову ілюстрацію лекції (PNG/JPEG/WebP/GIF, до 5 МБ)."""
+    course = await _load_course_or_404(db, course_id)
+    ensure_course_owner_or_admin(course, current_user)
+
+    safe_filename = (file.filename or "").strip()
+    actual_suffix = Path(safe_filename).suffix.lower()
+    if actual_suffix not in ALLOWED_COURSE_MEDIA_EXTENSIONS:
+        raise DomainError(
+            f"Непідтримуваний формат зображення '{actual_suffix or 'невідомий'}'. "
+            "Дозволено лише растрові формати: .png, .jpg, .jpeg, .webp, .gif "
+            "(SVG/HTML/XML/JS заборонено з міркувань безпеки).",
+            code="UNSUPPORTED_MEDIA_FORMAT",
+            status_code=422,
+            context={
+                "course_id": str(course_id),
+                "file_name": safe_filename,
+                "actual_suffix": actual_suffix,
+            },
+        )
+
+    file_bytes = await read_upload_file_limited(
+        file,
+        max_bytes=settings.MAX_COURSE_MEDIA_UPLOAD_BYTES,
+    )
+    if len(file_bytes) == 0:
+        raise DomainError(
+            "Завантажений файл зображення порожній.",
+            code="EMPTY_MEDIA_FILE",
+            status_code=422,
+            context={"course_id": str(course_id), "file_name": safe_filename},
+        )
+
+    if not _matches_raster_image_magic_bytes(actual_suffix, file_bytes):
+        raise DomainError(
+            f"Вміст файлу '{safe_filename}' не відповідає формату '{actual_suffix}' "
+            "(невалідна сигнатура зображення).",
+            code="INVALID_IMAGE_MAGIC_BYTES",
+            status_code=422,
+            context={
+                "course_id": str(course_id),
+                "file_name": safe_filename,
+                "actual_suffix": actual_suffix,
+            },
+        )
+
+    ext_no_dot = actual_suffix.lstrip(".")
+    stored_filename, _saved_path = await run_in_threadpool(
+        _save_course_media_file,
+        media_dir=settings.COURSE_MEDIA_DIR,
+        course_slug=course.slug.value,
+        ext_no_dot=ext_no_dot,
+        file_bytes=file_bytes,
+    )
+    media_url = f"/media/courses/{course.slug.value}/uploads/{stored_filename}"
+    return CourseMediaUploadRead(
+        url=media_url,
+        markdown=f"![Ілюстрація]({media_url})",
+        filename=stored_filename,
+        size_bytes=len(file_bytes),
+    )
 
 
 @router.patch("/modules/{module_id}", response_model=ModuleDetailRead)
@@ -696,6 +940,11 @@ async def delete_module(
             db,
             module.practical.id,
         )
+        if (
+            module.practical.template_file_path is not None
+            and module.practical.template_file_path.strip()
+        ):
+            submission_file_paths.append(module.practical.template_file_path)
 
     course_id = module.course_id
     if "modules" in module.course.__dict__ and module in module.course.modules:
@@ -808,6 +1057,89 @@ async def create_quiz_question(
         correct_option_index=payload.correct_option_index,
     )
     db.add(question)
+    await db.commit()
+    await db.refresh(question)
+
+    return QuizQuestionTeacherRead(
+        id=question.id,
+        module_id=question.module_id,
+        question_text=question.question_text,
+        options=list(question.options),
+        correct_option_index=question.correct_option_index,
+    )
+
+
+@router.patch(
+    "/quiz/questions/{question_id}",
+    response_model=QuizQuestionTeacherRead,
+)
+async def update_quiz_question(
+    question_id: uuid.UUID,
+    payload: QuizQuestionUpdate,
+    current_user: TeacherOrAdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizQuestionTeacherRead:
+    """Оновлює текст, варіанти або правильну відповідь питання зі збереженням id та порядку."""
+    stmt = (
+        select(QuizQuestion)
+        .options(
+            selectinload(QuizQuestion.module).selectinload(Module.course),
+        )
+        .where(QuizQuestion.id == question_id)
+    )
+    result = await db.execute(stmt)
+    question = result.scalar_one_or_none()
+    if question is None:
+        raise DomainError(
+            "Тестове питання не знайдено.",
+            code="QUIZ_QUESTION_NOT_FOUND",
+            status_code=404,
+            context={"question_id": str(question_id)},
+        )
+
+    ensure_course_owner_or_admin(
+        question.module.course,
+        current_user,
+        context={"question_id": str(question_id)},
+    )
+
+    effective_options = (
+        list(payload.options)
+        if payload.options is not None
+        else [opt.strip() for opt in question.options]
+    )
+    if len(effective_options) < 2 or any(not opt for opt in effective_options):
+        raise DomainError(
+            "Необхідно вказати щонайменше 2 непорожні варіанти відповіді.",
+            code="INVALID_QUIZ_OPTIONS",
+            status_code=422,
+            context={"question_id": str(question_id)},
+        )
+
+    effective_correct_index = (
+        payload.correct_option_index
+        if payload.correct_option_index is not None
+        else question.correct_option_index
+    )
+    if effective_correct_index < 0 or effective_correct_index >= len(effective_options):
+        raise DomainError(
+            "Індекс правильної відповіді виходить за межі списку варіантів.",
+            code="INVALID_CORRECT_OPTION_INDEX",
+            status_code=422,
+            context={
+                "question_id": str(question_id),
+                "correct_option_index": effective_correct_index,
+                "options_count": len(effective_options),
+            },
+        )
+
+    if payload.question_text is not None:
+        question.question_text = payload.question_text
+    if payload.options is not None:
+        question.options = effective_options
+    if payload.correct_option_index is not None:
+        question.correct_option_index = effective_correct_index
+
     await db.commit()
     await db.refresh(question)
 
@@ -1061,6 +1393,11 @@ async def delete_practical(
         db,
         practical.id,
     )
+    if (
+        practical.template_file_path is not None
+        and practical.template_file_path.strip()
+    ):
+        submission_file_paths.append(practical.template_file_path)
 
     if "practical" in practical.module.__dict__:
         practical.module.practical = None

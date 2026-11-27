@@ -3,7 +3,14 @@ from collections.abc import Sequence
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from app.models.course import CourseSlug, PracticalFormat
 from app.schemas.grading import GradingRule
@@ -37,6 +44,50 @@ class QuizQuestionCreate(BaseModel):
     question_text: str = Field(..., min_length=1)
     options: list[str] = Field(..., min_length=2)
     correct_option_index: int = Field(..., ge=0)
+
+
+class QuizQuestionUpdate(BaseModel):
+    """Схема редагування існуючого тестового питання зі збереженням id та order_index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_text: str | None = Field(default=None, min_length=1)
+    options: list[str] | None = Field(default=None, min_length=2)
+    correct_option_index: int | None = Field(default=None, ge=0)
+
+    @field_validator("question_text", mode="after")
+    @classmethod
+    def _validate_question_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Текст тестового питання не може бути порожнім.")
+        return cleaned
+
+    @field_validator("options", mode="after")
+    @classmethod
+    def _validate_options(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [option.strip() for option in value]
+        if len(cleaned) < 2 or any(not option for option in cleaned):
+            raise ValueError(
+                "Необхідно вказати щонайменше 2 непорожні варіанти відповіді."
+            )
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_correct_option_index(self) -> "QuizQuestionUpdate":
+        if (
+            self.options is not None
+            and self.correct_option_index is not None
+            and self.correct_option_index >= len(self.options)
+        ):
+            raise ValueError(
+                "Індекс правильної відповіді виходить за межі списку варіантів."
+            )
+        return self
 
 
 class QuizQuestionRead(BaseModel):
@@ -150,6 +201,7 @@ class PracticalSummaryRead(BaseModel):
     id: uuid.UUID
     module_id: uuid.UUID
     title: str
+    instructions: str | None = None
     format_type: PracticalFormat
     max_score: float = Field(..., gt=0.0)
     auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
@@ -157,6 +209,11 @@ class PracticalSummaryRead(BaseModel):
     is_unlocked: bool = False
     best_score: float | None = None
     needs_rules_review: bool = False
+    has_template_file: bool = False
+    template_file_name: str | None = None
+    assigned_variant_number: int = Field(default=1, ge=1)
+    total_variants: int = Field(default=1, ge=1)
+    variant: PracticalVariant | None = None
     grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -188,8 +245,11 @@ class PracticalStudentRead(BaseModel):
     auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     manual_bonus_max: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     needs_rules_review: bool = False
+    has_template_file: bool = False
+    template_file_name: str | None = None
     variant_index: int = Field(..., ge=0)
     variant_number: int = Field(..., ge=1)
+    total_variants: int = Field(default=1, ge=1)
     variant: PracticalVariant
     grading_criteria: list[GradingCriterionPreviewRead] = Field(default_factory=list)
 
@@ -222,6 +282,8 @@ class PracticalTeacherRead(BaseModel):
     auto_max_score: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     manual_bonus_max: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     needs_rules_review: bool = False
+    has_template_file: bool = False
+    template_file_name: str | None = None
     variants: list[PracticalVariant] = Field(default_factory=list)
     grading_rules: list[GradingRule] = Field(default_factory=list)
 
@@ -258,6 +320,25 @@ class ModuleUpdate(BaseModel):
     order_index: int | None = Field(default=None, ge=1)
     title: str | None = Field(default=None, min_length=1, max_length=255)
     lecture_content: str | None = Field(default=None, min_length=1)
+
+
+class ModuleReorderRequest(BaseModel):
+    """Запит на перестановку порядку всіх модулів навчального курсу."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    module_ids: list[uuid.UUID]
+
+
+class CourseMediaUploadRead(BaseModel):
+    """Результат безпечного завантаження растрової ілюстрації для лекцій курсу."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    markdown: str
+    filename: str
+    size_bytes: int = Field(..., ge=1)
 
 
 class ModuleSummaryRead(BaseModel):
